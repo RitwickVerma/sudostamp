@@ -47,6 +47,23 @@ open the app, Create key, and run `tools/install.sh stage` again to pin the new 
 (`rollback` first if you want to be sure nothing stale is left). Updates between release builds
 signed with the same key keep the key, like `adb install -r` does for debug builds.
 
+## Updating dependencies
+
+Every build dependency is pinned by SHA-256 in `gradle/verification-metadata.xml`, and Gradle
+refuses anything that does not match. After bumping AGP, Kotlin, Gradle or JUnit, regenerate it
+**from an empty cache in the CI image**, or CI will fail on files your own cache already had:
+
+```sh
+podman run --rm -v "$PWD":/src:ro -v "$PWD/gradle":/out eclipse-temurin:17-jdk bash -c '
+  cp -a /src /p && cd /p && rm gradle/verification-metadata.xml &&
+  CI_PROJECT_DIR=/p ANDROID_HOME=/p/sdk bash scripts/ci-setup-sdk.sh >/dev/null &&
+  ANDROID_HOME=/p/sdk GRADLE_USER_HOME=/p/.g ./gradlew -q --write-verification-metadata sha256 \
+    testDebugUnitTest lintDebug assembleDebug assembleRelease &&
+  cp gradle/verification-metadata.xml /out/'
+```
+
+Then review the diff: every changed checksum should belong to something you meant to upgrade.
+
 ## Testing the shrunk build
 
 The release APK is minified (R8, no `-keep` rules). Unit tests never see that code, so before the

@@ -81,11 +81,30 @@ I="$W/tools/install.sh"
 # password (if any is asked for) from stdin.
 as_user_sudo() { su "$U" -c "sudo -k; printf '%s\n' \"$1\" | sudo -S -p '' true" >/dev/null 2>&1; }
 
+step "0. a hostile phone cannot pin a second key"
+# A phone that hides an extra (ed25519) key behind a newline in its key comment. pam_rssh
+# accepts any key type in the pinned file, so a pinned extra line would let its holder
+# approve this user's sudo. stage must pin exactly the one key the fingerprint names.
+EVIL_PUB="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl evil"
+echo approve > /tmp/mode-evil
+python3 "$W/tools/test/mock_agent.py" --port 7778 --pubkey-out /tmp/evil.pub --mode-file /tmp/mode-evil \
+  --comment "$(printf 'phone\n%s' "$EVIL_PUB")" > /tmp/evil.log 2>&1 &
+EVIL_PID=$!
+for _ in $(seq 1 50); do [ -s /tmp/evil.pub ] && break; sleep 0.1; done
+# The interactive path, as a person uses it: the first fingerprint shown matches the phone
+# screen, so they type yes. That is exactly where the old installer pinned both lines.
+printf 'yes\n' | bash "$W/tools/install.sh" stage --phone 127.0.0.1:7778 >/tmp/stage-evil.log 2>&1
+check "only one key is pinned, and not the smuggled one" \
+  bash -c "[ \"\$(wc -l < /etc/authorized_keys/$U.keys)\" = 1 ] && ! grep -q evil /etc/authorized_keys/$U.keys"
+kill "$EVIL_PID" 2>/dev/null
+rm -f "/etc/authorized_keys/$U.keys"
+
 step "1. stage"
 SUDOSTAMP_FINGERPRINT="SHA256:wrong" bash "$I" stage >/tmp/stage-wrong.log 2>&1
 check "a wrong fingerprint is refused and nothing is pinned" \
   bash -c "grep -q 'fingerprint mismatch' /tmp/stage-wrong.log && [ ! -f /etc/authorized_keys/$U.keys ]"
-SUDOSTAMP_FINGERPRINT="$FP" bash "$I" stage 2>&1 | tee /tmp/stage.log | grep -vE '^\s*$'
+# Arguments, the documented form (the environment form is covered by the steps below).
+bash "$I" stage --phone "127.0.0.1:$PORT" --fingerprint "$FP" 2>&1 | tee /tmp/stage.log | grep -vE '^\s*$'
 check "stage exits cleanly (no shell errors)" bash -c "! grep -qE 'unbound variable|command not found|syntax error' /tmp/stage.log"
 check "the key is pinned, root-owned" bash -c "[ \"\$(stat -c %U /etc/authorized_keys/$U.keys)\" = root ]"
 check "pam_rssh is installed" bash -c "bash '$I' status | grep -q 'pam_rssh        : /'"

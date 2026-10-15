@@ -4,6 +4,27 @@ Versions are the app's `versionName`. The host-side tooling is versioned with th
 
 ## Unreleased
 
+### Security audit (2026-10-15)
+- **Fixed: a hostile phone could pin a second key.** During `install.sh stage`, the phone's key
+  comment was written verbatim into the root-owned pinned-keys file; a newline in it added another
+  line. An impostor at the phone's address (or a man in the middle) could relay the real key as
+  line 1 and its own as line 2: the first fingerprint shown matched the phone screen, and
+  pam_rssh accepts any key type in that file. The answer is now parsed strictly and the comment
+  discarded. Demonstrated before the fix, regression-tested in `tools/test/e2e.sh` on 7 distros.
+- **Fixed: root followed user-controlled paths in the installer** (the built module, the gate
+  script, the rustup binary: copy and `chmod` through a symlink) and wrote temporary files at
+  guessable `/tmp` names. Now read as the user, written by root, in a private temp directory.
+- Python runs isolated as root (`-I`); `--phone` is validated strictly; the gate script sets its
+  own `PATH`.
+- The installer takes `--phone` / `--fingerprint` arguments and the docs use plain `sudo`:
+  `sudo -E` handed the caller's whole environment to root. The app's "Copy setup command" uses it.
+- **App:** unknown hosts that are denied or ignored are refused without prompting for 30 s
+  (approval fatigue); passive biometrics must be confirmed explicitly.
+- **Supply chain:** Gradle dependency verification pins all 314 build dependencies by SHA-256;
+  the release jobs' images are pinned by digest.
+- Documented: never reuse the PAM line in pre-authentication services (`${user}` path traversal),
+  and how the public project's self-hosted runner must be configured.
+
 ### Smaller release build
 - The release APK is shrunk with R8 and resource shrinking: 2.2 MB -> about 110 KB. There are no
   `-keep` rules by design (no reflection or libraries; everything reached from outside is in the

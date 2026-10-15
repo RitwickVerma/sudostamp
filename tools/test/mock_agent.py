@@ -53,6 +53,9 @@ def main():
     ap.add_argument("--port", type=int, default=7777)
     ap.add_argument("--pubkey-out", required=True)
     ap.add_argument("--mode-file", required=True)
+    # The key comment to send. Tests use a hostile one (with a newline and a second key) to
+    # prove the installer never writes the phone's comment into the pinned-keys file.
+    ap.add_argument("--comment", default="sudostamp-mock")
     a = ap.parse_args()
     if a.host not in ("127.0.0.1", "::1", "localhost"):
         sys.exit("mock_agent binds loopback only")
@@ -78,7 +81,7 @@ def main():
                 n = struct.unpack(">I", recv_exactly(c, 4))[0]
                 body = recv_exactly(c, n)
                 if body[0] == REQUEST_IDENTITIES:
-                    out = bytes([IDENTITIES_ANSWER]) + struct.pack(">I", 1) + s(blob) + s(b"sudostamp-mock")
+                    out = bytes([IDENTITIES_ANSWER]) + struct.pack(">I", 1) + s(blob) + s(a.comment.encode())
                 elif body[0] == SIGN_REQUEST:
                     o = 1
                     kl = struct.unpack(">I", body[o:o + 4])[0]; o += 4

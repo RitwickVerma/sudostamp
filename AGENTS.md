@@ -20,7 +20,7 @@ tools/verify.sh                                           # four gates; needs JA
 - If `~/.gradle/gradle.properties` sets a stale `org.gradle.java.home`, pass
   `-Dorg.gradle.java.home=$JAVA_HOME` (verify.sh does).
 - Host side: `tools/install.sh {stage|test|apply|rollback|status}`, configured by
-  `SUDOSTAMP_PHONE=<ip>:7777`, run with `sudo -E`. **Never run `apply` or `rollback` unless asked**:
+  `--phone <ip>:7777` (or `SUDOSTAMP_PHONE`), run with plain `sudo`, never `sudo -E`. **Never run `apply` or `rollback` unless asked**:
   they replace `/etc/pam.d/sudo`. `stage` and `test` leave it alone.
 
 ## Test
@@ -144,5 +144,11 @@ a snapshot first if you need to keep working. Runtime state outside the repo: th
     `proguard-rules.pro`, the manifest or anything loaded by name, re-test the shrunk, signed
     build on a device: approval, Deny from the notification, restart on update
     (`docs/RELEASING.md`).
-18. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
+18. Dependency verification (`gradle/verification-metadata.xml`) must be regenerated after any
+    dependency or AGP/Kotlin bump, FROM AN EMPTY CACHE in the CI image, or CI fails on artifacts
+    your local cache already had (parent POMs, `.module` files). See docs/RELEASING.md.
+19. The installer must never let root open, copy or chmod a path inside a user-owned directory:
+    read it with `sudo -u "$TARGET_USER" cat`, write the result as root. Root temp files go in
+    `root_tmp`. Python as root is `python3 -I`.
+20. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
     key no longer matches.

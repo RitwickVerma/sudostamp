@@ -76,6 +76,14 @@ class AgentService : Service() {
          */
         @Volatile private var current: Approval? = null
 
+        /** Unknown hosts that were denied or ignored are refused unprompted for a while:
+         *  see [Cooldown]. Process-wide, like the listener. */
+        private val cooldown = Cooldown(COOLDOWN_MS)
+
+        /** Long enough to stop a prompt every few seconds, short enough that a real first
+         *  setup that timed out can simply be retried. */
+        private const val COOLDOWN_MS = 30_000L
+
         /** True while the server socket is bound and accepting. The setup screen shows
          *  THIS, not "a key exists", so a dead listener can never read as healthy. */
         @Volatile var listening = false
@@ -284,7 +292,9 @@ class AgentService : Service() {
                 val data = r.blob()             // what to sign
                 r.int32()                       // flags
 
+                val known = KnownHosts.isKnown(this, client)
                 val refusal = AgentProtocol.refusal(keyBlob, data, SshSig.keyBlob(Keys.publicKey()))
+                    ?: if (cooldown.active(client, known)) "cooling down after an unapproved request" else null
                 if (refusal != null) {
                     Log.w(TAG, "$refusal (from $client)")
                     AgentProtocol.writeFrame(out, AgentProtocol.failure())
@@ -322,6 +332,7 @@ class AgentService : Service() {
                 }
                 val waited = SystemClock.elapsedRealtimeNanos() - waitStart
                 if (der == null) {
+                    cooldown.unapproved(client, known)
                     // Timeout, cancel, or any failure: deny. Never guess.
                     Log.w(TAG, "denied")
                     AgentProtocol.writeFrame(out, AgentProtocol.failure())

@@ -16,6 +16,10 @@
 # sshd-session: OpenSSH 9.8+ runs each connection as `sshd-session`, not `sshd`.
 # The walk would still reach the `sshd` listener above it, but matching the
 # session process itself does not depend on that ancestry surviving.
+# Runs as root from pam_exec. Fix PATH rather than trust whatever the PAM environment
+# carries: cat and awk must be the system's.
+PATH=/usr/bin:/bin
+export PATH
 p=$PPID
 while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
   comm=$(cat "/proc/$p/comm" 2>/dev/null) || exit 0

@@ -121,10 +121,10 @@ stage` line below, pre-filled with both. The listener restarts by itself after a
 Paste the phone's **Copy setup command** into a terminal in a checkout of this repo, or type it:
 
 ```sh
-export SUDOSTAMP_PHONE=192.168.1.50:7777          # the phone address from the setup screen
-sudo -E tools/install.sh stage     # check the key's fingerprint, install pam_rssh, pin the key
-sudo -E tools/install.sh test      # approve once on a scratch PAM service; sudo untouched
-sudo -E tools/install.sh apply     # add the SudoStamp block to sudo's PAM stack
+P=192.168.1.50:7777                        # the phone address from the setup screen
+sudo tools/install.sh stage --phone $P     # check the key's fingerprint, install pam_rssh, pin the key
+sudo tools/install.sh test  --phone $P     # approve once on a scratch PAM service; sudo untouched
+sudo tools/install.sh apply --phone $P     # add the SudoStamp block to sudo's PAM stack
 ```
 
 - **`stage`** fetches the phone's key and pins it **only after its fingerprint matches the phone
@@ -161,7 +161,12 @@ auth  sufficient  pam_rssh.so ssh_agent_addr=192.168.1.50:7777 auth_key_file=/et
 ```
 
 Set `ssh_agent_addr` explicitly (unset, pam_rssh falls back to `$SSH_AUTH_SOCK`, which the user
-controls), and never put a space inside an argument (PAM splits on whitespace). The header of
+controls), and never put a space inside an argument (PAM splits on whitespace).
+
+**Only put this line in `sudo` (or another service whose user is already logged in), never in
+`sshd`, `login` or a display manager.** There the user name is whatever the person at the prompt
+typed, before any authentication, and `${user}` goes straight into a file path: a name like
+`../../home/mallory/x` would point pam_rssh at a key file they wrote. The header of
 `tools/install.sh` explains each argument.
 
 ## Day to day

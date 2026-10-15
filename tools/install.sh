@@ -2,17 +2,18 @@
 # Install SudoStamp's host side: pam_rssh, the pinned phone key, and a marked block in
 # sudo's PAM stack that asks the phone first and falls through to the password.
 #
-#   export SUDOSTAMP_PHONE=192.168.1.50:7777          # the phone, from its setup screen
-#   sudo -E tools/install.sh stage                    # pam_rssh + pinned key. No PAM change.
-#   sudo -E tools/install.sh test                     # prove it on a scratch PAM service
-#   sudo -E tools/install.sh apply                    # add the block to sudo's PAM file
-#   sudo -E tools/install.sh rollback                 # take the block out again
-#   sudo -E tools/install.sh status                   # what is in place
+#   P=192.168.1.50:7777                                  # the phone, from its setup screen
+#   sudo tools/install.sh stage --phone $P   # check the fingerprint, pam_rssh, pinned key
+#   sudo tools/install.sh test  --phone $P   # prove it on a scratch PAM service
+#   sudo tools/install.sh apply --phone $P   # add the block to sudo's PAM file
+#   sudo tools/install.sh rollback           # take the block out again
+#   tools/install.sh status                  # what is in place
 #
-# Optional: SUDOSTAMP_FINGERPRINT=SHA256:... skips the interactive fingerprint check (the
-# app's "Copy setup command" fills it in); SUDOSTAMP_USER=<user> when not run via sudo;
-# SUDOSTAMP_ALLOW_RUSTUP=1 pre-approves a throwaway Rust toolchain when the distribution's
-# is too old to build pam_rssh (see build_pam_rssh).
+# Options: --fingerprint SHA256:... skips the interactive fingerprint check (the app's "Copy
+# setup command" fills it in); --allow-rustup pre-approves a throwaway Rust toolchain when
+# the distribution's is too old to build pam_rssh (see build_pam_rssh). The same settings
+# are read from SUDOSTAMP_PHONE / SUDOSTAMP_FINGERPRINT / SUDOSTAMP_ALLOW_RUSTUP, and
+# SUDOSTAMP_USER=<user> names the user when not run via sudo.
 #
 # PLATFORMS. Linux: Arch, Debian/Ubuntu, Fedora/RHEL, openSUSE and their derivatives,
 # found through /etc/os-release. Each is exercised end to end in CI by tools/test/e2e.sh.
@@ -81,6 +82,19 @@ ok()   { printf '  \033[32mOK\033[0m   %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33mWARN\033[0m %s\n' "$*"; }
 die()  { bad "$*"; exit 1; }
+
+# Temporary files root writes live in ONE private directory (0700, root), created with an
+# explicit template so a caller's TMPDIR cannot steer it into a user-writable parent. Names
+# derived from a mktemp file in /tmp ("$f.src") are guessable from a directory anyone can
+# list, and a pre-planted symlink at such a name would be written through as root.
+ROOT_TMP=""
+BUILD_DIR=""
+cleanup() { rm -rf "${BUILD_DIR:-}" "${ROOT_TMP:-}"; }
+trap cleanup EXIT
+root_tmp() {
+  [ -n "$ROOT_TMP" ] || ROOT_TMP="$(mktemp -d /tmp/sudostamp.XXXXXXXX)" || die "mktemp failed"
+  echo "$ROOT_TMP"
+}
 
 # ------------------------------------------------------------------ platform
 
@@ -163,17 +177,23 @@ module_ref() {
 }
 
 need_root() {
-  [ "$(id -u)" -eq 0 ] || { echo "This needs root. Run: sudo -E $0 $1" >&2; exit 1; }
+  [ "$(id -u)" -eq 0 ] || { echo "This needs root. Run: sudo $0 $1 --phone <phone-ip>:7777" >&2; exit 1; }
 }
 need_platform() {
   [ -n "$FAMILY" ] || die "unsupported platform ($OS, /etc/os-release: ${ids:-none}). See README.md for the lines to add by hand."
 }
+# host:port, strictly: this string is written into a PAM configuration line. An IPv4
+# address or a DNS name, and a port 1-65535; nothing else gets through.
 need_phone() {
-  case "$PHONE_ADDR" in
-    ""|*[[:space:]]*|*:*:*|*:) echo "Set SUDOSTAMP_PHONE=<phone-ip>:7777 and run with sudo -E" >&2; exit 2 ;;
-    *:*) ;;
-    *) echo "SUDOSTAMP_PHONE must be host:port, e.g. 192.168.1.50:7777" >&2; exit 2 ;;
-  esac
+  local host="${PHONE_ADDR%:*}" port="${PHONE_ADDR##*:}"
+  if [ -z "$PHONE_ADDR" ]; then
+    echo "Which phone? Pass --phone <phone-ip>:7777 (the address on the app's setup screen)" >&2; exit 2
+  fi
+  if ! printf '%s' "$host" | grep -qxE '[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?' ||
+     ! printf '%s' "$port" | grep -qxE '[1-9][0-9]{0,4}' || [ "$port" -gt 65535 ] ||
+     [ "$host:$port" != "$PHONE_ADDR" ]; then
+    echo "--phone must be host:port, e.g. 192.168.1.50:7777 (got: $PHONE_ADDR)" >&2; exit 2
+  fi
 }
 need_user() {
   if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = root ] || ! id "$TARGET_USER" >/dev/null 2>&1; then
@@ -300,15 +320,18 @@ rustup_cargo() {
   sudo -u "$TARGET_USER" mkdir -p "$dir"
   sudo -u "$TARGET_USER" curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/rustup-init" "$url" || return 1
   sum="$(curl -fsSL --proto '=https' --tlsv1.2 "$url.sha256" | awk '{print $1}')"
-  [ -n "$sum" ] && [ "$(sha256_of "$dir/rustup-init")" = "$sum" ] || { bad "rustup-init checksum mismatch" >&2; return 1; }
-  chmod 0755 "$dir/rustup-init"
+  # Read and chmod AS THE USER: the directory is theirs, and root following a symlink they
+  # planted there (chmod -> /etc/shadow) would be a privilege escalation.
+  [ -n "$sum" ] && [ "$(sudo -u "$TARGET_USER" cat "$dir/rustup-init" | sha256_stdin)" = "$sum" ] || \
+    { bad "rustup-init checksum mismatch" >&2; return 1; }
+  sudo -u "$TARGET_USER" chmod 0755 "$dir/rustup-init"
   sudo -u "$TARGET_USER" env RUSTUP_HOME="$dir/rustup" CARGO_HOME="$dir/cargo" \
     "$dir/rustup-init" -y -q --no-modify-path --profile minimal --default-toolchain stable >/dev/null 2>&1 || return 1
   echo "$dir/cargo/bin/cargo"
 }
-sha256_of() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
-  else shasum -a 256 "$1" | awk '{print $1}'; fi
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+  else shasum -a 256 | awk '{print $1}'; fi
 }
 
 # Build the pinned commit as the invoking user (never compile as root), then install the
@@ -321,7 +344,7 @@ build_pam_rssh() {
   BUILD_DIR="$(sudo -u "$TARGET_USER" mktemp -d)"
   local work="$BUILD_DIR"
   # EXIT, not RETURN: die() exits, and the checkout (and any rustup) must not outlive it.
-  trap 'rm -rf "${BUILD_DIR:-}"' EXIT
+  trap cleanup EXIT
   cargo="$(find_cargo)" || { newer_cargo >/dev/null 2>&1; cargo="$(find_cargo)"; } || \
     cargo="$(rustup_cargo "$work")" || \
     die "no Rust >= 1.$CARGO_MIN_MINOR. Install a current toolchain (https://rustup.rs) and re-run."
@@ -354,8 +377,16 @@ build_pam_rssh() {
   esac
   local built="$work/pam_rssh/target/release/libpam_rssh.so"
   [ -f "$built" ] || built="$work/pam_rssh/target/release/libpam_rssh.dylib"
-  cp "$built" "$dest.sudostamp-new" && own_root "$dest.sudostamp-new" && mv -f "$dest.sudostamp-new" "$dest" || \
-    die "could not install $dest"
+  # Copied out BY THE USER (root never opens a path inside their directory: a symlink there
+  # to /etc/shadow would otherwise be published world-readable), then checked to really be a
+  # shared library before it goes anywhere PAM will load it.
+  # shellcheck disable=SC2024  # intended: read as the user, write (the redirect) as root
+  sudo -u "$TARGET_USER" cat "$built" > "$dest.sudostamp-new" || die "could not read the built module"
+  case "$(head -c 4 "$dest.sudostamp-new" | od -An -tx1 | tr -d ' \n')" in
+    7f454c46|cffaedfe|cefaedfe) ;;          # ELF, Mach-O 64/32
+    *) rm -f "$dest.sudostamp-new"; die "the built module is not a shared library" ;;
+  esac
+  own_root "$dest.sudostamp-new" && mv -f "$dest.sudostamp-new" "$dest" || die "could not install $dest"
   # SELinux (Fedora/RHEL): a file copied from a build dir keeps the wrong label, and PAM
   # then fails to load it with a misleading "cannot open shared object".
   command -v restorecon >/dev/null 2>&1 && restorecon "$dest"
@@ -387,8 +418,10 @@ install_pam_rssh() {
 # The local-vs-remote gate, only where a local sensor can exist (Linux with pam_fprintd).
 install_gate() {
   mkdir -p "$(dirname "$GATE")"
-  cp "$HERE/sudostamp-is-local.sh" "$GATE.sudostamp-new" && chown 0:0 "$GATE.sudostamp-new" && \
-    chmod 0755 "$GATE.sudostamp-new" && mv -f "$GATE.sudostamp-new" "$GATE"
+  # Read as the user, for the same reason as the module: never follow their symlinks as root.
+  # shellcheck disable=SC2024  # intended: read as the user, write (the redirect) as root
+  sudo -u "$TARGET_USER" cat "$HERE/sudostamp-is-local.sh" > "$GATE.sudostamp-new" && \
+    chown 0:0 "$GATE.sudostamp-new" && chmod 0755 "$GATE.sudostamp-new" && mv -f "$GATE.sudostamp-new" "$GATE"
 }
 has_fprintd() {
   [ "$OS" = Linux ] || return 1
@@ -481,10 +514,14 @@ vendor_pam_file() {
 # fingerprint is checked against the one the app shows before anything is written --
 # SUDOSTAMP_FINGERPRINT for scripted installs, otherwise by eye.
 fetch_key() {
-  python3 - "$PHONE_ADDR" <<'PY'
+  # -I: isolated mode. This runs as root, and plain `python3 -` puts the CURRENT directory
+  # first on the import path, so a stray socket.py wherever the user happened to be would
+  # run as root.
+  python3 -I - "$PHONE_ADDR" <<'PY'
 import base64, socket, struct, sys
 host, port = sys.argv[1].rsplit(":", 1)
 s = socket.create_connection((host, int(port)), timeout=10)
+s.settimeout(10)
 s.sendall(struct.pack(">I", 1) + bytes([11]))      # REQUEST_IDENTITIES
 def rx(n):
     b = b""
@@ -495,18 +532,33 @@ def rx(n):
         b += c
     return b
 ln = struct.unpack(">I", rx(4))[0]
+if not 5 <= ln <= 65536:                           # a real answer is ~130 bytes
+    raise SystemExit("implausible answer length %d" % ln)
 body = rx(ln)
 if body[0] != 12:
     raise SystemExit("unexpected reply type %d" % body[0])
 n = struct.unpack(">I", body[1:5])[0]
 if n != 1:
     raise SystemExit("expected exactly 1 key, got %d" % n)
-o = 5
-klen = struct.unpack(">I", body[o:o+4])[0]; o += 4
-blob = body[o:o+klen]; o += klen
-clen = struct.unpack(">I", body[o:o+4])[0]; o += 4
-comment = body[o:o+clen].decode()
-print("ecdsa-sha2-nistp256 %s %s" % (base64.b64encode(blob).decode(), comment))
+
+def string(buf, o):
+    if o + 4 > len(buf):
+        raise SystemExit("truncated answer")
+    l = struct.unpack(">I", buf[o:o+4])[0]
+    if o + 4 + l > len(buf):
+        raise SystemExit("truncated answer")
+    return buf[o+4:o+4+l], o + 4 + l
+
+blob, _ = string(body, 5)
+# The key must be exactly what the app makes: an uncompressed P-256 point, nothing more.
+t, o = string(blob, 0)
+c, o = string(blob, o)
+q, o = string(blob, o)
+if (t, c) != (b"ecdsa-sha2-nistp256", b"nistp256") or len(q) != 65 or q[0] != 4 or o != len(blob):
+    raise SystemExit("not a SudoStamp key (expected one ecdsa-sha2-nistp256 public key)")
+# The phone's comment is ignored, deliberately: it is attacker-controlled text that would go
+# verbatim into a root-owned key file, and a newline in it pins a SECOND key.
+print("ecdsa-sha2-nistp256 %s sudostamp" % base64.b64encode(blob).decode())
 PY
 }
 
@@ -520,6 +572,10 @@ cmd_stage() {
   # The key first: a wrong phone or an impostor is refused before minutes of building.
   local key fp answer
   key="$(fetch_key)" || die "could not fetch the public key from $PHONE_ADDR -- is the app open and Ready?"
+  # Exactly one line of exactly this shape, whatever fetch_key's parser thinks: this is the
+  # content of a root-owned file that decides who may approve sudo.
+  printf '%s\n' "$key" | grep -qxE 'ecdsa-sha2-nistp256 [A-Za-z0-9+/]+=* sudostamp' && \
+    [ "$(printf '%s\n' "$key" | wc -l | tr -d ' ')" = 1 ] || die "the phone's answer is not a single SudoStamp key"
   fp="$(printf '%s\n' "$key" | ssh-keygen -lf - | awk '{print $2}')" || die "the phone's answer is not a valid public key"
   say "     key at $PHONE_ADDR: $fp"
   if [ -n "${SUDOSTAMP_FINGERPRINT:-}" ]; then
@@ -542,7 +598,7 @@ cmd_stage() {
   printf '%s\n' "$key" | write_atomic "$KEYFILE"
   ok "pinned key written to $KEYFILE"
   say
-  say "Next: sudo -E $0 test"
+  say "Next: sudo $0 test --phone $PHONE_ADDR"
 }
 
 # ----------------------------------------------------------------------- test
@@ -559,10 +615,10 @@ cmd_test() {
   sed 's/^/     /' "$PAM_TEST"
   say
   say "Approve on the phone now (a local reader, if any, is asked first):"
-  if python3 "$HERE/pam_check.py" "$(basename "$PAM_TEST")" "$TARGET_USER"; then
+  if python3 -I "$HERE/pam_check.py" "$(basename "$PAM_TEST")" "$TARGET_USER"; then
     ok "the phone approved through PAM"
     say
-    say "Next: sudo -E $0 apply   (keep a root shell open while you do)"
+    say "Next: sudo $0 apply --phone $PHONE_ADDR   (keep a root shell open while you do)"
   else
     bad "authentication did not succeed -- see the result above. sudo is untouched."
     exit 1
@@ -602,16 +658,15 @@ cmd_apply() {
     cp -p "$target" "$bak" && ok "backed up $bak"
   fi
 
-  local new; new="$(mktemp)"
+  local new; new="$(root_tmp)/new"
   if [ "$src" = /dev/null ]; then
     { echo "# sudo_local: local additions to sudo's PAM stack (macOS keeps this across updates)"; block; } > "$new"
   else
     { [ -n "$vendor" ] && { head -1 "$vendor"; echo "$VENDOR_MARK"; }
       if [ -n "$vendor" ]; then tail -n +2 "$vendor"; else cat "$src"; fi; } > "$new.src"
     with_block "$new.src" > "$new" || { rm -f "$new" "$new.src"; die "no auth rule found in $src -- not guessing where the block goes"; }
-    rm -f "$new.src"
   fi
-  write_atomic "$target" < "$new"; rm -f "$new"
+  write_atomic "$target" < "$new"
   ok "wrote $target"
   sed 's/^/     /' "$target"
   warn_targetpw
@@ -619,7 +674,7 @@ cmd_apply() {
   say
   say "The password path below the block is untouched: if the phone misbehaves, the password still works."
   say "Check in a SECOND terminal, keeping this one open:   sudo -k && sudo true"
-  say "Undo:   sudo -E $0 rollback"
+  say "Undo:   sudo $0 rollback"
 }
 
 # ------------------------------------------------------------------- rollback
@@ -678,7 +733,24 @@ cmd_status() {
   [ -f "$target" ] && { say "--- $target ---"; sed 's/^/  /' "$target"; }
 }
 
-case "${1:-status}" in
+# Arguments. Preferred over the environment: passing settings via `sudo -E` hands the
+# caller's ENTIRE environment to a root process (APT_CONFIG, for one, survives sudo's
+# filter), and a sudoers env_reset policy may drop them anyway. The SUDOSTAMP_* variables
+# still work, for scripts and CI.
+CMD="${1:-status}"
+[ $# -gt 0 ] && shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --phone)        PHONE_ADDR="${2:-}"; shift 2 ;;
+    --phone=*)      PHONE_ADDR="${1#*=}"; shift ;;
+    --fingerprint)  SUDOSTAMP_FINGERPRINT="${2:-}"; shift 2 ;;
+    --fingerprint=*) SUDOSTAMP_FINGERPRINT="${1#*=}"; shift ;;
+    --allow-rustup) SUDOSTAMP_ALLOW_RUSTUP=1; shift ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+case "$CMD" in
   stage)    cmd_stage ;;
   test)     cmd_test ;;
   apply)    cmd_apply ;;

@@ -39,7 +39,10 @@ the secure hardware.
 | LAN attacker obtains a signature (user approved their request) | It is over their own 32 bytes. pam_rssh issues a fresh random challenge per attempt, so it cannot be replayed into a sudo; and since only 32-byte payloads are ever signed, it cannot be an SSH login or `SSHSIG` signature either. |
 | Eavesdropper on the LAN | Sees the public key, a random challenge and its signature. None of it is reusable. There is deliberately no TLS: the signature is the security, not the channel. |
 | MITM / ARP spoof between host and phone | Can relay or drop, cannot forge. Dropping means the password prompt. |
-| Impostor answering at the phone's address while you run `install.sh stage` | Stopped by you: `stage` pins only after you confirm the fingerprint matches the phone screen (or `SUDOSTAMP_FINGERPRINT` matches). **Do not skip that comparison.** |
+| Impostor answering at the phone's address while you run `install.sh stage` | Stopped by you: `stage` pins only after you confirm the fingerprint matches the phone screen (or `--fingerprint` matches). **Do not skip that comparison.** |
+| Impostor smuggles a second key into the pinned file (a newline in the key comment) | **Fixed in the 2026-10-15 audit.** The phone's answer is parsed strictly (one P-256 key, nothing else), its comment is discarded, and exactly one line is written. Covered by the end-to-end test. |
+| Someone spams approval requests, hoping for a tired tap ("MFA fatigue"), e.g. on café Wi-Fi | A host that has never been approved is refused **without asking** for 30 s after each denial or timeout. Your own (known) hosts are never silenced. |
+| Class 3 face unlock approves at a glance | No: the prompt requires explicit confirmation for passive biometrics. |
 | Internet host reaches the phone (e.g. a carrier giving mobile data a public IP) | Refused before a byte is read: only RFC 1918, link-local and loopback peers are served. Carrier NAT (100.64/10) is refused too. |
 | Overlay app draws over the approval screen | Hidden on Android 12+ (`setHideOverlayWindows`). The biometric prompt itself is system UI. |
 | Another app adopts the approval screen into its task ("StrandHogg") | `taskAffinity=""` on the activity. |
@@ -47,6 +50,10 @@ the secure hardware.
 
 ## Residual risks — accept these knowingly
 
+- **Do not reuse the PAM line outside `sudo`.** pam_rssh substitutes `${user}` (the raw PAM user
+  name) into the key file path. In `sudo` that name is the already-logged-in caller. In `sshd`,
+  `login` or a display manager it is whatever was typed at the prompt *before* authentication, so
+  a name like `../../home/mallory/x` would make pam_rssh read a key file the attacker wrote.
 - **Approval confusion is the real attack.** Anyone on the LAN can make the phone ask, and can time
   the request to land when you expect your own. Mitigations: the requesting host is shown in the
   notification and on screen; a host never approved before is flagged; Deny is one tap from the
@@ -82,6 +89,31 @@ python3 tools/check-secrets.py --all        # whole tree (CI runs this)
 Debug builds are signed with the developer's local `~/.android/debug.keystore`, which never enters
 the tree.
 
+## The host installer runs as root
+
+`tools/install.sh` is run with `sudo` and takes several precautions because it touches files a
+regular user controls:
+
+- **Root never follows a path inside a user-owned directory.** The pam_rssh build happens as the
+  invoking user; the finished module, the gate script and the rustup binary are read, checked and
+  `chmod`ed *as that user*, then written by root. A symlink planted in the build directory (to
+  `/etc/shadow`, say) therefore fails with "permission denied" instead of being copied or
+  `chmod`ed by root. The module must also be a real shared library (ELF or Mach-O) before it is
+  installed.
+- **Temporary files** live in one private, root-only directory created from an explicit `/tmp`
+  template, never at names derivable from a world-listable directory, and never under a
+  caller-supplied `TMPDIR`.
+- **Python runs isolated** (`python3 -I`), so a module file in the current directory cannot be
+  imported into a root process.
+- **`--phone` is validated strictly** (a hostname or IPv4 address and a port), because it is
+  written into a PAM configuration line.
+- **Settings are arguments, not `sudo -E`.** `sudo -E` hands the caller's whole environment to root
+  (`APT_CONFIG` survives sudo's filter, for example); the documented commands use plain `sudo`.
+- The local-vs-remote gate script that `pam_exec` runs as root sets its own `PATH`.
+
+What is inherent and stays true: you run code from your checkout as root. Read `tools/install.sh`
+first, as with any installer, and keep the checkout somewhere only you can write.
+
 ## Supply chain
 
 - The app has no third-party runtime dependencies (`dependencies {}` holds only JUnit, test-only).
@@ -95,8 +127,24 @@ the tree.
 - If the distribution's Rust is too old, it can fetch the official `rustup-init` over HTTPS,
   check it against the SHA-256 rust-lang publishes, and use it in the build directory only; it is
   deleted with the build. It asks first (or needs `SUDOSTAMP_ALLOW_RUSTUP=1`).
+- **Gradle dependency verification** (`gradle/verification-metadata.xml`): every plugin and library
+  the build downloads (314 components: the Android Gradle Plugin, the Kotlin compiler, lint, JUnit
+  and their dependencies) is pinned by SHA-256, and Gradle refuses a mismatch. Tested by corrupting
+  one checksum. The file was generated from an empty cache inside the CI image, so it covers
+  exactly what CI downloads.
+- The two CI jobs that touch a release (`build-release`, which holds the signing key, and
+  `publish-release`) use images pinned by digest, not floating tags.
 - `tools/test/mock_agent.py` signs with a software key and exists only for automated tests: it
   binds loopback only and its key is generated per run. It must never stand in for the phone.
+
+## CI runner
+
+This public project's pipelines run on a self-hosted runner. GitLab runs pipelines for merge
+requests from forks in the fork's own project by default, so outside contributors cannot reach
+it unless a maintainer explicitly starts a fork's pipeline in this project. Keep it that way, and
+on the runner keep `privileged = false` and no Docker socket in job containers: a job that could
+escape its container would be inside the owner's network. Job logs are public; they name the
+runner but contain no addresses or credentials (checked).
 
 ## Supported versions
 

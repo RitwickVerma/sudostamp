@@ -543,7 +543,7 @@ class MainActivity : Activity() {
      * screen is the trusted channel, not the network the key is fetched over.
      */
     private fun setupCommand(address: String, fp: String) =
-        "SUDOSTAMP_PHONE=$address SUDOSTAMP_FINGERPRINT=$fp sudo -E tools/install.sh stage"
+        "sudo tools/install.sh stage --phone $address --fingerprint $fp"
 
     // ---------------------------------------------------------------- approval
 
@@ -794,6 +794,9 @@ class MainActivity : Activity() {
                 .setTitle(getString(R.string.prompt_title))
                 .setSubtitle(getString(R.string.prompt_subtitle, p.client))
                 .setDescription(getString(R.string.prompt_description))
+                // Stated, not left to the default: with a passive biometric (Class 3 face
+                // unlock) a mere glance at the screen must never approve a sudo.
+                .setConfirmationRequired(true)
                 .setNegativeButton(getString(R.string.deny), mainExecutor) { _, _ ->
                     val first = p.deny()               // => SSH_AGENT_FAILURE
                     if (current()) {
