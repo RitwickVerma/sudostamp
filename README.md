@@ -155,7 +155,13 @@ What `setup` does, step by step:
 
 `sudo bash sudostamp-setup.sh rollback` (or `sudo sudostamp rollback`) takes the block out again;
 `status` shows what is in place. From a checkout of the repository, `sudo tools/install.sh setup`
-does the same. If discovery cannot find the phone (some networks block it), `setup` asks for the address
+does the same. The phone's address goes into sudo's config as a literal (pam_rssh takes an address, not a name),
+so it should not change when the router renews a lease. If your router hands out IPv6 prefixes
+of its own (most do), `setup` uses the phone's stable `fd…` address; otherwise it uses IPv4, and a
+DHCP reservation for the phone keeps that fixed. If sudo ever falls back to the password because
+the address moved, re-run `setup`.
+
+If discovery cannot find the phone (some networks block it), `setup` asks for the address
 the phone shows, or pass it: `setup --phone 192.168.1.50:7777`.
 
 If the computer has its own fingerprint reader (`pam_fprintd`), the block also tries it first when

@@ -18,6 +18,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import ipaddress
 import os
 import re
 import socket
@@ -73,10 +74,16 @@ def valid_key(blob):
     return (t, c) == (b"ecdsa-sha2-nistp256", b"nistp256") and len(q) == 65 and q[0] == 4 and o == len(blob)
 
 
+def split_addr(addr):
+    """'1.2.3.4:7777' or '[fd00::1]:7777' -> (host, port)."""
+    host, port = addr.rsplit(":", 1)
+    return host.strip("[]"), int(port)
+
+
 class Agent:
     def __init__(self, addr):
-        host, port = addr.rsplit(":", 1)
-        self.sock = socket.create_connection((host, int(port)), timeout=10)
+        host, port = split_addr(addr)
+        self.sock = socket.create_connection((host, port), timeout=10)
         self.sock.settimeout(10)
 
     def rx(self, n):
@@ -207,7 +214,29 @@ def read_name(msg, o, depth=0):
         o += 1 + n
 
 
-def parse(msg, ptrs, srvs, addrs):
+def stable_address(v4, v6, port):
+    """Which address to keep for the phone: "host:port" ("[fd..]:7777" for IPv6).
+
+    The same rule as Net.stableHostPort in the app: a unique-local IPv6 address whose 64-bit
+    interface identifier equals the link-local address's is the phone's stable one (built from
+    its Wi-Fi hardware address; Android's temporary addresses are random). It survives the
+    router handing out a new IPv4 lease, which sudo's config cannot follow: pam_rssh takes a
+    literal address. Otherwise the IPv4 address."""
+    try:
+        addrs = [ipaddress.IPv6Address(a) for a in v6]
+    except ValueError:
+        addrs = []
+    ll = next((a for a in addrs if a.is_link_local), None)
+    if ll:
+        iid = ll.packed[8:]
+        ula = ipaddress.ip_network("fc00::/7")
+        for a in addrs:
+            if a in ula and a.packed[8:] == iid:
+                return "[%s]:%d" % (a, port)
+    return "%s:%d" % (v4, port)
+
+
+def parse(msg, ptrs, srvs, addrs, addrs6=None):
     qd, an, ns, ar = struct.unpack(">HHHH", msg[4:12])
     o = 12
     for _ in range(qd):
@@ -228,6 +257,8 @@ def parse(msg, ptrs, srvs, addrs):
             srvs[name] = (host, port)
         elif rtype == 1 and rdlen == 4:                   # A
             addrs.setdefault(name.lower(), socket.inet_ntoa(rd))
+        elif rtype == 28 and rdlen == 16 and addrs6 is not None:   # AAAA
+            addrs6.setdefault(name.lower(), set()).add(socket.inet_ntop(socket.AF_INET6, rd))
         o += rdlen
 
 
@@ -243,14 +274,18 @@ def via_avahi(timeout):
                              text=True, timeout=timeout + 2).stdout
     except (subprocess.TimeoutExpired, OSError):
         return []
-    found = []
+    v4, v6 = {}, {}
     for line in out.splitlines():
-        # =;iface;proto;name;type;domain;host;address;port;txt  (IPv4 only)
+        # =;iface;proto;name;type;domain;host;address;port;txt
         f = line.split(";")
-        if len(f) >= 9 and f[0] == "=" and f[2] == "IPv4":
-            name = re.sub(r"\\(\d{3})", lambda m: chr(int(m.group(1))), f[3])
-            found.append(("%s:%s" % (f[7], f[8]), name))
-    return found
+        if len(f) < 9 or f[0] != "=":
+            continue
+        name = re.sub(r"\\(\d{3})", lambda m: chr(int(m.group(1))), f[3])
+        if f[2] == "IPv4":
+            v4[name] = (f[7], int(f[8]))
+        elif f[2] == "IPv6":
+            v6.setdefault(name, set()).add(f[7].split("%")[0])
+    return [(stable_address(a, v6.get(n, ()), port), n) for n, (a, port) in v4.items()]
 
 
 def mdns_socket():
@@ -266,14 +301,15 @@ def mdns_socket():
     return sock
 
 
-def resolved(ptrs, srvs, addrs):
+def resolved(ptrs, srvs, addrs, addrs6):
     found = []
     for inst in sorted(ptrs):
         if inst in srvs:
             host, port = srvs[inst]
             ip = addrs.get(host.lower())
             if ip:
-                found.append(("%s:%d" % (ip, port), inst[:-len(SERVICE)].rstrip(".").replace("\\032", " ")))
+                found.append((stable_address(ip, addrs6.get(host.lower(), ()), port),
+                              inst[:-len(SERVICE)].rstrip(".").replace("\\032", " ")))
     return found
 
 
@@ -286,7 +322,7 @@ def via_mdns(timeout, on_tick=None):
     q = qname(SERVICE)
     queries = [struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + q + struct.pack(">HH", 12, cls)
                for cls in (1, 0x8001)]                       # QM, then QU
-    ptrs, srvs, addrs = set(), {}, {}
+    ptrs, srvs, addrs, addrs6 = set(), {}, {}, {}
     end = time.time() + timeout
     next_query, n = 0.0, 0
     try:
@@ -304,10 +340,10 @@ def via_mdns(timeout, on_tick=None):
             except socket.timeout:
                 continue
             try:
-                parse(msg, ptrs, srvs, addrs)
+                parse(msg, ptrs, srvs, addrs, addrs6)
             except (ValueError, struct.error, IndexError):
                 continue
-            found = resolved(ptrs, srvs, addrs)
+            found = resolved(ptrs, srvs, addrs, addrs6)
             if found:
                 return found
     finally:

@@ -226,5 +226,19 @@ if [ -f "$TARGET" ]; then
   echo approve > /tmp/mode
 fi
 
+step "10. an IPv6 phone address (stable across DHCP changes) works through pam_rssh"
+if python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1",0))' 2>/dev/null; then
+  pairing_phone 7791 --host ::1
+  type_code_from /tmp/p7791.code | "$I" setup --phone "[::1]:7791" > /tmp/setup-v6.log 2>&1
+  check "setup accepts a bracketed IPv6 address" grep -q "Done. Every sudo now asks your phone first" /tmp/setup-v6.log
+  check "the PAM line carries the IPv6 literal" grep -qF "ssh_agent_addr=[::1]:7791" "$TARGET"
+  check "pam_rssh dials it: sudo works with NO password" as_user_sudo ""
+  echo deny > /tmp/mode
+  check "and the password still works when that phone denies" as_user_sudo "$PW"
+  echo approve > /tmp/mode
+else
+  echo "  (no IPv6 loopback in this container: skipped)"
+fi
+
 printf '\n%s: %d passed, %d failed\n' "$( . /etc/os-release; echo "$ID $VERSION_ID")" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

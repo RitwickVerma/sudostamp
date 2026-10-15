@@ -85,6 +85,7 @@ hygiene:
     - 'bad=$(git ls-files -s tools scripts | while read -r mode _ _ f; do if head -c2 "$f" | grep -q "#!" && [ "$mode" != 100755 ]; then echo "$f"; fi; done); test -z "$bad" || { echo "not executable in git:" $bad >&2; exit 1; }'
     - shellcheck -S warning tools/*.sh tools/test/*.sh scripts/*.sh
     - python3 -m py_compile tools/*.py tools/test/*.py && rm -rf tools/__pycache__ tools/test/__pycache__
+    - python3 -I tools/test/test_pair.py && rm -rf tools/test/__pycache__ tools/__pycache__
 
 # The host side, end to end, on every supported Linux family: tools/install.sh installs
 # pam_rssh (packaged or built from the pinned commit), pins the key of a mock phone

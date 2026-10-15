@@ -248,7 +248,7 @@ class MainActivity : Activity() {
         !(getSystemService(Context.POWER_SERVICE) as PowerManager)
             .isIgnoringBatteryOptimizations(packageName)
 
-    private fun address() = "${Net.localIp()}:${AgentService.PORT}"
+    private fun address() = Net.hostPort(AgentService.PORT)
 
     private fun setupState() = SetupState(
         key = Keys.state(),

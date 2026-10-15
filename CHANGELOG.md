@@ -4,6 +4,24 @@ Versions are the app's `versionName`. The host-side tooling is versioned with th
 
 ## Unreleased
 
+### An address that survives DHCP changes
+- sudo's config holds the phone's address as a literal (pam_rssh parses `std::net::SocketAddr`:
+  IP and port only, no hostnames), so a new DHCP lease made sudo quietly fall back to the
+  password until `setup` was re-run. The phone now has a stable address to give out:
+  - the listener is dual-stack (IPv4 clients still work; checked on an emulator and the real
+    phone);
+  - discovery and the pairing screen offer the phone's **unique-local IPv6 address** (`fd..`,
+    from the router) when one exists whose interface identifier matches the link-local address
+    (Android's temporary privacy addresses are random and never chosen); otherwise IPv4;
+  - the LAN check knows `fc00::/7` (Java's `isSiteLocalAddress` is true for IPv6 only in the
+    deprecated `fec0::/10`) and still refuses global IPv6;
+  - `--phone` and the installer accept `[addr]:port`; tested through the real pam_rssh.
+- Honest limits: it follows the phone's Wi-Fi hardware address and the router's prefix, so a
+  change of "random MAC" setting or of the router's prefix still breaks it (the failure is the
+  password prompt, fixed by re-running `setup`); networks without a router-assigned `fd..`
+  prefix keep using IPv4 and need a DHCP reservation. Link-local addresses are not used: they
+  need an interface number that differs per computer.
+
 ### Discovery that works with real Android phones
 - Discovery found the phone only where avahi was running. Android's mDNS responder (AOSP
   `MdnsRecordRepository`, confirmed by a capture against a real phone) never answers

@@ -73,7 +73,7 @@ def main():
     with open(a.pubkey_out, "w") as f:
         f.write("ecdsa-sha2-nistp256 %s sudostamp-mock\n" % base64.b64encode(blob).decode())
 
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv = socket.socket(socket.AF_INET6 if ":" in a.host else socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((a.host, a.port))
     srv.listen(4)

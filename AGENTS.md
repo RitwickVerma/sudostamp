@@ -93,8 +93,10 @@ a snapshot first if you need to keep working. Runtime state outside the repo: th
 - Fail closed: every error path in the agent ends in `SSH2_AGENT_FAILURE` or a closed socket,
   never a signature. Every error path in the host tooling ends in the password still working.
 - `.editorconfig`: UTF-8, LF; 4-space kt/kts/xml, 2-space yml/sh.
-- A verified change is committed **and pushed** in the same breath, so CI always runs the newest
-  commit; committed-but-unpushed work counts as unfinished.
+- A verified change is committed **and pushed to a feature branch** in the same breath, so CI
+  always runs the newest commit; committed-but-unpushed work counts as unfinished. Open the merge
+  request with `git push -o merge_request.create -o merge_request.target=master origin <branch>`.
+  Agents never push to `master` or merge: the owner merges (merging can start a release).
 - Commits: imperative subject, a body that says why and what was verified. Log notable changes
   with evidence in `docs/STATUS.md` and user-visible ones in `CHANGELOG.md`; bump `versionCode`.
 
@@ -161,5 +163,11 @@ a snapshot first if you need to keep working. Runtime state outside the repo: th
     query from an ephemeral port finds nothing on a real phone even though avahi and test
     containers answer it. pam_rssh's address is an IP literal only (multisock parses
     `std::net::SocketAddr`): no hostnames.
-22. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
+22. Java's `isSiteLocalAddress` is false for `fd..` IPv6 (it only means deprecated `fec0::/10`):
+    `Net.isUniqueLocal` is the real test. The app picks the stable IPv6 address by interface
+    identifier == link-local's (temporary addresses are random); `tools/pair.py stable_address`
+    does the same and `NetTest.kt` / `tools/test/test_pair.py` use the same addresses.
+    A hand-written probe must read replies in a loop: the app writes the length prefix in small
+    pieces, and a single `recv(4)` can return fewer bytes (it once looked like "closed").
+23. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
     key no longer matches.
