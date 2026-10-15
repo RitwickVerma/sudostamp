@@ -156,5 +156,10 @@ a snapshot first if you need to keep working. Runtime state outside the repo: th
     tools/pair.py must reproduce: change both sides together. Never allow a second exchange per
     arming (it re-enables the grinding attack). pair.py reads the code byte by byte from fd 0, so
     a scripted `code\nyes\n` reaches both prompts.
-21. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
+21. Android's mDNS responder ignores legacy-unicast queries and rate-limits multicast replies
+    to 1 per second per record. Discovery must listen on 5353 and repeat its query; a single
+    query from an ephemeral port finds nothing on a real phone even though avahi and test
+    containers answer it. pam_rssh's address is an IP literal only (multisock parses
+    `std::net::SocketAddr`): no hostnames.
+22. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
     key no longer matches.

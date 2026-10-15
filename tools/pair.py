@@ -19,6 +19,7 @@ import base64
 import hashlib
 import hmac
 import os
+import re
 import socket
 import struct
 import sys
@@ -171,10 +172,17 @@ def cmd_pair(a):
 
 
 # ------------------------------------------------------------------ discovery
-# A minimal mDNS browser: one PTR question for _sudostamp._tcp.local, asked from an ordinary
-# UDP port, which makes responders answer straight back to us by unicast (RFC 6762 section
-# 6.7, "legacy unicast"). Nothing found here is trusted: an address only ever leads to the
-# pairing above, which the person verifies with the code.
+# Finding _sudostamp._tcp on the LAN. Shaped by how Android's own mDNS responder behaves
+# (AOSP MdnsRecordRepository, and a capture against a real phone):
+#   - it never answers "legacy unicast" queries from an ordinary port (RFC 6762 6.7);
+#   - it answers ordinary (QM) queries by multicast, but skips any record it multicast in the
+#     last second -- e.g. its own announcement, or another host's query just before ours;
+#   - it announces the service three times, ~0.4 s apart, the moment it starts advertising.
+# So: ask avahi if it runs (it owns 5353 and caches everything); otherwise listen on 5353
+# for the whole window, which catches the announcements, and repeat the query every 1.5 s,
+# alternating QM and QU (unicast-reply requested), so no attempt lands inside that second.
+# Nothing found here is trusted: an address only ever leads to the pairing above, which the
+# person verifies with the code.
 
 def qname(name):
     out = b""
@@ -223,37 +231,98 @@ def parse(msg, ptrs, srvs, addrs):
         o += rdlen
 
 
-def cmd_discover(a):
-    query = struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + qname(SERVICE) + struct.pack(">HH", 12, 1)
+def via_avahi(timeout):
+    """[(address:port, name)] from avahi-browse; [] if avahi is missing or finds nothing."""
+    import shutil
+    import subprocess
+    exe = shutil.which("avahi-browse")
+    if not exe:
+        return []
+    try:
+        out = subprocess.run([exe, "-rtp", "-k", "_sudostamp._tcp"], capture_output=True,
+                             text=True, timeout=timeout + 2).stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    found = []
+    for line in out.splitlines():
+        # =;iface;proto;name;type;domain;host;address;port;txt  (IPv4 only)
+        f = line.split(";")
+        if len(f) >= 9 and f[0] == "=" and f[2] == "IPv4":
+            name = re.sub(r"\\(\d{3})", lambda m: chr(int(m.group(1))), f[3])
+            found.append(("%s:%s" % (f[7], f[8]), name))
+    return found
+
+
+def mdns_socket():
+    """Port 5353, sharing it with avahi, browsers and the like, in the mDNS group."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
-    sock.bind(("", 0))
-    ptrs, srvs, addrs = set(), {}, {}
-    end = time.time() + a.timeout
-    for _ in range(2):
-        sock.sendto(query, ("224.0.0.251", 5353))
-        time.sleep(0.05)
-    while time.time() < end:
-        sock.settimeout(max(0.05, end - time.time()))
-        try:
-            msg, src = sock.recvfrom(9000)
-        except socket.timeout:
-            break
-        try:
-            parse(msg, ptrs, srvs, addrs)
-        except (ValueError, struct.error, IndexError):
-            continue
+    sock.bind(("", 5353))
+    mreq = socket.inet_aton("224.0.0.251") + socket.inet_aton("0.0.0.0")
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    return sock
+
+
+def resolved(ptrs, srvs, addrs):
     found = []
     for inst in sorted(ptrs):
-        if inst not in srvs:
-            continue
-        host, port = srvs[inst]
-        ip = addrs.get(host.lower())
-        if ip:
-            name = inst[:-len(SERVICE)].rstrip(".").replace("\\032", " ")
-            found.append("%s:%d\t%s" % (ip, port, name))
-    for line in dict.fromkeys(found):
-        print(line)
+        if inst in srvs:
+            host, port = srvs[inst]
+            ip = addrs.get(host.lower())
+            if ip:
+                found.append(("%s:%d" % (ip, port), inst[:-len(SERVICE)].rstrip(".").replace("\\032", " ")))
+    return found
+
+
+def via_mdns(timeout, on_tick=None):
+    """Listen on 5353 for up to `timeout` s, querying every 1.5 s; return as soon as found."""
+    try:
+        sock = mdns_socket()
+    except OSError:
+        return []
+    q = qname(SERVICE)
+    queries = [struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0) + q + struct.pack(">HH", 12, cls)
+               for cls in (1, 0x8001)]                       # QM, then QU
+    ptrs, srvs, addrs = set(), {}, {}
+    end = time.time() + timeout
+    next_query, n = 0.0, 0
+    try:
+        while time.time() < end:
+            now = time.time()
+            if now >= next_query:
+                sock.sendto(queries[n % 2], ("224.0.0.251", 5353))
+                n += 1
+                next_query = now + 1.5
+                if on_tick:
+                    on_tick()
+            sock.settimeout(max(0.05, min(next_query, end) - time.time()))
+            try:
+                msg, _ = sock.recvfrom(9000)
+            except socket.timeout:
+                continue
+            try:
+                parse(msg, ptrs, srvs, addrs)
+            except (ValueError, struct.error, IndexError):
+                continue
+            found = resolved(ptrs, srvs, addrs)
+            if found:
+                return found
+    finally:
+        sock.close()
+    return []
+
+
+def cmd_discover(a):
+    found, method = via_avahi(min(a.timeout, 3)), "avahi"
+    if not found:
+        found, method = via_mdns(a.timeout), "mdns"
+    for addr, name in dict.fromkeys(found):
+        print("%s\t%s" % (addr, name))
+    if found and a.verbose:
+        print("found via %s" % method, file=sys.stderr)
     return 0 if found else 1
 
 
@@ -265,6 +334,7 @@ def main():
     p.add_argument("--label")
     d = sub.add_parser("discover")
     d.add_argument("--timeout", type=float, default=3.0)
+    d.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     if a.cmd == "pair":
         cmd_pair(a)

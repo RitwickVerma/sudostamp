@@ -600,10 +600,11 @@ pin_key() {
 # Find the phone on the LAN (it advertises only while its pairing screen is open), or ask.
 find_phone() {
   local found n choice
-  say "Looking for your phone. On the phone: open SudoStamp, tap 'Pair a computer'."
-  for _ in 1 2 3 4 5; do
-    found="$(python3 -I "$HERE/pair.py" discover --timeout 3 2>/dev/null)" && break
-  done
+  # One listening window, opened BEFORE the person taps: the phone announces itself the
+  # moment it starts advertising, and pair.py returns as soon as it hears it (up to 2 min).
+  say "  On the phone: open SudoStamp and tap 'Pair a computer' (or 'Get started')."
+  say "  Waiting for it to appear on the network..."
+  found="$(python3 -I "$HERE/pair.py" discover --timeout 120 2>/dev/null)" || true
   n="$(printf '%s' "$found" | grep -c . || true)"
   if [ "$n" = 1 ]; then
     PHONE_ADDR="$(printf '%s' "$found" | cut -f1)"
@@ -614,7 +615,8 @@ find_phone() {
     read -r -p "  Which one? [1-$n] " choice
     PHONE_ADDR="$(printf '%s\n' "$found" | sed -n "${choice:-0}p" | cut -f1)"
   else
-    say "  Not found automatically (the network may block discovery)."
+    say "  Not found automatically. Something on this network blocks mDNS (port 5353):"
+    say "  a firewall here (firewalld: firewall-cmd --add-service=mdns), or Wi-Fi client isolation."
     read -r -p "  Type the address shown on the phone, e.g. 192.168.1.50:7777: " PHONE_ADDR
   fi
 }

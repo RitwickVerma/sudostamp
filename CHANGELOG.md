@@ -4,6 +4,18 @@ Versions are the app's `versionName`. The host-side tooling is versioned with th
 
 ## Unreleased
 
+### Discovery that works with real Android phones
+- Discovery found the phone only where avahi was running. Android's mDNS responder (AOSP
+  `MdnsRecordRepository`, confirmed by a capture against a real phone) never answers
+  legacy-unicast queries, and skips any record it multicast within the last second, which is
+  where the old single query landed right after the phone's own announcement.
+- Now: avahi if present; otherwise listen on 5353 for the whole window (catching the phone's
+  announcement the moment it starts advertising) and repeat the query every 1.5 s, alternating
+  QM/QU. `setup` opens one listening window before asking you to tap, and returns the moment
+  the phone appears. Real phone, no avahi: found 0.1 s after tapping *Pair a computer*.
+- When nothing is found, `setup` says why it usually happens (firewall without mDNS, Wi-Fi
+  client isolation) before asking for the address.
+
 ### Distribution
 - No clone needed: every release publishes `sudostamp-setup.sh`, a single, deterministic file
   (`scripts/bundle-host.sh`) holding the installer and its helpers. `curl` it, check it, `sudo
