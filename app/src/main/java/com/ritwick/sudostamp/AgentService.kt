@@ -103,6 +103,12 @@ class AgentService : Service() {
 
         fun currentRequest(): Approval? = current
 
+        /** The pairing the user armed from the app, if any. */
+        val pairing = PairingSession()
+
+        /** Identifies connections, so a pairing's reveal must arrive on its commit's. */
+        private val connections = java.util.concurrent.atomic.AtomicLong()
+
         /**
          * Creates both channels (idempotent). Called up front, not when the first
          * notification posts: until a channel exists the user cannot open its settings,
@@ -227,6 +233,7 @@ class AgentService : Service() {
 
     private fun handle(s: Socket) {
         val client = s.inetAddress.hostAddress ?: "unknown"
+        val connId = connections.incrementAndGet()
         // LAN-only is enforced here, not just assumed. The socket binds every interface,
         // and some carriers hand out publicly reachable addresses on mobile data; a request
         // from the internet must not be able to post an approval prompt at all.
@@ -258,7 +265,7 @@ class AgentService : Service() {
                 return
             }
             try {
-                val waited = serve(frame, out, client)
+                val waited = serve(frame, out, client, connId)
                 input.deadline += waited     // the user's time is not the client's budget
             } catch (e: Exception) {
                 Log.w(TAG, "request failed: ${e.message}")
@@ -274,7 +281,7 @@ class AgentService : Service() {
 
     /** Serves exactly one request frame. Throws IOException on malformed input.
      *  Returns how long (ns) it spent waiting on the user. */
-    private fun serve(frame: ByteArray, out: java.io.OutputStream, client: String): Long {
+    private fun serve(frame: ByteArray, out: java.io.OutputStream, client: String, connId: Long): Long {
         val r = AgentProtocol.Reader(frame)
 
         when (r.type()) {
@@ -344,6 +351,12 @@ class AgentService : Service() {
                 return waited
             }
 
+            AgentProtocol.SSH2_AGENTC_EXTENSION -> {
+                r.skipType()
+                AgentProtocol.writeFrame(out, pair(String(r.blob(), Charsets.US_ASCII), r, client, connId))
+                changed()
+            }
+
             else -> {
                 // Unreachable from pam_rssh. Refuse rather than improvise.
                 Log.w(TAG, "unsupported request type ${r.type()}")
@@ -351,6 +364,36 @@ class AgentService : Service() {
             }
         }
         return 0
+    }
+
+    /**
+     * The pairing extensions (protocol in Pairing.kt). Every refusal is a plain FAILURE: the
+     * computer learns nothing about why. No signing happens here -- the key is public.
+     */
+    private fun pair(name: String, r: AgentProtocol.Reader, client: String, connId: Long): ByteArray {
+        if (!Keys.exists()) return AgentProtocol.failure()
+        return when (name) {
+            Pairing.EXT_COMMIT -> {
+                val c = pairing.commit(client, connId, r.blob(), SshSig.keyBlob(Keys.publicKey()))
+                Log.i(TAG, if (c != null) "pairing: commit from $client" else "pairing: commit from $client refused")
+                if (c != null) AgentProtocol.success(c) else AgentProtocol.failure()
+            }
+            Pairing.EXT_REVEAL -> {
+                val kn = pairing.reveal(client, connId, r.blob())
+                Log.i(TAG, if (kn != null) "pairing: code shown for $client" else "pairing: reveal from $client refused")
+                if (kn != null) AgentProtocol.success(kn.first, kn.second) else AgentProtocol.failure()
+            }
+            Pairing.EXT_DONE -> {
+                val ok = pairing.done(client, r.blob())
+                // The computer has pinned our key: its sudo requests are from a known host now.
+                if (ok) {
+                    KnownHosts.remember(this, client)
+                    Log.i(TAG, "pairing: $client paired")
+                }
+                if (ok) AgentProtocol.success() else AgentProtocol.failure()
+            }
+            else -> AgentProtocol.failure()
+        }
     }
 
     /**

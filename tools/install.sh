@@ -562,84 +562,109 @@ print("ecdsa-sha2-nistp256 %s sudostamp" % base64.b64encode(blob).decode())
 PY
 }
 
-# ---------------------------------------------------------------------- stage
+# ------------------------------------------------------------------ the key
 
-cmd_stage() {
-  need_root stage; need_platform; need_phone; need_user
-  say "=== stage: pam_rssh + pinned key ($FAMILY). No PAM changes. ==="
-  base_deps || die "could not install base dependencies (python3, ssh-keygen, git)"
-
-  # The key first: a wrong phone or an impostor is refused before minutes of building.
-  local key fp answer
-  key="$(fetch_key)" || die "could not fetch the public key from $PHONE_ADDR -- is the app open and Ready?"
-  # Exactly one line of exactly this shape, whatever fetch_key's parser thinks: this is the
-  # content of a root-owned file that decides who may approve sudo.
-  printf '%s\n' "$key" | grep -qxE 'ecdsa-sha2-nistp256 [A-Za-z0-9+/]+=* sudostamp' && \
-    [ "$(printf '%s\n' "$key" | wc -l | tr -d ' ')" = 1 ] || die "the phone's answer is not a single SudoStamp key"
-  fp="$(printf '%s\n' "$key" | ssh-keygen -lf - | awk '{print $2}')" || die "the phone's answer is not a valid public key"
-  say "     key at $PHONE_ADDR: $fp"
-  if [ -n "${SUDOSTAMP_FINGERPRINT:-}" ]; then
-    [ "$fp" = "$SUDOSTAMP_FINGERPRINT" ] || die "fingerprint mismatch: expected $SUDOSTAMP_FINGERPRINT"
-    ok "fingerprint matches SUDOSTAMP_FINGERPRINT"
+# The phone's public key, verified. Three ways, strongest friction-free one by default:
+#   pairing (default)    the 6-digit code the person types (tools/pair.py, Pairing.kt)
+#   --fingerprint FP     scripted installs: fetched over TCP, must match FP exactly
+#   --key "LINE"         pasted from the app's "Copy public key": no network at all
+acquire_key() {
+  local key fp
+  if [ -n "${SUDOSTAMP_KEY:-}" ]; then
+    key="$(printf '%s' "$SUDOSTAMP_KEY" | awk '{print $1, $2, "sudostamp"}')"
+  elif [ -n "${SUDOSTAMP_FINGERPRINT:-}" ]; then
+    key="$(fetch_key)" || { bad "could not fetch the public key from $PHONE_ADDR" >&2; return 1; }
+    fp="$(printf '%s\n' "$key" | ssh-keygen -lf - | awk '{print $2}')"
+    [ "$fp" = "$SUDOSTAMP_FINGERPRINT" ] || { bad "fingerprint mismatch: the phone's key is $fp" >&2; return 1; }
   else
-    say "     Compare with the KEY FINGERPRINT on the SudoStamp screen. Every character must match."
-    read -r -p "     Does it match? Type 'yes' to pin it: " answer
-    [ "$answer" = yes ] || die "not pinned"
+    key="$(python3 -I "$HERE/pair.py" pair --phone "$PHONE_ADDR" --label "$(hostname 2>/dev/null || uname -n)")" || return 1
   fi
-
-  install_pam_rssh
-  has_fprintd && { install_gate; ok "local fingerprint reader found; gate installed: $GATE"; }
-  warn_targetpw
-
-  # Root-owned dir AND file. auth_keys.rs:87 does a bare read_to_string with no symlink or
-  # ownership check, so the DIRECTORY must be unwritable by the user too.
-  mkdir -p "$KEYDIR" && chown 0:0 "$KEYDIR" && chmod 0755 "$KEYDIR"
-  ok "$KEYDIR (root, 0755)"
-  printf '%s\n' "$key" | write_atomic "$KEYFILE"
-  ok "pinned key written to $KEYFILE"
-  say
-  say "Next: sudo $0 test --phone $PHONE_ADDR"
+  # Exactly one line of exactly this shape, whatever produced it: this is the content of a
+  # root-owned file that decides who may approve sudo.
+  printf '%s\n' "$key" | grep -qxE 'ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABB[A-Za-z0-9+/]{87}= sudostamp' && \
+    [ "$(printf '%s\n' "$key" | wc -l | tr -d ' ')" = 1 ] || { bad "not a single SudoStamp key" >&2; return 1; }
+  printf '%s\n' "$key"
 }
 
-# ----------------------------------------------------------------------- test
+# Root-owned dir AND file. auth_keys.rs:87 does a bare read_to_string with no symlink or
+# ownership check, so the DIRECTORY must be unwritable by the user too.
+pin_key() {
+  mkdir -p "$KEYDIR" && chown 0:0 "$KEYDIR" && chmod 0755 "$KEYDIR"
+  printf '%s\n' "$1" | write_atomic "$KEYFILE"
+  ok "pinned $(printf '%s\n' "$1" | ssh-keygen -lf - | awk '{print $2}') in $KEYFILE"
+}
 
-cmd_test() {
-  need_root test; need_platform; need_phone; need_user
-  [ -f "$KEYFILE" ] || die "no pinned key -- run 'stage' first"
-  say "=== test: a scratch PAM service. $(pam_target) is NOT touched. ==="
-  # Only our lines, then deny: success here can only have come from the phone (or the
-  # local sensor), never from a password.
+# Find the phone on the LAN (it advertises only while its pairing screen is open), or ask.
+find_phone() {
+  local found n choice
+  say "Looking for your phone. On the phone: open SudoStamp, tap 'Pair a computer'."
+  for _ in 1 2 3 4 5; do
+    found="$(python3 -I "$HERE/pair.py" discover --timeout 3 2>/dev/null)" && break
+  done
+  n="$(printf '%s' "$found" | grep -c . || true)"
+  if [ "$n" = 1 ]; then
+    PHONE_ADDR="$(printf '%s' "$found" | cut -f1)"
+    ok "found $(printf '%s' "$found" | cut -f2) at $PHONE_ADDR"
+  elif [ "$n" -gt 1 ]; then
+    say "  More than one phone is pairing right now:"
+    printf '%s\n' "$found" | awk -F'\t' '{printf "    %d) %s  (%s)\n", NR, $2, $1}'
+    read -r -p "  Which one? [1-$n] " choice
+    PHONE_ADDR="$(printf '%s\n' "$found" | sed -n "${choice:-0}p" | cut -f1)"
+  else
+    say "  Not found automatically (the network may block discovery)."
+    read -r -p "  Type the address shown on the phone, e.g. 192.168.1.50:7777: " PHONE_ADDR
+  fi
+}
+
+# ---------------------------------------------------------------------- steps
+
+# The scratch PAM service: only our lines, then deny. Success here can only have come from
+# the phone (or the local sensor), never from a password.
+run_test() {
   { echo "#%PAM-1.0"; block; echo "auth       required     pam_deny.so"; \
     echo "account    required     pam_permit.so"; } | write_atomic "$PAM_TEST"
-  ok "wrote $PAM_TEST"
-  sed 's/^/     /' "$PAM_TEST"
-  say
-  say "Approve on the phone now (a local reader, if any, is asked first):"
+  say "  Approve the request on your phone now (a local fingerprint reader, if any, is asked first):"
   if python3 -I "$HERE/pam_check.py" "$(basename "$PAM_TEST")" "$TARGET_USER"; then
     ok "the phone approved through PAM"
-    say
-    say "Next: sudo $0 apply --phone $PHONE_ADDR   (keep a root shell open while you do)"
   else
-    bad "authentication did not succeed -- see the result above. sudo is untouched."
-    exit 1
+    bad "the test did not succeed -- see the result above. sudo is untouched."
+    return 1
   fi
 }
 
-# ---------------------------------------------------------------------- apply
-
-cmd_apply() {
-  need_root apply; need_platform; need_phone; need_user
-  [ -f "$KEYFILE" ] || die "no pinned key -- run 'stage' first"
-  find_pam_rssh >/dev/null || die "pam_rssh is not installed -- run 'stage' first"
-  has_fprintd && install_gate
-  local target src bak vendor=""
+# An older SudoStamp replaced the whole sudo file. Its backups (*.bak-<UTC time>, written only
+# by this script) hold the stack from before it; restore the newest one without pam_rssh, after
+# keeping a copy of what is there now. Asks first: other edits made since would go too.
+migrate_legacy() {
+  local target b bak="" answer
   target="$(pam_target)"
-  say "=== apply: add the SudoStamp block to $target ==="
-
-  if has_foreign_rssh "$target"; then
-    die "$target already has pam_rssh lines this script did not write (an older SudoStamp, or a hand edit). Remove them first, or run 'rollback' to restore a backup."
+  has_foreign_rssh "$target" || return 0
+  for b in "${target}".bak-*; do
+    [ -f "$b" ] || continue
+    grep -q pam_rssh "$b" || bak="$b"
+  done
+  [ -n "$bak" ] || die "$target has pam_rssh lines this script did not write, and no backup from before them. Remove those lines by hand, then run setup again."
+  warn "$target holds an older SudoStamp stack (or hand-added pam_rssh lines)."
+  say "     It will be replaced by $bak (from before SudoStamp), and then get the new block."
+  say "     Any other change made to $target since then is lost; a copy is kept."
+  if [ "${SUDOSTAMP_YES:-}" != 1 ]; then
+    read -r -p "     Continue? [yes/no] " answer
+    [ "$answer" = yes ] || die "stopped; nothing changed"
   fi
+  cp -p "$target" "${target}.bak-$(date +%Y%m%dT%H%M%SZ)"
+  cp -p "$bak" "$target.sudostamp-new" && mv -f "$target.sudostamp-new" "$target"
+  ok "restored $target from $bak"
+}
 
+# Insert (or replace) our block in sudo's stack, atomically, keeping a backup. Idempotent:
+# an existing SudoStamp block is taken out before the new one goes in, so re-running never
+# stacks two blocks (two pam_rssh lines would each ask the phone).
+do_apply() {
+  local target src bak vendor="" new
+  target="$(pam_target)"
+  if has_foreign_rssh "$target"; then
+    die "$target already has pam_rssh lines this script did not write. 'sudo $0 setup' migrates an older SudoStamp; otherwise remove them first."
+  fi
   if [ -f "$target" ]; then
     src="$target"
   elif [ "$FAMILY" = macos ]; then
@@ -652,25 +677,98 @@ cmd_apply() {
   else
     die "no $target to modify. Is sudo installed?"
   fi
-
   if [ -f "$target" ]; then
     bak="${target}.bak-$(date +%Y%m%dT%H%M%SZ)"
     cp -p "$target" "$bak" && ok "backed up $bak"
   fi
-
-  local new; new="$(root_tmp)/new"
-  if [ "$src" = /dev/null ]; then
-    { echo "# sudo_local: local additions to sudo's PAM stack (macOS keeps this across updates)"; block; } > "$new"
+  new="$(root_tmp)/new"
+  if [ "$FAMILY" = macos ]; then
+    # sudo_local holds only additions: our block first, then whatever else is there.
+    { block; [ "$src" = /dev/null ] || without_block "$src"; } > "$new"
   else
-    { [ -n "$vendor" ] && { head -1 "$vendor"; echo "$VENDOR_MARK"; }
-      if [ -n "$vendor" ]; then tail -n +2 "$vendor"; else cat "$src"; fi; } > "$new.src"
-    with_block "$new.src" > "$new" || { rm -f "$new" "$new.src"; die "no auth rule found in $src -- not guessing where the block goes"; }
+    if [ -n "$vendor" ]; then
+      { head -1 "$vendor"; echo "$VENDOR_MARK"; tail -n +2 "$vendor"; } > "$new.src"
+    else
+      without_block "$src" > "$new.src"
+    fi
+    with_block "$new.src" > "$new" || die "no auth rule found in $src -- not guessing where the block goes"
   fi
   write_atomic "$target" < "$new"
   ok "wrote $target"
-  sed 's/^/     /' "$target"
-  warn_targetpw
   rm -f "$PAM_TEST"
+}
+
+# ---------------------------------------------------------------------- setup
+
+cmd_setup() {
+  need_root setup; need_platform; need_user
+  say "=== SudoStamp setup ($FAMILY) ==="
+  base_deps >/dev/null || die "could not install base dependencies (python3, ssh-keygen, git)"
+  [ -n "$PHONE_ADDR" ] || find_phone
+  need_phone
+
+  say
+  say "1/4  Pairing with the phone at $PHONE_ADDR"
+  local key
+  key="$(acquire_key)" || die "not paired; nothing on this computer was changed"
+
+  say
+  say "2/4  Installing pam_rssh"
+  install_pam_rssh
+  has_fprintd && { install_gate; ok "local fingerprint reader found: it is tried first at the desk"; }
+  pin_key "$key"
+
+  say
+  say "3/4  Testing, without touching sudo yet"
+  run_test || exit 1
+
+  say
+  say "4/4  Turning it on for sudo"
+  migrate_legacy
+  do_apply
+  warn_targetpw
+
+  say
+  ok "Done. Every sudo now asks your phone first; your password still works as before."
+  say "     Try it in a second terminal:   sudo -k && sudo true"
+  say "     Undo at any time:              sudo $0 rollback"
+}
+
+# ---------------------------------------------------- stage / test / apply (scripts)
+
+cmd_stage() {
+  need_root stage; need_platform; need_phone; need_user
+  say "=== stage: pam_rssh + pinned key ($FAMILY). No PAM changes. ==="
+  base_deps || die "could not install base dependencies (python3, ssh-keygen, git)"
+  # The key first: a wrong phone or an impostor is refused before minutes of building.
+  local key
+  key="$(acquire_key)" || die "no key pinned"
+  install_pam_rssh
+  has_fprintd && { install_gate; ok "local fingerprint reader found; gate installed: $GATE"; }
+  warn_targetpw
+  pin_key "$key"
+  say
+  say "Next: sudo $0 test --phone $PHONE_ADDR"
+}
+
+cmd_test() {
+  need_root test; need_platform; need_phone; need_user
+  [ -f "$KEYFILE" ] || die "no pinned key -- run 'stage' first"
+  say "=== test: a scratch PAM service. $(pam_target) is NOT touched. ==="
+  run_test || exit 1
+  say
+  say "Next: sudo $0 apply --phone $PHONE_ADDR   (keep a root shell open while you do)"
+}
+
+cmd_apply() {
+  need_root apply; need_platform; need_phone; need_user
+  [ -f "$KEYFILE" ] || die "no pinned key -- run 'stage' first"
+  find_pam_rssh >/dev/null || die "pam_rssh is not installed -- run 'stage' first"
+  has_fprintd && install_gate
+  say "=== apply: add the SudoStamp block to $(pam_target) ==="
+  do_apply
+  sed 's/^/     /' "$(pam_target)"
+  warn_targetpw
   say
   say "The password path below the block is untouched: if the phone misbehaves, the password still works."
   say "Check in a SECOND terminal, keeping this one open:   sudo -k && sudo true"
@@ -746,15 +844,18 @@ while [ $# -gt 0 ]; do
     --fingerprint)  SUDOSTAMP_FINGERPRINT="${2:-}"; shift 2 ;;
     --fingerprint=*) SUDOSTAMP_FINGERPRINT="${1#*=}"; shift ;;
     --allow-rustup) SUDOSTAMP_ALLOW_RUSTUP=1; shift ;;
+    --key)          SUDOSTAMP_KEY="${2:-}"; shift 2 ;;
+    --yes)          SUDOSTAMP_YES=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
 
 case "$CMD" in
+  setup)    cmd_setup ;;
   stage)    cmd_stage ;;
   test)     cmd_test ;;
   apply)    cmd_apply ;;
   rollback) cmd_rollback ;;
   status)   cmd_status ;;
-  *)        echo "usage: $0 {stage|test|apply|rollback|status}"; exit 2 ;;
+  *)        echo "usage: $0 {setup|stage|test|apply|rollback|status} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes]"; exit 2 ;;
 esac

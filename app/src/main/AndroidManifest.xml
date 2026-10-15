@@ -27,7 +27,8 @@
   governs the platform HTTP stacks, and leaving it set would suggest a cleartext-visible
   protocol this app does not have.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
@@ -42,6 +43,8 @@
     <application
         android:label="@string/app_name"
         android:theme="@style/Theme.SudoStamp"
+        android:enableOnBackInvokedCallback="true"
+        tools:targetApi="33"
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules"

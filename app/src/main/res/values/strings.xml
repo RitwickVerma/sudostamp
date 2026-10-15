@@ -7,11 +7,11 @@
     <string name="onboard_title">Approve sudo with a touch</string>
     <string name="onboard_step1_title">Create a key</string>
     <string name="onboard_step1_body">It is made inside this phone\'s secure hardware and can never leave it.</string>
-    <string name="onboard_step2_title">Pin it on your Linux host</string>
-    <string name="onboard_step2_body">One command with tools/install.sh, or paste the public key into the pinned-keys file.</string>
+    <string name="onboard_step2_title">Pair it with your computer</string>
+    <string name="onboard_step2_body">Run one command there, then type the 6-digit code this phone shows.</string>
     <string name="onboard_step3_title">Touch to approve</string>
     <string name="onboard_step3_body">Each sudo asks here. No touch, no signature — and your password still works.</string>
-    <string name="onboard_create">Create key</string>
+    <string name="onboard_create">Get started</string>
     <string name="onboard_footnote">The key needs your fingerprint for every single signature.</string>
     <string name="onboard_enroll">Set up a fingerprint first</string>
     <string name="onboard_enroll_hint">The key can only be created once a fingerprint is enrolled on this phone.</string>
@@ -43,12 +43,33 @@
     <string name="action_fix">Fix</string>
 
     <!-- Key card -->
-    <string name="section_pin">Pin this key on your host</string>
     <string name="field_fingerprint">Key fingerprint</string>
     <string name="field_address">Phone address</string>
-    <string name="copy_command">Copy setup command</string>
     <string name="copy_key">Copy public key</string>
-    <string name="pin_hint">The setup command checks this fingerprint before it pins anything.</string>
+    <string name="copy_command">Copy command</string>
+    <string name="section_computers">Computers</string>
+    <string name="computers_body">Pair a computer once, and its sudo asks this phone.</string>
+    <string name="by_hand_hint">Pinning by hand instead? The README shows where this key goes.</string>
+
+    <!-- Pairing -->
+    <string name="pair_start">Pair a computer</string>
+    <string name="pair_overline">Pairing</string>
+    <string name="pair_title">Waiting for your computer</string>
+    <string name="pair_run">On your Linux computer, in the SudoStamp folder, run:</string>
+    <string name="pair_command_label">Command</string>
+    <string name="pair_address_hint">If the computer cannot find this phone by itself, it will ask for this address.</string>
+    <string name="pair_code_title">Type this code on %1$s</string>
+    <string name="pair_code_from">Requested from %1$s</string>
+    <string name="pair_code_hint">Only on the computer you are setting up. If you did not start this, tap Cancel.</string>
+    <string name="pair_done">Paired</string>
+    <string name="pair_done_detail">%1$s will now ask this phone for sudo. Approve its test request next.</string>
+    <string name="pair_finish">Done</string>
+    <string name="pair_interrupted">Pairing stopped</string>
+    <string name="pair_interrupted_detail">Another device tried to pair at the same time, so nothing was pinned. If that was not you, someone on this network may be trying their luck.</string>
+    <string name="pair_expired">Pairing timed out</string>
+    <string name="pair_expired_detail">No computer finished pairing within two minutes.</string>
+    <string name="pair_again">Try again</string>
+    <string name="nsd_name">SudoStamp on %1$s</string>
     <string name="reset_key">Reset key</string>
 
     <!-- Invalidated key -->
@@ -87,8 +108,7 @@
 
     <!-- Toasts -->
     <string name="copied_key">Public key copied</string>
-    <string name="copied_command">Setup command copied</string>
-    <string name="key_created">Key created in the phone\'s %1$s</string>
+    <string name="copied_command">Command copied</string>
     <string name="key_failed">Could not create the key: %1$s</string>
     <string name="battery_manual">Settings → Battery → Battery optimization → Don\'t optimize</string>
 

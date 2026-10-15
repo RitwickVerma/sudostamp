@@ -91,9 +91,13 @@ python3 "$W/tools/test/mock_agent.py" --port 7778 --pubkey-out /tmp/evil.pub --m
   --comment "$(printf 'phone\n%s' "$EVIL_PUB")" > /tmp/evil.log 2>&1 &
 EVIL_PID=$!
 for _ in $(seq 1 50); do [ -s /tmp/evil.pub ] && break; sleep 0.1; done
-# The interactive path, as a person uses it: the first fingerprint shown matches the phone
-# screen, so they type yes. That is exactly where the old installer pinned both lines.
-printf 'yes\n' | bash "$W/tools/install.sh" stage --phone 127.0.0.1:7778 >/tmp/stage-evil.log 2>&1
+# The fingerprint path (pairing never reads the comment at all): the fingerprint of the
+# phone's real key matches, which is exactly where the old installer pinned both lines.
+EVIL_FP="$(python3 -c '
+import base64,hashlib
+b=base64.b64decode(open("/tmp/evil.pub").read().split()[1])
+print("SHA256:"+base64.b64encode(hashlib.sha256(b).digest()).decode().rstrip("="))')"
+bash "$W/tools/install.sh" stage --phone 127.0.0.1:7778 --fingerprint "$EVIL_FP" >/tmp/stage-evil.log 2>&1
 check "only one key is pinned, and not the smuggled one" \
   bash -c "[ \"\$(wc -l < /etc/authorized_keys/$U.keys)\" = 1 ] && ! grep -q evil /etc/authorized_keys/$U.keys"
 kill "$EVIL_PID" 2>/dev/null
@@ -154,6 +158,67 @@ check "the stack is back exactly as it was" \
 check "sudo no longer asks the phone (needs the password)" \
   bash -c "! su $U -c \"sudo -k; sudo -S -p '' true </dev/null\" >/dev/null 2>&1"
 check "the password works after rollback" as_user_sudo "$PW"
+
+# ------------------------------------------------------------- the one-command setup
+# A fresh mock phone per run: pairing allows one exchange per arming, like the app.
+pairing_phone() {   # $1 = port; writes /tmp/p$1.pub and, once paired, /tmp/p$1.code
+  rm -f "/tmp/p$1.code"
+  python3 "$W/tools/test/mock_agent.py" --port "$1" --pubkey-out "/tmp/p$1.pub" --mode-file /tmp/mode \
+    --code-file "/tmp/p$1.code" "${@:2}" > "/tmp/p$1.log" 2>&1 &
+  for _ in $(seq 1 50); do [ -s "/tmp/p$1.pub" ] && break; sleep 0.1; done
+}
+# The person: waits for the phone to show a code, then types it (and answers yes, if asked).
+type_code_from() { for _ in $(seq 1 100); do [ -s "$1" ] && break; sleep 0.1; done; cat "$1"; echo yes; }
+
+step "6. setup: pair + install + test + apply, one command"
+pairing_phone 7781
+type_code_from /tmp/p7781.code | bash "$I" setup --phone 127.0.0.1:7781 > /tmp/setup1.log 2>&1
+check "setup succeeds" grep -q "Done. Every sudo now asks your phone first" /tmp/setup1.log
+check "the paired phone's key is the one pinned" \
+  bash -c "[ \"\$(awk '{print \$2}' /etc/authorized_keys/$U.keys)\" = \"\$(awk '{print \$2}' /tmp/p7781.pub)\" ]"
+check "sudo succeeds with NO password via the paired phone" as_user_sudo ""
+check "exactly one SudoStamp block" bash -c "[ \"\$(grep -c '^# >>> SudoStamp >>>' '$TARGET')\" = 1 ]"
+
+step "7. setup again (a new phone): still one block"
+pairing_phone 7782
+type_code_from /tmp/p7782.code | bash "$I" setup --phone 127.0.0.1:7782 > /tmp/setup2.log 2>&1
+check "re-running setup leaves exactly one block" bash -c "[ \"\$(grep -c '^# >>> SudoStamp >>>' '$TARGET')\" = 1 ]"
+check "and the block points at the new phone" grep -q "ssh_agent_addr=127.0.0.1:7782" "$TARGET"
+check "sudo works via the new phone" as_user_sudo ""
+
+step "8. a man in the middle cannot pin its key"
+pairing_phone 7783
+# The attacker answers at the address setup dials (7784) and pairs with the real phone (7783)
+# behind its back; the person types the code their REAL phone shows.
+python3 "$W/tools/test/mock_agent.py" --port 7784 --pubkey-out /tmp/mitm.pub --mode-file /tmp/mode \
+  --mitm-to 127.0.0.1:7783 > /tmp/mitm.log 2>&1 &
+for _ in $(seq 1 50); do [ -s /tmp/mitm.pub ] && break; sleep 0.1; done
+cp /etc/authorized_keys/$U.keys /tmp/keys.before
+cp "$TARGET" /tmp/pam.before
+type_code_from /tmp/p7783.code | bash "$I" setup --phone 127.0.0.1:7784 > /tmp/setup-mitm.log 2>&1
+check "setup refuses" bash -c "! grep -q 'Done.' /tmp/setup-mitm.log && grep -q 'NOTHING was pinned' /tmp/setup-mitm.log"
+check "the pinned key and the PAM stack are unchanged" \
+  bash -c "[ \"\$(cksum < /tmp/keys.before)\" = \"\$(cksum < /etc/authorized_keys/$U.keys)\" ] && [ \"\$(cksum < /tmp/pam.before)\" = \"\$(cksum < '$TARGET')\" ]"
+check "the attacker's key is nowhere" bash -c "! grep -qF \"\$(awk '{print \$2}' /tmp/mitm.pub)\" /etc/authorized_keys/$U.keys"
+
+step "9. an older whole-file SudoStamp is migrated"
+bash "$I" rollback > /dev/null 2>&1
+if [ -f "$TARGET" ]; then
+  # What the old installer left: a timestamped backup of the original, and a stack with
+  # pam_rssh lines but no markers.
+  cp "$TARGET" "$TARGET.bak-20260101T000000Z"
+  { head -1 "$TARGET"; echo "auth sufficient pam_rssh.so ssh_agent_addr=127.0.0.1:7781 auth_key_file=/etc/authorized_keys/\${user}.keys"; tail -n +2 "$TARGET"; } > /tmp/legacy
+  cp /tmp/legacy "$TARGET"
+  pairing_phone 7785
+  type_code_from /tmp/p7785.code | bash "$I" setup --phone 127.0.0.1:7785 > /tmp/setup-legacy.log 2>&1
+  check "setup migrates it" grep -q "Done." /tmp/setup-legacy.log
+  check "one block, no unmarked pam_rssh lines left" \
+    bash -c "[ \"\$(grep -c pam_rssh '$TARGET')\" = 1 ] && grep -q '^# >>> SudoStamp >>>' '$TARGET'"
+  check "sudo works via the phone" as_user_sudo ""
+  echo deny > /tmp/mode
+  check "and the password still works when the phone denies" as_user_sudo "$PW"
+  echo approve > /tmp/mode
+fi
 
 printf '\n%s: %d passed, %d failed\n' "$( . /etc/os-release; echo "$ID $VERSION_ID")" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

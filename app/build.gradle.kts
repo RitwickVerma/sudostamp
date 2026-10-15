@@ -15,8 +15,8 @@ android {
         // would be a lie -- and the unguarded call would crash at key-creation time.
         minSdk = 30
         targetSdk = 36
-        versionCode = 7
-        versionName = "1.2.4"
+        versionCode = 8
+        versionName = "1.3.0"
     }
 
     // Release signing comes from the environment, never from the repo: CI passes the keystore

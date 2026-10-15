@@ -56,6 +56,12 @@ def main():
     # The key comment to send. Tests use a hostile one (with a newline and a second key) to
     # prove the installer never writes the phone's comment into the pinned-keys file.
     ap.add_argument("--comment", default="sudostamp-mock")
+    # Pairing, as the app does it (one exchange; see Pairing.kt). The code the phone would
+    # SHOW is written to --code-file, standing in for the person reading the screen.
+    ap.add_argument("--code-file")
+    # Man in the middle: present OUR key to whoever pairs with us, while pairing with the real
+    # phone at this address (with a nonce of our choosing), so the real phone shows a code.
+    ap.add_argument("--mitm-to")
     a = ap.parse_args()
     if a.host not in ("127.0.0.1", "::1", "localhost"):
         sys.exit("mock_agent binds loopback only")
@@ -72,6 +78,38 @@ def main():
     srv.bind((a.host, a.port))
     srv.listen(4)
     print("mock agent on %s:%d" % (a.host, a.port), flush=True)
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    import pair as P                                        # the same derivation as the host
+    session = {}
+
+    def ext(body):
+        name, o = P.take(body, 1)
+        if name == P.EXT_COMMIT:
+            if session:                                     # one exchange per arming
+                session["dead"] = True
+                return bytes([FAILURE])
+            session["np"] = os.urandom(32)
+            if a.mitm_to:                                   # pair with the real phone now
+                ag = P.Agent(a.mitm_to)
+                c = ag.ext(P.EXT_COMMIT, P.s(b"mitm"))
+                r = ag.ext(P.EXT_REVEAL, P.s(os.urandom(32))) if c else None
+                ag.close()
+                print("mitm: real phone %s" % ("paired with us" if r else "refused"), flush=True)
+            return bytes([6]) + P.s(P.commitment(blob, session["np"]))
+        if name == P.EXT_REVEAL:
+            if not session or session.get("dead") or "nh" in session:
+                return bytes([FAILURE])
+            nh, _ = P.take(body, o)
+            session["nh"] = nh
+            if a.code_file:
+                with open(a.code_file, "w") as f:
+                    f.write(P.code(blob, session["np"], nh) + "\n")
+            return bytes([6]) + P.s(blob) + P.s(session["np"])
+        if name == P.EXT_DONE:
+            print("pairing: done", flush=True)
+            return bytes([6])
+        return bytes([FAILURE])
 
     while True:
         c, _ = srv.accept()
@@ -98,6 +136,8 @@ def main():
                         sig = s(b"ecdsa-sha2-nistp256") + s(mpint(r) + mpint(sv))
                         out = bytes([SIGN_RESPONSE]) + s(sig)
                         print("sign: approved", flush=True)
+                elif body[0] == 27:
+                    out = ext(body)
                 else:
                     out = bytes([FAILURE])
                 c.sendall(struct.pack(">I", len(out)) + out)

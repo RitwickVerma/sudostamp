@@ -4,6 +4,19 @@ Versions are the app's `versionName`. The host-side tooling is versioned with th
 
 ## Unreleased
 
+### One-command setup with pairing (1.3.0)
+- `sudo tools/install.sh setup` does everything: finds the phone on the LAN (mDNS, only while the
+  phone's pairing screen is open), pairs, installs pam_rssh, tests on a scratch PAM service, and
+  turns it on for sudo. The phone side is one tap: **Get started** creates the key and waits.
+- **Pairing replaces the "compare the fingerprint, type yes" step**, the weak point of setup:
+  numeric comparison with a commitment (Bluetooth-style). The person types the phone's 6-digit
+  code into the terminal; one attempt per tap on the phone, so the code cannot be ground down.
+  Cross-language test vectors (Kotlin and Python), a relaying man in the middle in CI.
+- Fixed: running `apply` twice inserted a second SudoStamp block (two pam_rssh lines, each asking
+  the phone). Re-running is now idempotent.
+- `setup` migrates an older whole-file SudoStamp install (after asking), from its backup.
+- New: `--key` pins a pasted key with no network involved; `--yes` for unattended migration.
+
 ### Security audit (2026-10-15)
 - **Fixed: a hostile phone could pin a second key.** During `install.sh stage`, the phone's key
   comment was written verbatim into the root-owned pinned-keys file; a newline in it added another

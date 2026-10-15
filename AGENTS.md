@@ -57,6 +57,8 @@ shellcheck -S warning tools/*.sh scripts/*.sh
 | `Keys.kt` | Keystore EC P-256 key, fresh strong biometric per use, invalidation detection |
 | `SshSig.kt` | SSH key blob, authorized_keys line, DER -> SSH signature blob; no crypto |
 | `MainActivity.kt` | Setup screen + approval flow; `sync()` is the single place that reconciles UI and prompt with the service |
+| `Pairing.kt`, `PairingSession.kt` | Pairing protocol (commitment + 6-digit code) and the phone's one-attempt-per-tap state machine |
+| `Cooldown.kt` | Refuses never-approved hosts unprompted for 30 s after a denial or timeout (approval fatigue) |
 | `KnownHosts.kt` | Hosts approved before (first-host warning) |
 | `StartReceiver.kt` | Restarts the listener on boot and app update |
 | `Ui.kt` | The design system: colours, type, cards, pills, buttons, checklist rows, the width-capped column |
@@ -66,7 +68,7 @@ shellcheck -S warning tools/*.sh scripts/*.sh
 UI text lives in `res/values/strings.xml`. Screenshots: the BiometricPrompt is a secure window, so
 `screencap` shows it black -- that is not a rendering bug.
 
-`tools/`: `install.sh` (host installer, every platform), `pam_check.py` (authenticates one PAM
+`tools/`: `install.sh` (host installer, every platform; `setup` is the one-command path), `pair.py` (pairing + mDNS discovery, used by install.sh), `pam_check.py` (authenticates one PAM
 service via libpam; replaces pamtester), `sudostamp-is-local.sh` (PAM gate: exit 1 under
 sshd/sshd-session/mosh-server), device probes, `verify.sh`, `verify_ssh_sig.py`,
 `check-secrets.py`. `tools/test/`: `mock_agent.py` (software-key stand-in for the phone,
@@ -150,5 +152,9 @@ a snapshot first if you need to keep working. Runtime state outside the repo: th
 19. The installer must never let root open, copy or chmod a path inside a user-owned directory:
     read it with `sudo -u "$TARGET_USER" cat`, write the result as root. Root temp files go in
     `root_tmp`. Python as root is `python3 -I`.
-20. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
+20. Pairing (Pairing.kt, PairingSession.kt, tools/pair.py) has test vectors in PairingTest that
+    tools/pair.py must reproduce: change both sides together. Never allow a second exchange per
+    arming (it re-enables the grinding attack). pair.py reads the code byte by byte from fd 0, so
+    a scripted `code\nyes\n` reaches both prompts.
+21. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
     key no longer matches.

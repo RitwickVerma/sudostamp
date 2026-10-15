@@ -26,9 +26,12 @@ object AgentProtocol {
     // client -> agent
     const val SSH2_AGENTC_REQUEST_IDENTITIES = 11
     const val SSH2_AGENTC_SIGN_REQUEST = 13
+    /** Only for pairing (see Pairing.kt); pam_rssh never sends it. */
+    const val SSH2_AGENTC_EXTENSION = 27
 
     // agent -> client
     const val SSH2_AGENT_FAILURE = 5
+    const val SSH2_AGENT_SUCCESS = 6
     const val SSH2_AGENT_IDENTITIES_ANSWER = 12
     const val SSH2_AGENT_SIGN_RESPONSE = 14
 
@@ -80,6 +83,14 @@ object AgentProtocol {
     }
 
     fun failure(): ByteArray = byteArrayOf(SSH2_AGENT_FAILURE.toByte())
+
+    /** SUCCESS followed by SSH strings: how the pairing extensions answer. */
+    fun success(vararg strings: ByteArray): ByteArray {
+        val o = ByteArrayOutputStream()
+        o.write(SSH2_AGENT_SUCCESS)
+        strings.forEach { putBlob(o, it) }
+        return o.toByteArray()
+    }
 
     /**
      * Why a sign request must be refused without asking the user, or null if it may be

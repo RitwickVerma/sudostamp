@@ -32,7 +32,7 @@ sudo more convenient; it cannot lock you out.
     <td align="center" width="33%"><img src="docs/images/approved.png" alt="Approved: sudo on 10.0.2.2 can proceed"><br><sub><b>3. Touch the sensor</b><br>The TEE signs, sudo proceeds, the app closes itself.</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/images/onboarding.png" alt="Onboarding: Approve sudo with a touch, three steps, Create key"><br><sub><b>First run</b><br>Three steps and one button. Offers fingerprint enrollment if the phone has none.</sub></td>
+    <td align="center"><img src="docs/images/onboarding.png" alt="Onboarding: Approve sudo with a touch, three steps, Get started"><br><sub><b>First run</b><br>Three steps and one button. Offers fingerprint enrollment if the phone has none.</sub></td>
     <td align="center"><img src="docs/images/ready.png" alt="Setup screen: Ready, with Listener, Notifications and Battery checks all green"><br><sub><b>Setup</b><br>A live checklist: listener, notifications, battery, Do Not Disturb. "Ready" only when all pass.</sub></td>
     <td align="center"><img src="docs/images/denied.png" alt="Denied: No signature was sent. The host falls back to the password."><br><sub><b>Denied or timed out</b><br>No signature leaves the phone; the host asks for the password.</sub></td>
   </tr>
@@ -84,6 +84,7 @@ against. [docs/DESIGN.md](docs/DESIGN.md) has the design and the reasoning behin
   | Debian 12 / 13, Ubuntu 24.04, Mint, Pop!_OS | ✅ tested end to end in CI |
   | Fedora, RHEL / Rocky / Alma 9 | ✅ tested end to end in CI |
   | openSUSE Tumbleweed | ✅ tested end to end in CI |
+  | Windows, via WSL (any distribution above) | 🧪 should work, untested; discovery may not see the phone across WSL2's NAT, so pass `--phone` |
   | macOS 14+ (via `/etc/pam.d/sudo_local`) | 🧪 experimental, untested |
   | FreeBSD (`security/pam_rssh` port) | 🧪 experimental, untested |
 
@@ -95,59 +96,83 @@ against. [docs/DESIGN.md](docs/DESIGN.md) has the design and the reasoning behin
 
 ## Setup
 
-### 1. Phone
+**1. Phone.** Install the app: a signed APK from the project's Releases page once one is published
+(check it with the `.sha256` beside it), or build it yourself (JDK 17, Android SDK 36,
+`./gradlew assembleDebug`, then `adb install -r app/build/outputs/apk/debug/app-debug.apk`).
+Open it and tap **Get started**: the key is created inside the phone's secure hardware and the
+phone starts waiting for your computer.
 
-Use a signed APK from the project's Releases page once one is published (check it with the
-`.sha256` file next to it), or build the debug APK yourself and install it (needs JDK 17 and an Android
-SDK with platform 36 and build-tools 36.0.0 — `scripts/ci-setup-sdk.sh` installs a pinned one):
-
-```sh
-./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk   # -r on later updates keeps the key
-```
-
-Open **SudoStamp**, allow notifications and tap **Create key** (it offers fingerprint enrollment
-first if the phone has none). The setup screen is a checklist; fix whatever it flags — battery
-optimization, so a sleeping phone answers instantly, and **Do Not Disturb**, which otherwise
-delivers approvals silently with no pop-up (add SudoStamp to the apps it lets through; on Samsung
-that is Settings → Notifications → Do not disturb → Apps). When it says **Ready** it also shows the address to
-dial and the key's `SHA256:` fingerprint, and **Copy setup command** gives you the `install.sh
-stage` line below, pre-filled with both. The listener restarts by itself after a reboot or an app update.
-
-<p align="center"><img src="docs/images/pin.png" alt="The key card: key fingerprint, phone address, Copy setup command and Copy public key buttons" width="420"></p>
-
-### 2. Host
-
-Paste the phone's **Copy setup command** into a terminal in a checkout of this repo, or type it:
+**2. Computer.** In a checkout of this repository:
 
 ```sh
-P=192.168.1.50:7777                        # the phone address from the setup screen
-sudo tools/install.sh stage --phone $P     # check the key's fingerprint, install pam_rssh, pin the key
-sudo tools/install.sh test  --phone $P     # approve once on a scratch PAM service; sudo untouched
-sudo tools/install.sh apply --phone $P     # add the SudoStamp block to sudo's PAM stack
+sudo tools/install.sh setup
 ```
 
-- **`stage`** fetches the phone's key and pins it **only after its fingerprint matches the phone
-  screen** (you confirm, or the pasted command carries it). The key arrives over plain TCP, so this
-  comparison is what stops an impostor on the LAN from pinning its own key. It then installs
-  pam_rssh: from the AUR (Arch, with `yay`/`paru`), the ports tree (FreeBSD), or built from source
-  at a pinned commit. If the distribution's Rust is too old to build it (Debian 13, Ubuntu 24.04),
-  it offers a temporary toolchain via the official rustup, deleted after the build.
-- **`test`** writes a throwaway PAM service containing only the phone, and authenticates against it
-  (`tools/pam_check.py`, no pamtester needed). Approve on the phone; nothing about sudo changes.
-- **`apply`** backs up sudo's PAM file and inserts a clearly marked block above its first auth
-  rule, atomically. Everything already there, including the password, stays as it was. Keep a root
-  shell open, then check in a second terminal: `sudo -k && sudo true`.
-- **`rollback`** removes exactly that block (or, on openSUSE, the override file it created).
-  **`status`** shows what is in place.
+That is the whole setup. It finds the phone on your network, and the phone shows a 6-digit code:
+
+<table>
+  <tr>
+    <td align="center" width="33%"><img src="docs/images/pair-wait.png" alt="Pairing screen: Waiting for your computer, with the command to run and the phone's address"></td>
+    <td align="center" width="33%"><img src="docs/images/pair-code.png" alt="Pairing screen: Type this code on Edith, 833 454"></td>
+    <td align="center" width="33%"><img src="docs/images/ready.png" alt="Setup screen: Ready, every check green"></td>
+  </tr>
+</table>
+
+Type the code into the terminal, approve one test request with your finger, and it is done:
+
+```
+1/4  Pairing with the phone at 192.168.1.50:7777
+  Your phone now shows a 6-digit code.
+  Code on the phone: 833454
+  Codes match: paired.
+2/4  Installing pam_rssh
+3/4  Testing, without touching sudo yet
+  Approve the request on your phone now
+4/4  Turning it on for sudo
+  OK   Done. Every sudo now asks your phone first; your password still works as before.
+```
+
+What `setup` does, step by step:
+
+- **Pairs** using the code (below: why a code, and why it is safe). Nothing is installed or changed
+  until the codes match, and a wrong code changes nothing at all.
+- **Installs pam_rssh**: from the AUR (Arch, with `yay`/`paru`), the ports tree (FreeBSD), or
+  built from a pinned, verified commit. If the distribution's Rust is too old to build it (Debian
+  13, Ubuntu 24.04) it offers a temporary toolchain from the official rustup, deleted afterwards.
+- **Tests** on a throwaway PAM service that only the phone can satisfy. sudo is not touched yet.
+- **Turns it on**: backs up sudo's PAM file and inserts one clearly marked block above its first
+  auth rule, atomically. Everything already there, including the password, stays as it was.
+  Re-running `setup` (a new phone, a reset key) replaces the block rather than adding a second.
+  An older SudoStamp install that replaced the whole file is migrated, after asking.
+
+`sudo tools/install.sh rollback` takes the block out again; `tools/install.sh status` shows what is
+in place. If discovery cannot find the phone (some networks block it), `setup` asks for the address
+the phone shows, or pass it: `setup --phone 192.168.1.50:7777`.
+
+If the computer has its own fingerprint reader (`pam_fprintd`), the block also tries it first when
+you are at the desk, and goes straight to the phone when the sudo came in over SSH or Mosh
+(`tools/sudostamp-is-local.sh`).
 
 **openSUSE** (and anywhere sudoers sets `Defaults targetpw` or `rootpw`): sudo there asks for
-*root's* password, not yours, so the phone is never consulted. `stage` detects this and prints the
+*root's* password, not yours, so the phone is never consulted. `setup` detects this and prints the
 one-line sudoers override that makes sudo authenticate you instead. It never edits sudoers itself.
 
-If the host has its own fingerprint reader (`pam_fprintd`), the block also tries it first when you
-are at the desk, and goes straight to the phone when the sudo came in over SSH or Mosh
-(`tools/sudostamp-is-local.sh`).
+### Why a 6-digit code
+
+The computer has to learn the phone's key over the network, and anything that can answer at the
+phone's address could offer its own key instead. Comparing a long fingerprint by eye stops that in
+theory and rarely in practice; a short code is easy to check, but a naive one can be forged.
+
+So pairing works like Bluetooth's: the phone **commits** to its key before it sees the computer's
+random number, and both then derive the code. Someone in the middle cannot steer either side's
+code, so their only chance is a one-in-a-million guess, and the phone allows **one** attempt per
+tap of *Pair a computer*: a second attempt during a pairing stops it, with a warning on screen.
+You *type* the code, so it really gets compared. The protocol is documented in
+[`Pairing.kt`](app/src/main/java/com/ritwick/sudostamp/Pairing.kt) and tested in CI with a
+simulated man in the middle on every supported distribution.
+
+For scripts: `stage --fingerprint SHA256:…` (the full fingerprint the app shows) or
+`stage --key "ecdsa-sha2-nistp256 AAAA…"` (pasted from **Copy public key**, no network at all).
 
 ### By hand
 

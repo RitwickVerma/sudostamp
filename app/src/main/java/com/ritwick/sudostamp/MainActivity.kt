@@ -13,6 +13,8 @@ import android.content.pm.PackageManager
 import android.hardware.biometrics.BiometricManager
 import android.hardware.biometrics.BiometricPrompt
 import android.net.Uri
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.CancellationSignal
@@ -27,6 +29,8 @@ import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -69,6 +73,9 @@ class MainActivity : Activity() {
 
     companion object {
         private const val TAG = "SudoStamp"
+
+        /** What the user runs on the computer, from a checkout of the repository. */
+        private const val SETUP_COMMAND = "sudo tools/install.sh setup"
         private const val REQ_NOTIFICATIONS = 7
 
         /** How long the "Approved" result stays up before the app closes itself. Instant
@@ -80,7 +87,32 @@ class MainActivity : Activity() {
         private const val REFUSAL_FLASH_MS = 1_400L
     }
 
-    private enum class Screen { SETUP, APPROVAL, RESULT }
+    private enum class Screen { SETUP, APPROVAL, RESULT, PAIRING }
+
+    /** The pairing state last drawn, so the screen redraws only when it changes. */
+    private var shownPairing: PairingSession.View? = null
+
+    /** While pairing: this phone advertised on the LAN as _sudostamp._tcp, so the computer
+     *  can find it without being told the address. Only while the pairing screen is armed. */
+    private var nsdListener: NsdManager.RegistrationListener? = null
+
+    /** Back on the pairing screen cancels pairing instead of leaving the app. The platform
+     *  callback (API 33+), not AndroidX: below that, Back finishes the activity, and
+     *  onDestroy disarms. */
+    private var backCallback: OnBackInvokedCallback? = null
+
+    private fun interceptBack(on: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val cb = backCallback
+        if (on && cb == null) {
+            backCallback = OnBackInvokedCallback { cancelPairing() }.also {
+                onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, it)
+            }
+        } else if (!on && cb != null) {
+            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(cb)
+            backCallback = null
+        }
+    }
 
     /** What the setup screen depends on. Re-rendered only when this changes, so the
      *  animated mark does not restart on every unrelated event. */
@@ -189,6 +221,10 @@ class MainActivity : Activity() {
 
     /** Nothing scheduled may outlive the activity (the flash-close included). */
     override fun onDestroy() {
+        // Leaving the app ends a pairing: an armed pairing nobody is watching is an open door.
+        if (isFinishing) AgentService.pairing.disarm()
+        interceptBack(false)
+        stopAdvertising()
         ui.removeCallbacksAndMessages(null)
         tick.removeCallbacksAndMessages(null)
         super.onDestroy()
@@ -302,8 +338,10 @@ class MainActivity : Activity() {
                 renderApproval(p)
                 prompt(p)
             }
-            p == null && screen == Screen.APPROVAL -> render()
+            p == null && screen == Screen.APPROVAL ->
+                if (AgentService.pairing.view().state == PairingSession.State.DONE) renderPairing() else render()
             screen == Screen.SETUP && shownSetup != setupState() -> render()
+            screen == Screen.PAIRING && shownPairing != AgentService.pairing.view() -> renderPairing()
         }
     }
 
@@ -388,6 +426,7 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------------- setup
 
     private fun render() {
+        interceptBack(false)
         val state = setupState()
         Log.i(TAG, "setup: $state")
         screen = Screen.SETUP
@@ -416,7 +455,9 @@ class MainActivity : Activity() {
         // and offer the fix, instead of letting "Create key" fail with an exception message.
         when (biometric) {
             BiometricManager.BIOMETRIC_SUCCESS -> {
-                addView(button(getString(R.string.onboard_create), Kind.PRIMARY, R.drawable.ic_key) { doCreate() },
+                addView(button(getString(R.string.onboard_create), Kind.PRIMARY, R.drawable.ic_key) {
+                    if (doCreate()) startPairing()
+                },
                     matchWrap(top = dp(24)))
                 addView(text(getString(R.string.onboard_footnote), Type.CAPTION, Ui.FAINT, center = true),
                     matchWrap(top = dp(12)))
@@ -516,34 +557,155 @@ class MainActivity : Activity() {
             ))
         }, matchWrap())
 
-        // The one-time job: get the key onto the host. The raw key (~130 chars) is never
-        // rendered -- it wrapped mid-token in text too small to check. The fingerprint is
-        // short, in the exact form `ssh-keygen -l` prints, and is what gets compared.
-        val fp = fingerprint()
-        addView(text(getString(R.string.section_pin), Type.OVERLINE, Ui.FAINT), matchWrap(top = dp(28), bottom = dp(8)))
+        // The one-time job: get the key onto a computer. Pairing does it with a 6-digit code;
+        // the fingerprint and the raw key stay available for pinning by hand.
+        addView(text(getString(R.string.section_computers), Type.OVERLINE, Ui.FAINT), matchWrap(top = dp(28), bottom = dp(8)))
         addView(card().apply {
-            addView(field(getString(R.string.field_fingerprint), fp, mono = true))
+            addView(text(getString(R.string.computers_body), Type.BODY, Ui.MUTED))
+            addView(button(getString(R.string.pair_start), Kind.PRIMARY, R.drawable.ic_computer) { startPairing() },
+                matchWrap(top = dp(16)))
             addView(divider())
-            addView(field(getString(R.string.field_address), s.address, mono = true))
-            addView(button(getString(R.string.copy_command), Kind.PRIMARY, R.drawable.ic_terminal) {
-                copy(setupCommand(s.address, fp), getString(R.string.copied_command))
-            }, matchWrap(top = dp(20)))
+            addView(field(getString(R.string.field_fingerprint), fingerprint(), mono = true))
             addView(button(getString(R.string.copy_key), Kind.SECONDARY, R.drawable.ic_content_copy) {
                 copy(Keys.authorizedKeyLine(), getString(R.string.copied_key))
-            }, matchWrap(top = dp(10)))
-            addView(text(getString(R.string.pin_hint), Type.CAPTION, Ui.MUTED), matchWrap(top = dp(12)))
+            }, matchWrap(top = dp(14)))
+            addView(text(getString(R.string.by_hand_hint), Type.CAPTION, Ui.MUTED), matchWrap(top = dp(10)))
         }, matchWrap())
 
         addView(button(getString(R.string.reset_key), Kind.GHOST) { confirmReset() }, wrap(top = dp(20)))
     }
 
+    // ---------------------------------------------------------------- pairing
+
+    /** "Pair a computer": arm one pairing exchange, become discoverable, show the screen. */
+    private fun startPairing() {
+        if (!Keys.exists()) return
+        runCatching { startForegroundService(Intent(this, AgentService::class.java)) }
+        AgentService.pairing.arm()
+        startAdvertising()
+        renderPairing()
+    }
+
+    private fun cancelPairing() {
+        AgentService.pairing.disarm()
+        stopAdvertising()
+        render()
+    }
+
     /**
-     * The host-side install command, pre-filled. It carries the fingerprint, so
-     * `install.sh stage` refuses to pin any key but the one on this screen -- the phone
-     * screen is the trusted channel, not the network the key is fetched over.
+     * Advertise `_sudostamp._tcp` with NsdManager (platform API, no dependency) for as long as
+     * pairing is armed. Discovery is only a convenience: the computer verifies whatever it
+     * finds with the code, so a fake advertisement can waste a pairing, never win one.
      */
-    private fun setupCommand(address: String, fp: String) =
-        "sudo tools/install.sh stage --phone $address --fingerprint $fp"
+    private fun startAdvertising() {
+        if (nsdListener != null) return
+        val info = NsdServiceInfo().apply {
+            serviceName = getString(R.string.nsd_name, Build.MODEL)
+            serviceType = "_sudostamp._tcp"
+            port = AgentService.PORT
+        }
+        val l = object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(i: NsdServiceInfo) { Log.i(TAG, "discoverable as '${i.serviceName}'") }
+            override fun onRegistrationFailed(i: NsdServiceInfo, code: Int) { Log.w(TAG, "discovery registration failed: $code") }
+            override fun onServiceUnregistered(i: NsdServiceInfo) { Log.i(TAG, "no longer discoverable") }
+            override fun onUnregistrationFailed(i: NsdServiceInfo, code: Int) = Unit
+        }
+        runCatching {
+            getSystemService(NsdManager::class.java).registerService(info, NsdManager.PROTOCOL_DNS_SD, l)
+            nsdListener = l
+        }.onFailure { Log.w(TAG, "cannot advertise: ${it.message}") }
+    }
+
+    private fun stopAdvertising() {
+        val l = nsdListener ?: return
+        nsdListener = null
+        runCatching { getSystemService(NsdManager::class.java).unregisterService(l) }
+    }
+
+    private fun renderPairing() {
+        val v = AgentService.pairing.view()
+        screen = Screen.PAIRING
+        interceptBack(true)
+        shownPairing = v
+        tick.removeCallbacksAndMessages(null)
+        if (v.state !in setOf(PairingSession.State.WAITING, PairingSession.State.COMMITTED, PairingSession.State.CODE)) {
+            stopAdvertising()
+        }
+        show(frame(centered = true) {
+            when (v.state) {
+                PairingSession.State.WAITING, PairingSession.State.COMMITTED -> {
+                    addView(text(getString(R.string.pair_overline), Type.OVERLINE, Ui.ACCENT, center = true), matchWrap())
+                    addView(mark(150, top = dp(12), bottom = dp(4)).apply {
+                        countDown(v.deadline - Pairing.CODE_TTL_MS, Pairing.CODE_TTL_MS)
+                    })
+                    addView(text(getString(R.string.pair_title), Type.DISPLAY, center = true), matchWrap())
+                    addView(text(getString(R.string.pair_run), Type.BODY, Ui.MUTED, center = true), matchWrap(top = dp(10)))
+                    addView(card().apply {
+                        addView(field(getString(R.string.pair_command_label), SETUP_COMMAND, mono = true))
+                        addView(button(getString(R.string.copy_command), Kind.SECONDARY, R.drawable.ic_terminal) {
+                            copy(SETUP_COMMAND, getString(R.string.copied_command))
+                        }, matchWrap(top = dp(12)))
+                        addView(divider())
+                        addView(field(getString(R.string.field_address), address(), mono = true))
+                        addView(text(getString(R.string.pair_address_hint), Type.CAPTION, Ui.MUTED), matchWrap(top = dp(6)))
+                    }, matchWrap(top = dp(20)))
+                    addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(12)))
+                }
+                PairingSession.State.CODE -> {
+                    addView(text(getString(R.string.pair_overline), Type.OVERLINE, Ui.ACCENT, center = true), matchWrap())
+                    addView(text(getString(R.string.pair_code_title, v.label ?: ""), Type.TITLE, center = true),
+                        matchWrap(top = dp(16)))
+                    addView(text(Pairing.spaced(v.code ?: "------"), Type.CODE, Ui.FG, center = true).apply {
+                        setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 52f)
+                        letterSpacing = 0.08f
+                        contentDescription = (v.code ?: "").toCharArray().joinToString(" ")
+                    }, matchWrap(top = dp(24), bottom = dp(8)))
+                    addView(text(getString(R.string.pair_code_from, v.client ?: ""), Type.CAPTION, Ui.MUTED, center = true),
+                        matchWrap())
+                    addView(text(getString(R.string.pair_code_hint), Type.CAPTION, Ui.FAINT, center = true),
+                        matchWrap(top = dp(20)))
+                    addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(16)))
+                }
+                PairingSession.State.DONE -> {
+                    addView(ResultMark(context, Ui.ACCENT, true, getString(R.string.pair_done)).apply {
+                        layoutParams = LinearLayout.LayoutParams(dp(120), dp(120)).apply { gravity = Gravity.CENTER_HORIZONTAL }
+                    })
+                    addView(text(getString(R.string.pair_done), Type.DISPLAY, Ui.ACCENT, center = true), matchWrap(top = dp(20)))
+                    addView(text(getString(R.string.pair_done_detail, v.label ?: ""), Type.BODY, Ui.MUTED, center = true),
+                        matchWrap(top = dp(8)))
+                    addView(button(getString(R.string.pair_finish), Kind.SECONDARY) { cancelPairing() }, matchWrap(top = dp(28)))
+                }
+                PairingSession.State.INTERRUPTED -> {
+                    addView(ResultMark(context, Ui.DANGER, false, getString(R.string.pair_interrupted)).apply {
+                        layoutParams = LinearLayout.LayoutParams(dp(120), dp(120)).apply { gravity = Gravity.CENTER_HORIZONTAL }
+                    })
+                    addView(text(getString(R.string.pair_interrupted), Type.DISPLAY, Ui.DANGER, center = true), matchWrap(top = dp(20)))
+                    addView(text(getString(R.string.pair_interrupted_detail), Type.BODY, Ui.MUTED, center = true),
+                        matchWrap(top = dp(8)))
+                    addView(button(getString(R.string.pair_again), Kind.PRIMARY) { startPairing() }, matchWrap(top = dp(28)))
+                    addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(8)))
+                }
+                else -> {   // EXPIRED, IDLE
+                    addView(text(getString(R.string.pair_expired), Type.DISPLAY, center = true), matchWrap())
+                    addView(text(getString(R.string.pair_expired_detail), Type.BODY, Ui.MUTED, center = true),
+                        matchWrap(top = dp(8)))
+                    addView(button(getString(R.string.pair_again), Kind.PRIMARY) { startPairing() }, matchWrap(top = dp(28)))
+                    addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(8)))
+                }
+            }
+            entrance()
+        })
+        // Expiry has no event of its own: look again every second while pairing is live.
+        if (AgentService.pairing.armed()) {
+            tick.postDelayed(object : Runnable {
+                override fun run() {
+                    if (screen != Screen.PAIRING) return
+                    sync()
+                    if (screen == Screen.PAIRING && AgentService.pairing.armed()) tick.postDelayed(this, 1000)
+                }
+            }, 1000)
+        }
+    }
 
     // ---------------------------------------------------------------- approval
 
@@ -724,7 +886,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun doCreate() {
+    /** Creates the key and starts the listener. True on success. */
+    private fun doCreate(): Boolean {
         try {
             val where = Keys.create()          // "StrongBox" or "TEE"
             Log.i(TAG, "key created in $where")
@@ -733,12 +896,13 @@ class MainActivity : Activity() {
             // screen would show "listening" while no socket was open -- a silent failure
             // exactly like the one the listener auto-start was built to prevent.
             runCatching { startForegroundService(Intent(this, AgentService::class.java)) }
-            toast(getString(R.string.key_created, where))
+            return true
         } catch (e: Exception) {
             Log.w(TAG, "key creation failed", e)
             toast(getString(R.string.key_failed, e.message ?: e.javaClass.simpleName))
+            render()
+            return false
         }
-        render()
     }
 
     /**

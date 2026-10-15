@@ -10,6 +10,7 @@ hardware (not by app code).
 |---|---|---|
 | PAM integration on the host | `pam_rssh` (Rust, MIT, maintained) | **NO** |
 | Signature verification | `pam_rssh` | **NO** |
+| Pairing (setup only) | the app's ssh-agent extensions `pair-commit/reveal/done@sudostamp` and `tools/pair.py`: numeric comparison with a commitment, so the computer learns the right key. Never on the sudo path: pam_rssh never sends them | setup tooling |
 | Host installer | `tools/install.sh`: inserts one marked block into sudo's existing PAM stack (Arch, Debian, Fedora/RHEL, openSUSE; macOS/FreeBSD experimental). Runs at install time only, never at authentication | setup tooling |
 | Fail-closed behaviour | `pam_rssh` (non-zero => PAM falls through) | **NO** |
 | Transport | plain TCP: pam_rssh dials `host:port` itself (the `multisock` crate treats any address not starting with `/` as TCP) | **NO** |
