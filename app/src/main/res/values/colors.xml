@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mirrors Ui.BG / Ui.ACCENT for the places that need a resource (theme, icon). -->
+    <color name="bg">#0B0D12</color>
+    <color name="accent">#4ADE80</color>
+</resources>

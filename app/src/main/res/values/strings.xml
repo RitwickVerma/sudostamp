@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SudoStamp</string>
+    <string name="tagline">sudo, approved by your fingerprint</string>
+
+    <!-- Onboarding (no key yet) -->
+    <string name="onboard_title">Approve sudo with a touch</string>
+    <string name="onboard_step1_title">Create a key</string>
+    <string name="onboard_step1_body">It is made inside this phone\'s secure hardware and can never leave it.</string>
+    <string name="onboard_step2_title">Pin it on your Linux host</string>
+    <string name="onboard_step2_body">One command with tools/install.sh, or paste the public key into the pinned-keys file.</string>
+    <string name="onboard_step3_title">Touch to approve</string>
+    <string name="onboard_step3_body">Each sudo asks here. No touch, no signature — and your password still works.</string>
+    <string name="onboard_create">Create key</string>
+    <string name="onboard_footnote">The key needs your fingerprint for every single signature.</string>
+    <string name="onboard_enroll">Set up a fingerprint first</string>
+    <string name="onboard_enroll_hint">The key can only be created once a fingerprint is enrolled on this phone.</string>
+    <string name="onboard_unsupported">This phone has no strong (Class 3) biometric sensor, so it cannot hold a SudoStamp key.</string>
+
+    <!-- Status -->
+    <string name="status_ready">Ready</string>
+    <string name="status_starting">Starting…</string>
+    <string name="status_notifications_off">Notifications off</string>
+    <string name="status_invalidated">Key invalidated</string>
+
+    <!-- Phone checklist -->
+    <string name="section_phone">This phone</string>
+    <string name="check_listener">Listener</string>
+    <string name="check_listener_ok">Waiting for sudo on port %1$d</string>
+    <string name="check_listener_starting">Opening port %1$d…</string>
+    <string name="check_notifications">Notifications</string>
+    <string name="check_notifications_ok">Approval requests can appear</string>
+    <string name="check_notifications_off">Requests cannot appear until you allow notifications</string>
+    <string name="check_battery">Battery</string>
+    <string name="check_battery_ok">Unrestricted: answers instantly while asleep</string>
+    <string name="check_battery_off">Optimized: a sleeping phone may answer late</string>
+    <string name="check_dnd">Do Not Disturb</string>
+    <string name="check_dnd_silenced">On, so approvals arrive silently. Add SudoStamp to the apps it lets through</string>
+    <string name="check_dnd_mode">This mode lets no apps through, so approvals arrive silently</string>
+    <string name="action_settings">Settings</string>
+    <string name="status_silenced">Silenced by Do Not Disturb</string>
+    <string name="action_allow">Allow</string>
+    <string name="action_fix">Fix</string>
+
+    <!-- Key card -->
+    <string name="section_pin">Pin this key on your host</string>
+    <string name="field_fingerprint">Key fingerprint</string>
+    <string name="field_address">Phone address</string>
+    <string name="copy_command">Copy setup command</string>
+    <string name="copy_key">Copy public key</string>
+    <string name="pin_hint">The setup command checks this fingerprint before it pins anything.</string>
+    <string name="reset_key">Reset key</string>
+
+    <!-- Invalidated key -->
+    <string name="invalidated_title">This key can no longer sign</string>
+    <string name="invalidated_body">The phone\'s fingerprints changed, so the key destroyed itself on purpose: a newly enrolled finger must never inherit the old one\'s authority. Until you pin a new key, sudo uses your password.</string>
+    <string name="invalidated_action">Reset and create a new key</string>
+
+    <!-- Approval -->
+    <string name="approval_overline">sudo request</string>
+    <string name="approval_title">Approve sudo?</string>
+    <string name="approval_from">From</string>
+    <string name="approval_received">Received %1$s</string>
+    <string name="approval_left">Denied automatically in %1$d s</string>
+    <string name="approval_new_host">First request from this host. If you did not just run sudo there, deny it.</string>
+    <string name="approval_hint">Touch the sensor to approve</string>
+    <string name="deny">Deny</string>
+
+    <!-- Result -->
+    <string name="result_approved">Approved</string>
+    <string name="result_denied">Denied</string>
+    <string name="result_expired">Expired</string>
+    <string name="result_approved_detail">sudo on %1$s can proceed</string>
+    <string name="result_denied_detail">No signature was sent. The host falls back to the password.</string>
+    <string name="result_expired_detail">The request timed out before the touch. Run sudo again.</string>
+
+    <!-- Biometric prompt -->
+    <string name="prompt_title">Approve sudo</string>
+    <string name="prompt_subtitle">From %1$s</string>
+    <string name="prompt_description">Touch the sensor to sign this one request.</string>
+
+    <!-- Reset dialog -->
+    <string name="reset_title">Reset key?</string>
+    <string name="reset_message">Deletes the key from this phone. Phone approvals stop until you create a new key and pin it on your host again. Your password keeps working.</string>
+    <string name="reset_confirm">Reset</string>
+    <string name="cancel">Cancel</string>
+
+    <!-- Toasts -->
+    <string name="copied_key">Public key copied</string>
+    <string name="copied_command">Setup command copied</string>
+    <string name="key_created">Key created in the phone\'s %1$s</string>
+    <string name="key_failed">Could not create the key: %1$s</string>
+    <string name="battery_manual">Settings → Battery → Battery optimization → Don\'t optimize</string>
+
+    <!-- Notifications -->
+    <string name="notif_listener_title">Ready to approve sudo</string>
+    <string name="notif_approval_title">Approve sudo?</string>
+    <string name="notif_approval_text">From %1$s · tap to approve</string>
+    <string name="channel_listener">Listener</string>
+    <string name="channel_listener_desc">The always-on notice that keeps the listener running. Quiet by design.</string>
+    <string name="channel_approval">Approval requests</string>
+    <string name="channel_approval_desc">A sudo is waiting for your fingerprint. Add SudoStamp to the apps Do Not Disturb lets through, or requests arrive silently.</string>
+</resources>

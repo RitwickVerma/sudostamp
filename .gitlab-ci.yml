@@ -1,0 +1,121 @@
+# SudoStamp CI (GitLab.com shared runners)
+#
+# Jobs use the Gradle wrapper (pinned to 9.3.1) and install the Android SDK from
+# Google cmdline-tools into ANDROID_HOME (cached), so CI never depends on a
+# machine-local JDK or SDK path. The local-only JDK path lives in
+# ~/.gradle/gradle.properties and the SDK path in local.properties, both outside
+# the repo.
+#
+# What CI proves, and why these jobs and not others: the whole security claim of
+# this project rests on the two SSH wire blobs (public key blob, signature blob)
+# being byte-correct, because a wrong encoding produces signatures that look fine
+# and simply fail to verify at the sudo prompt. So the unit-test job is followed
+# in the same job by tools/verify_ssh_sig.py, which checks those blobs with tools
+# that are NOT this project's code (OpenSSH + the independent `cryptography`
+# library). Unit tests alone can assert structure and still pass on bytes no SSH
+# implementation accepts -- see tools/verify_ssh_sig.py.
+
+stages:
+  - test
+  - build
+
+variables:
+  ANDROID_HOME: "$CI_PROJECT_DIR/android-sdk"
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+  SDK_PLATFORM: "36"
+  SDK_BUILD_TOOLS: "36.0.0"
+  CMDLINE_TOOLS_VERSION: "11076708"
+
+image: eclipse-temurin:17-jdk
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .gradle/wrapper/
+    - .gradle/caches/modules-2/
+    - android-sdk/
+
+.sdk_setup: &sdk_setup
+  before_script:
+    - bash scripts/ci-setup-sdk.sh
+
+unit-test:
+  stage: test
+  <<: *sdk_setup
+  script:
+    - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 testDebugUnitTest
+    # The unit test `emit artifacts for external verification` leaves app/build/sshcheck/
+    # behind (test.pub, msg.bin, sig.bin). Check those bytes with independent tools:
+    # OpenSSH must parse the public key blob, and `cryptography` must verify the ECDSA
+    # signature (plus the two negative controls). This is gate 2 of tools/verify.sh.
+    # DEBIAN_FRONTEND=noninteractive keeps debconf from spraying noise into the job log.
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-client python3 python3-cryptography >/dev/null
+    - python3 tools/verify_ssh_sig.py app/build/sshcheck
+  artifacts:
+    when: always
+    reports:
+      junit: app/build/test-results/testDebugUnitTest/*.xml
+    paths:
+      - app/build/reports/tests/
+    expire_in: 1 week
+
+# Repo hygiene that needs no SDK: no credential-shaped content in any tracked file (GitLab's
+# server-side secret push protection is not on the free tier), the shell scripts that run
+# as root on the host pass shellcheck, and the Python tools at least compile.
+hygiene:
+  stage: test
+  image: debian:stable-slim
+  cache: []
+  script:
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git python3 shellcheck >/dev/null
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - python3 tools/check-secrets.py --all
+    - shellcheck -S warning tools/*.sh tools/test/*.sh scripts/*.sh
+    - python3 -m py_compile tools/*.py tools/test/*.py && rm -rf tools/__pycache__ tools/test/__pycache__
+
+# The host side, end to end, on every supported Linux family: tools/install.sh installs
+# pam_rssh (packaged or built from the pinned commit), pins the key of a mock phone
+# (tools/test/mock_agent.py, a software key on loopback), and then a REAL sudo must
+# succeed with no password while the phone approves, fall back to the password when it
+# denies, and be restored byte for byte by rollback. Each image is a fresh root container,
+# which is what the test needs: it rewrites /etc/pam.d/sudo.
+host-e2e:
+  stage: test
+  image: $IMAGE
+  cache: []
+  before_script: []
+  parallel:
+    matrix:
+      - IMAGE:
+          - debian:trixie
+          - debian:bookworm
+          - ubuntu:24.04
+          - registry.fedoraproject.org/fedora:latest
+          - rockylinux/rockylinux:9
+          - registry.opensuse.org/opensuse/tumbleweed:latest
+          - archlinux:latest
+  script:
+    - SUDOSTAMP_SRC="$CI_PROJECT_DIR" bash tools/test/e2e.sh
+
+lint:
+  stage: test
+  <<: *sdk_setup
+  script:
+    - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 lintDebug
+  artifacts:
+    when: always
+    paths:
+      - app/build/reports/
+    expire_in: 1 week
+
+assemble-debug:
+  stage: build
+  <<: *sdk_setup
+  script:
+    - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 assembleDebug
+  artifacts:
+    paths:
+      - app/build/outputs/apk/debug/app-debug.apk
+    expire_in: 1 week

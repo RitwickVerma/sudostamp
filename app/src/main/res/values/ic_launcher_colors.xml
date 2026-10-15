@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Launcher icon background: the app's near-black ground under the green mark. -->
+    <color name="ic_launcher_bg">#0B0D12</color>
+</resources>

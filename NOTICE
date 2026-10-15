@@ -1,0 +1,16 @@
+SudoStamp
+Copyright (c) 2026 Ritwick Verma. Licensed under the MIT License (see LICENSE).
+
+This product includes third-party material:
+
+  Material Symbols (Rounded) glyphs: fingerprint, and the interface icons
+  check_circle, warning, error, content_copy, notifications, battery_full,
+  terminal, key, schedule, computer, lock, do_not_disturb_on
+  Copyright Google LLC
+  Licensed under the Apache License, Version 2.0 (see LICENSES/Apache-2.0.txt)
+  https://github.com/google/material-design-icons
+  Used, unmodified apart from colour and placement, in:
+    app/src/main/res/drawable/ic_logo.xml
+    app/src/main/res/drawable/ic_launcher_fg.xml
+    app/src/main/res/drawable/ic_stat_notify.xml
+    app/src/main/res/drawable/ic_<name>.xml for each interface icon above

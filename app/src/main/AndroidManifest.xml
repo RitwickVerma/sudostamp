@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SudoStamp — approve a sudo prompt on a Linux host with the phone's fingerprint.
+
+  Permission audit. Every entry has a reason; nothing else is requested:
+    INTERNET                        a TCP listener requires it. Binds LAN-only.
+    USE_BIOMETRIC                   gates the Keystore key behind a fingerprint.
+    POST_NOTIFICATIONS              tells you a sudo request is waiting (API 33+).
+    FOREGROUND_SERVICE              the listener must survive being backgrounded.
+    FOREGROUND_SERVICE_SPECIAL_USE  the API 34+ subtype for a non-media, non-location
+                                    always-on service.
+    REQUEST_IGNORE_BATTERY_OPTIMIZATIONS  lets the user exempt the listener from Doze
+                                    so a screen-off phone still answers instantly.
+    WAKE_LOCK                       held ONLY while an approval is pending (at most 60 s),
+                                    so the approval timeout is real time on a dozing phone.
+    HIDE_OVERLAY_WINDOWS            keeps other apps from drawing over the approval
+                                    screen (API 31+).
+    RECEIVE_BOOT_COMPLETED          restarts the listener after a reboot, instead of
+                                    leaving sudo on the password path until the app is
+                                    next opened by hand.
+
+  NOT requested: location, storage, camera, microphone, contacts, phone state.
+  taskAffinity="" on the activity: no other app's task can adopt the approval screen
+  (task hijacking, "StrandHogg").
+
+  Also NOT set: android:usesCleartextTraffic. The app never speaks HTTP; that flag only
+  governs the platform HTTP stacks, and leaving it set would suggest a cleartext-visible
+  protocol this app does not have.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:label="@string/app_name"
+        android:theme="@style/Theme.SudoStamp"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <receiver
+            android:name=".StartReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".AgentService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="signed_approval_of_privilege_escalation_requests" />
+        </service>
+    </application>
+</manifest>
