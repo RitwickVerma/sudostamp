@@ -78,6 +78,9 @@ hygiene:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git python3 shellcheck >/dev/null
     - git config --global --add safe.directory "$CI_PROJECT_DIR"
     - python3 tools/check-secrets.py --all
+    # Every script the docs tell people to run directly must be executable in git: a mode of
+    # 100644 gives "command not found" on the very first command a user types.
+    - 'bad=$(git ls-files -s tools scripts | while read -r mode _ _ f; do head -c2 "$f" | grep -q "#!" && [ "$mode" != 100755 ] && echo "$f"; done); test -z "$bad" || { echo "not executable in git:" $bad >&2; exit 1; }'
     - shellcheck -S warning tools/*.sh tools/test/*.sh scripts/*.sh
     - python3 -m py_compile tools/*.py tools/test/*.py && rm -rf tools/__pycache__ tools/test/__pycache__
 

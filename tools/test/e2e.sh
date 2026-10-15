@@ -172,7 +172,9 @@ type_code_from() { for _ in $(seq 1 100); do [ -s "$1" ] && break; sleep 0.1; do
 
 step "6. setup: pair + install + test + apply, one command"
 pairing_phone 7781
-type_code_from /tmp/p7781.code | bash "$I" setup --phone 127.0.0.1:7781 > /tmp/setup1.log 2>&1
+# Exactly as the README says to run it: executed directly, not via `bash`. (Running it
+# through bash everywhere once hid that the file had lost its executable bit.)
+type_code_from /tmp/p7781.code | "$I" setup --phone 127.0.0.1:7781 > /tmp/setup1.log 2>&1
 check "setup succeeds" grep -q "Done. Every sudo now asks your phone first" /tmp/setup1.log
 check "the paired phone's key is the one pinned" \
   bash -c "[ \"\$(awk '{print \$2}' /etc/authorized_keys/$U.keys)\" = \"\$(awk '{print \$2}' /tmp/p7781.pub)\" ]"
