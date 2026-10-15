@@ -35,6 +35,7 @@ import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.TextView
 import android.widget.Toast
 import com.ritwick.sudostamp.Ui.Kind
 import com.ritwick.sudostamp.Ui.Type
@@ -74,8 +75,12 @@ class MainActivity : Activity() {
     companion object {
         private const val TAG = "SudoStamp"
 
-        /** What the user runs on the computer, from a checkout of the repository. */
-        private const val SETUP_COMMAND = "sudo tools/install.sh setup"
+        /** What the user runs on the computer: the single-file installer from the latest
+         *  release (scripts/bundle-host.sh), no clone needed. Its SHA-256 is on the release
+         *  page; on Arch, `sudo sudostamp setup` from the AUR package does the same. */
+        private const val SETUP_COMMAND =
+            "curl -fsSLO https://gitlab.com/ritwick7/sudostamp/-/releases/permalink/latest/downloads/sudostamp-setup.sh\n" +
+                "sudo bash sudostamp-setup.sh"
         private const val REQ_NOTIFICATIONS = 7
 
         /** How long the "Approved" result stays up before the app closes itself. Instant
@@ -641,7 +646,11 @@ class MainActivity : Activity() {
                     addView(text(getString(R.string.pair_title), Type.DISPLAY, center = true), matchWrap())
                     addView(text(getString(R.string.pair_run), Type.BODY, Ui.MUTED, center = true), matchWrap(top = dp(10)))
                     addView(card().apply {
-                        addView(field(getString(R.string.pair_command_label), SETUP_COMMAND, mono = true))
+                        addView(field(getString(R.string.pair_command_label), SETUP_COMMAND, mono = true).apply {
+                            // The URL is long: smaller mono so it wraps in two or three lines.
+                            (getChildAt(1) as TextView).setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12f)
+                        })
+                        addView(text(getString(R.string.pair_arch), Type.CAPTION, Ui.MUTED), matchWrap(top = dp(8)))
                         addView(button(getString(R.string.copy_command), Kind.SECONDARY, R.drawable.ic_terminal) {
                             copy(SETUP_COMMAND, getString(R.string.copied_command))
                         }, matchWrap(top = dp(12)))

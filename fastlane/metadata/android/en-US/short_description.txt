@@ -1,0 +1,1 @@
+Approve sudo on your Linux computer with your fingerprint

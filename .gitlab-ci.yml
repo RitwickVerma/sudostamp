@@ -130,61 +130,86 @@ assemble-debug:
     expire_in: 1 week
 
 # ---------------------------------------------------------------- releases
-# Pushing a tag `vX.Y.Z` builds a SIGNED release APK and publishes it with its checksum.
-# The signing key is four CI/CD variables (Settings > CI/CD > Variables), all Masked and
-# Protected, and the tag pattern is a Protected tag, so only a maintainer's tag can reach
-# them. docs/RELEASING.md has the one-time setup.
+# Pushing a tag `vX.Y.Z` publishes a GitLab Release with:
+#   - sudostamp-setup.sh: the single-file host installer (always), and
+#   - sudostamp-vX.Y.Z.apk: the SIGNED app (only once the signing key is configured).
+# Files go to the project's generic package registry (permanent; job artifacts expire), and
+# the release links them, so
+#   https://gitlab.com/<project>/-/releases/permalink/latest/downloads/sudostamp-setup.sh
+# always serves the newest installer. The signing key is four CI/CD variables, all Masked
+# and Protected, and `v*` is a Protected tag: docs/RELEASING.md.
+
+.release_tag: &release_tag
+  if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+
+build-host:
+  stage: build
+  image: eclipse-temurin:17-jdk@sha256:420933bf319e6aff4bec22eff8d2a31c824df5d853432e3dc0f46d6ea8dd5919
+  cache: []
+  before_script: []
+  rules:
+    - *release_tag
+  script:
+    - ver="${CI_COMMIT_TAG#v}"
+    - 'test "$(sed -n ''s/.*versionName = "\(.*\)".*/\1/p'' app/build.gradle.kts)" = "$ver" || { echo "tag $CI_COMMIT_TAG does not match versionName" >&2; exit 1; }'
+    - scripts/bundle-host.sh "$ver"
+    - (cd dist && sha256sum sudostamp-setup.sh > sudostamp-setup.sh.sha256 && cat sudostamp-setup.sh.sha256)
+    - command -v curl >/dev/null || { apt-get update -qq && apt-get install -y -qq curl >/dev/null; }
+    - pkg="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/sudostamp/$ver"
+    - 'for f in sudostamp-setup.sh sudostamp-setup.sh.sha256; do curl --fail -sS -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "dist/$f" "$pkg/$f"; done'
+    - echo "HOST_SHA256=$(cut -d' ' -f1 dist/sudostamp-setup.sh.sha256)" > release.env
+  artifacts:
+    reports:
+      dotenv: release.env
+
 build-release:
   stage: build
   # Pinned by digest, not by tag: this job holds the release signing key, and a floating tag
   # means trusting whatever the image's publisher pushes next. Bump deliberately.
   image: eclipse-temurin:17-jdk@sha256:420933bf319e6aff4bec22eff8d2a31c824df5d853432e3dc0f46d6ea8dd5919
   rules:
-    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+    # Only when the key is configured: without it the release still ships the host installer.
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ && $SUDOSTAMP_KEYSTORE_B64'
   <<: *sdk_setup
   script:
-    - 'test -n "$SUDOSTAMP_KEYSTORE_B64" || { echo "SUDOSTAMP_KEYSTORE_B64 is not set (see docs/RELEASING.md)" >&2; exit 1; }'
-    # The tag must match what the app says it is, or the APK would lie about its version.
-    - ver="$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)"
-    - 'test "v$ver" = "$CI_COMMIT_TAG" || { echo "tag $CI_COMMIT_TAG does not match versionName v$ver" >&2; exit 1; }'
+    - ver="${CI_COMMIT_TAG#v}"
+    - 'test "$(sed -n ''s/.*versionName = "\(.*\)".*/\1/p'' app/build.gradle.kts)" = "$ver" || { echo "tag $CI_COMMIT_TAG does not match versionName" >&2; exit 1; }'
     - export SUDOSTAMP_KEYSTORE="$CI_PROJECT_DIR/release.jks"
     - echo "$SUDOSTAMP_KEYSTORE_B64" | base64 -d > "$SUDOSTAMP_KEYSTORE"
     - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 assembleRelease
     - rm -f "$SUDOSTAMP_KEYSTORE"
     - apk="app/build/outputs/apk/release/app-release.apk"
-    - "$ANDROID_HOME/build-tools/$SDK_BUILD_TOOLS/apksigner verify --print-certs \"$apk\" | tee signer.txt"
+    - '"$ANDROID_HOME/build-tools/$SDK_BUILD_TOOLS/apksigner" verify --print-certs "$apk" | tee signer.txt'
     - mkdir -p dist
     - cp "$apk" "dist/sudostamp-$CI_COMMIT_TAG.apk"
-    # Needed to decode a release stack trace (R8 renames classes): keep it with the release.
+    # Needed to decode a release stack trace (R8 renames classes): kept with the release.
     - cp app/build/outputs/mapping/release/mapping.txt "dist/mapping-$CI_COMMIT_TAG.txt"
     - (cd dist && sha256sum "sudostamp-$CI_COMMIT_TAG.apk" > "sudostamp-$CI_COMMIT_TAG.apk.sha256" && cat "sudostamp-$CI_COMMIT_TAG.apk.sha256")
+    - pkg="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/sudostamp/$ver"
+    - 'for f in sudostamp-$CI_COMMIT_TAG.apk sudostamp-$CI_COMMIT_TAG.apk.sha256 mapping-$CI_COMMIT_TAG.txt; do curl --fail -sS -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "dist/$f" "$pkg/$f"; done'
+    - echo "APK_SHA256=$(cut -d' ' -f1 dist/sudostamp-$CI_COMMIT_TAG.apk.sha256)" > release.env
   artifacts:
     paths:
-      - dist/
       - signer.txt
+    reports:
+      dotenv: release.env
 
 publish-release:
   stage: .post
   # Pinned (v0.24.0 by digest): it receives the job token that creates the Release.
   image: registry.gitlab.com/gitlab-org/release-cli:v0.24.0@sha256:3f52d526f48e8d10625c722fa6d6423ee82aadeae1b1aa91f07b62551d96dacf
-  needs: [build-release]
   cache: []
+  before_script: []
+  needs:
+    - job: build-host
+    - job: build-release
+      optional: true
   rules:
-    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+    - *release_tag
   script:
-    - echo "publishing $CI_COMMIT_TAG"
-  release:
-    tag_name: $CI_COMMIT_TAG
-    name: "SudoStamp $CI_COMMIT_TAG"
-    description: "Signed release APK. Verify with the .sha256 file, then see the README for setup. If you are upgrading from a debug build you must uninstall first (the signing key differs), which destroys the old key: see docs/RELEASING.md."
-    assets:
-      links:
-        - name: "sudostamp-$CI_COMMIT_TAG.apk"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/dist/sudostamp-$CI_COMMIT_TAG.apk?job=build-release"
-          link_type: package
-        - name: "mapping-$CI_COMMIT_TAG.txt"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/dist/mapping-$CI_COMMIT_TAG.txt?job=build-release"
-          link_type: other
-        - name: "sudostamp-$CI_COMMIT_TAG.apk.sha256"
-          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/dist/sudostamp-$CI_COMMIT_TAG.apk.sha256?job=build-release"
-          link_type: other
+    - ver="${CI_COMMIT_TAG#v}"
+    - pkg="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/sudostamp/$ver"
+    - 'notes="Computer: curl -fsSLO $CI_PROJECT_URL/-/releases/permalink/latest/downloads/sudostamp-setup.sh && sudo bash sudostamp-setup.sh -- SHA-256 of sudostamp-setup.sh: $HOST_SHA256."'
+    - 'set -- --assets-link "{\"name\":\"sudostamp-setup.sh\",\"url\":\"$pkg/sudostamp-setup.sh\",\"direct_asset_path\":\"/sudostamp-setup.sh\",\"link_type\":\"package\"}" --assets-link "{\"name\":\"sudostamp-setup.sh.sha256\",\"url\":\"$pkg/sudostamp-setup.sh.sha256\",\"link_type\":\"other\"}"'
+    - 'if [ -n "${APK_SHA256:-}" ]; then notes="$notes Phone: sudostamp-$CI_COMMIT_TAG.apk, SHA-256 $APK_SHA256. Updating from a debug build needs an uninstall first (different signing key): see docs/RELEASING.md."; set -- "$@" --assets-link "{\"name\":\"sudostamp-$CI_COMMIT_TAG.apk\",\"url\":\"$pkg/sudostamp-$CI_COMMIT_TAG.apk\",\"direct_asset_path\":\"/sudostamp.apk\",\"link_type\":\"package\"}" --assets-link "{\"name\":\"mapping-$CI_COMMIT_TAG.txt\",\"url\":\"$pkg/mapping-$CI_COMMIT_TAG.txt\",\"link_type\":\"other\"}"; else notes="$notes The signed app is not attached yet (no signing key configured)."; fi'
+    - release-cli create --name "SudoStamp $CI_COMMIT_TAG" --tag-name "$CI_COMMIT_TAG" --description "$notes" "$@"

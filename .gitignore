@@ -33,3 +33,6 @@ captures/
 # Python
 __pycache__/
 *.pyc
+
+# Release outputs (scripts/bundle-host.sh, CI)
+dist/

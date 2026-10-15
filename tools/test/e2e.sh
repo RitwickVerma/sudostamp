@@ -181,9 +181,13 @@ check "the paired phone's key is the one pinned" \
 check "sudo succeeds with NO password via the paired phone" as_user_sudo ""
 check "exactly one SudoStamp block" bash -c "[ \"\$(grep -c '^# >>> SudoStamp >>>' '$TARGET')\" = 1 ]"
 
-step "7. setup again (a new phone): still one block"
+step "7. setup again (a new phone), from the single-file download: still one block"
+# What users actually download: dist/sudostamp-setup.sh, built from this tree.
+"$W/scripts/bundle-host.sh" > /dev/null
 pairing_phone 7782
-type_code_from /tmp/p7782.code | bash "$I" setup --phone 127.0.0.1:7782 > /tmp/setup2.log 2>&1
+type_code_from /tmp/p7782.code | bash "$W/dist/sudostamp-setup.sh" --phone 127.0.0.1:7782 > /tmp/setup2.log 2>&1
+check "the single-file installer runs setup by default" grep -q "Done. Every sudo now asks your phone first" /tmp/setup2.log
+check "and leaves nothing behind in /tmp" bash -c "! ls -d /tmp/sudostamp-setup.* >/dev/null 2>&1"
 check "re-running setup leaves exactly one block" bash -c "[ \"\$(grep -c '^# >>> SudoStamp >>>' '$TARGET')\" = 1 ]"
 check "and the block points at the new phone" grep -q "ssh_agent_addr=127.0.0.1:7782" "$TARGET"
 check "sudo works via the new phone" as_user_sudo ""

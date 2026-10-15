@@ -26,6 +26,24 @@ APK with a SHA-256 checksum. The key lives only in CI variables; it is never in 
    Maintainers). Protected variables are only exposed to protected refs, so this is what keeps the
    key out of reach of anyone else's branch or tag.
 
+## What a release publishes
+
+| File | When | Where people get it |
+|---|---|---|
+| `sudostamp-setup.sh` (+ `.sha256`) | every release | `curl` + `sudo bash`, linked from the README and the phone's pairing screen via `/-/releases/permalink/latest/downloads/sudostamp-setup.sh` |
+| `sudostamp-vX.Y.Z.apk` (+ `.sha256`, `mapping.txt`) | once the signing key is configured | Releases page, Obtainium, IzzyOnDroid |
+
+Both are uploaded to the project's generic package registry (permanent) and linked from the
+Release. Without the key, the release is created with the host installer only, and says so.
+
+## After the release
+
+- **AUR**: `scripts/update-aur.sh X.Y.Z` points `packaging/aur/PKGBUILD` at the new tag archive and
+  regenerates `.SRCINFO`; commit both into the AUR repository
+  (`ssh://aur@aur.archlinux.org/sudostamp.git`). The package depends on `pam_rssh` (AUR).
+- **IzzyOnDroid / F-Droid** read `fastlane/metadata/android/en-US/` (title, descriptions, icon,
+  screenshots, `changelogs/<versionCode>.txt`). Add a changelog file per versionCode.
+
 ## Cutting a release
 
 1. Bump `versionCode` and `versionName` in `app/build.gradle.kts`, add a `CHANGELOG.md` section,

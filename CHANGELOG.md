@@ -4,6 +4,17 @@ Versions are the app's `versionName`. The host-side tooling is versioned with th
 
 ## Unreleased
 
+### Distribution
+- No clone needed: every release publishes `sudostamp-setup.sh`, a single, deterministic file
+  (`scripts/bundle-host.sh`) holding the installer and its helpers. `curl` it, check it, `sudo
+  bash` it. The phone's pairing screen shows the command. Tested on all 7 CI distributions.
+- AUR package (`packaging/aur/`): `yay -S sudostamp`, then `sudo sudostamp setup`.
+- Release CI publishes to the generic package registry with a stable "latest" link, attaches the
+  APK only when the signing key is configured, and still ships the host installer without it.
+- Store metadata for IzzyOnDroid / F-Droid (`fastlane/`).
+- Fixed: the scripts were not executable in git, so `sudo tools/install.sh` failed with "command
+  not found". CI now checks it.
+
 ### One-command setup with pairing (1.3.0)
 - `sudo tools/install.sh setup` does everything: finds the phone on the LAN (mDNS, only while the
   phone's pairing screen is open), pairs, installs pam_rssh, tests on a scratch PAM service, and

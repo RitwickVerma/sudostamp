@@ -96,17 +96,25 @@ against. [docs/DESIGN.md](docs/DESIGN.md) has the design and the reasoning behin
 
 ## Setup
 
-**1. Phone.** Install the app: a signed APK from the project's Releases page once one is published
-(check it with the `.sha256` beside it), or build it yourself (JDK 17, Android SDK 36,
-`./gradlew assembleDebug`, then `adb install -r app/build/outputs/apk/debug/app-debug.apk`).
-Open it and tap **Get started**: the key is created inside the phone's secure hardware and the
-phone starts waiting for your computer.
+**1. Phone.** Install the app from the [Releases](https://gitlab.com/ritwick7/sudostamp/-/releases)
+page (the APK and its `.sha256`), or let [Obtainium](https://github.com/ImranR98/Obtainium) install
+it and keep it updated: add `https://gitlab.com/ritwick7/sudostamp` as an app. Open it and tap
+**Get started**: the key is created inside the phone's secure hardware and the phone waits for your
+computer.
 
-**2. Computer.** In a checkout of this repository:
+**2. Computer.** Two lines, no clone needed:
 
 ```sh
-sudo tools/install.sh setup
+curl -fsSLO https://gitlab.com/ritwick7/sudostamp/-/releases/permalink/latest/downloads/sudostamp-setup.sh
+sudo bash sudostamp-setup.sh
 ```
+
+On **Arch**: `yay -S sudostamp`, then `sudo sudostamp setup` (updates come with your system).
+
+`sudostamp-setup.sh` is one self-contained file: the installer and its helpers, nothing hidden.
+Read it before running it as root, and compare its SHA-256 with the one on the release page. It
+is built deterministically from the tagged source (`scripts/bundle-host.sh`), so you can also
+rebuild it yourself and compare byte for byte.
 
 That is the whole setup. It finds the phone on your network, and the phone shows a 6-digit code:
 
@@ -145,8 +153,9 @@ What `setup` does, step by step:
   Re-running `setup` (a new phone, a reset key) replaces the block rather than adding a second.
   An older SudoStamp install that replaced the whole file is migrated, after asking.
 
-`sudo tools/install.sh rollback` takes the block out again; `tools/install.sh status` shows what is
-in place. If discovery cannot find the phone (some networks block it), `setup` asks for the address
+`sudo bash sudostamp-setup.sh rollback` (or `sudo sudostamp rollback`) takes the block out again;
+`status` shows what is in place. From a checkout of the repository, `sudo tools/install.sh setup`
+does the same. If discovery cannot find the phone (some networks block it), `setup` asks for the address
 the phone shows, or pass it: `setup --phone 192.168.1.50:7777`.
 
 If the computer has its own fingerprint reader (`pam_fprintd`), the block also tries it first when

@@ -63,6 +63,9 @@ GATE="/usr/local/sbin/sudostamp-is-local"
 # pam_fprintd on remote (SSH/mosh) sessions.
 FPRINT_TIMEOUT=15
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# How to tell the user to run us again: `sudostamp` when installed as a package, the bundle's
+# file name when run from the single-file download, else the path they used.
+PROG="${SUDOSTAMP_PROG:-$0}"
 
 # pam_rssh is built from this exact commit when the platform has no package: tag v1.2.1.
 # A tag can be moved; a commit cannot.
@@ -89,7 +92,7 @@ die()  { bad "$*"; exit 1; }
 # list, and a pre-planted symlink at such a name would be written through as root.
 ROOT_TMP=""
 BUILD_DIR=""
-cleanup() { rm -rf "${BUILD_DIR:-}" "${ROOT_TMP:-}"; }
+cleanup() { rm -rf "${BUILD_DIR:-}" "${ROOT_TMP:-}" "${SUDOSTAMP_BUNDLE_DIR:-}"; }
 trap cleanup EXIT
 root_tmp() {
   [ -n "$ROOT_TMP" ] || ROOT_TMP="$(mktemp -d /tmp/sudostamp.XXXXXXXX)" || die "mktemp failed"
@@ -177,7 +180,7 @@ module_ref() {
 }
 
 need_root() {
-  [ "$(id -u)" -eq 0 ] || { echo "This needs root. Run: sudo $0 $1 --phone <phone-ip>:7777" >&2; exit 1; }
+  [ "$(id -u)" -eq 0 ] || { echo "This needs root. Run: sudo $PROG $1 --phone <phone-ip>:7777" >&2; exit 1; }
 }
 need_platform() {
   [ -n "$FAMILY" ] || die "unsupported platform ($OS, /etc/os-release: ${ids:-none}). See README.md for the lines to add by hand."
@@ -663,7 +666,7 @@ do_apply() {
   local target src bak vendor="" new
   target="$(pam_target)"
   if has_foreign_rssh "$target"; then
-    die "$target already has pam_rssh lines this script did not write. 'sudo $0 setup' migrates an older SudoStamp; otherwise remove them first."
+    die "$target already has pam_rssh lines this script did not write. 'sudo $PROG setup' migrates an older SudoStamp; otherwise remove them first."
   fi
   if [ -f "$target" ]; then
     src="$target"
@@ -731,7 +734,7 @@ cmd_setup() {
   say
   ok "Done. Every sudo now asks your phone first; your password still works as before."
   say "     Try it in a second terminal:   sudo -k && sudo true"
-  say "     Undo at any time:              sudo $0 rollback"
+  say "     Undo at any time:              sudo $PROG rollback"
 }
 
 # ---------------------------------------------------- stage / test / apply (scripts)
@@ -748,7 +751,7 @@ cmd_stage() {
   warn_targetpw
   pin_key "$key"
   say
-  say "Next: sudo $0 test --phone $PHONE_ADDR"
+  say "Next: sudo $PROG test --phone $PHONE_ADDR"
 }
 
 cmd_test() {
@@ -757,7 +760,7 @@ cmd_test() {
   say "=== test: a scratch PAM service. $(pam_target) is NOT touched. ==="
   run_test || exit 1
   say
-  say "Next: sudo $0 apply --phone $PHONE_ADDR   (keep a root shell open while you do)"
+  say "Next: sudo $PROG apply --phone $PHONE_ADDR   (keep a root shell open while you do)"
 }
 
 cmd_apply() {
@@ -772,7 +775,7 @@ cmd_apply() {
   say
   say "The password path below the block is untouched: if the phone misbehaves, the password still works."
   say "Check in a SECOND terminal, keeping this one open:   sudo -k && sudo true"
-  say "Undo:   sudo $0 rollback"
+  say "Undo:   sudo $PROG rollback"
 }
 
 # ------------------------------------------------------------------- rollback
@@ -857,5 +860,5 @@ case "$CMD" in
   apply)    cmd_apply ;;
   rollback) cmd_rollback ;;
   status)   cmd_status ;;
-  *)        echo "usage: $0 {setup|stage|test|apply|rollback|status} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes]"; exit 2 ;;
+  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes]"; exit 2 ;;
 esac

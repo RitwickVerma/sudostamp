@@ -55,7 +55,8 @@
     <string name="pair_start">Pair a computer</string>
     <string name="pair_overline">Pairing</string>
     <string name="pair_title">Waiting for your computer</string>
-    <string name="pair_run">On your Linux computer, in the SudoStamp folder, run:</string>
+    <string name="pair_run">On your Linux computer, run:</string>
+    <string name="pair_arch">On Arch: yay -S sudostamp, then sudo sudostamp setup</string>
     <string name="pair_command_label">Command</string>
     <string name="pair_address_hint">If the computer cannot find this phone by itself, it will ask for this address.</string>
     <string name="pair_code_title">Type this code on %1$s</string>

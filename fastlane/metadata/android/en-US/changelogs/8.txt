@@ -1,0 +1,1 @@
+One-command setup: tap Get started on the phone, run one command on the computer, type the 6-digit code. Pairing replaces comparing a long fingerprint by eye. Unknown hosts that keep asking are silenced for 30 s.

@@ -1,0 +1,22 @@
+SudoStamp lets you approve <b>sudo</b> on your Linux computer by touching your phone's fingerprint sensor, instead of typing your password.
+
+Type sudo, your phone buzzes, touch the sensor, and the command runs. If anything goes wrong (phone off, out of range, you tap Deny, 60 seconds pass), sudo simply asks for your password as usual. It can make sudo more convenient; it cannot lock you out.
+
+<b>How it stays secure</b>
+<ul>
+<li>The key lives in the phone's secure hardware (TEE or StrongBox) and needs a fresh fingerprint for every single signature. Not even the app can sign without your finger.</li>
+<li>LAN only: nothing goes through the internet or any server.</li>
+<li>It signs nothing but sudo's one-time challenges, so the key is useless for anything else.</li>
+<li>The computer side is the existing open-source PAM module pam_rssh; this app only ever signs.</li>
+<li>Pairing uses a 6-digit code you type, so a device in the middle cannot slip in its own key.</li>
+<li>No third-party libraries, no ads, no tracking, no account.</li>
+</ul>
+
+<b>Setup</b>
+<ol>
+<li>Open the app and tap Get started.</li>
+<li>On your computer, run the one command the app shows, and type the 6-digit code from the phone.</li>
+</ol>
+The computer side supports Arch, Debian, Ubuntu, Fedora, RHEL-family and openSUSE, each tested end to end on every change.
+
+Source code, threat model and documentation: https://gitlab.com/ritwick7/sudostamp
