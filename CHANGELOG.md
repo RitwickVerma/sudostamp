@@ -4,6 +4,13 @@ Versions are the app's `versionName`. The host-side tooling is versioned with th
 
 ## Unreleased
 
+### Releases
+- Tagging `vX.Y.Z` builds a signed release APK in CI and publishes it with a SHA-256 checksum
+  (`build-release`, `publish-release`). The signing key lives only in protected, masked CI
+  variables; `assembleRelease` without them builds an unsigned, uninstallable APK. The job refuses
+  a tag that does not match `versionName`. Setup and the debug-to-release switch (which needs an
+  uninstall, and so a new key) are in `docs/RELEASING.md`.
+
 ### Host side: cross-platform
 - `tools/install.sh` supports Arch, Debian/Ubuntu, Fedora/RHEL and openSUSE families (detected
   from `/etc/os-release`), plus experimental macOS (`/etc/pam.d/sudo_local`) and FreeBSD.

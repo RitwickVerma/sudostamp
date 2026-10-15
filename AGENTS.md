@@ -135,5 +135,9 @@ a snapshot first if you need to keep working. Runtime state outside the repo: th
     openSUSE sudo defaults to `targetpw` (authenticates as root, so pam_rssh looks up
     root.keys and never asks the phone). Under `pipefail`, `cat a b | grep` fails when `a` is
     missing even if grep matched: it once silently skipped that whole test block.
-16. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
+16. A release-signed APK cannot be installed over a debug-signed one (different keys): switching
+    means uninstalling, which deletes the Keystore key and needs a new `install.sh stage`.
+    `docs/RELEASING.md`. In CI YAML, a script line containing `: ` inside a plain scalar parses
+    as a mapping and invalidates the whole pipeline: quote the line.
+17. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
     key no longer matches.

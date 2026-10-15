@@ -119,3 +119,54 @@ assemble-debug:
     paths:
       - app/build/outputs/apk/debug/app-debug.apk
     expire_in: 1 week
+
+# ---------------------------------------------------------------- releases
+# Pushing a tag `vX.Y.Z` builds a SIGNED release APK and publishes it with its checksum.
+# The signing key is four CI/CD variables (Settings > CI/CD > Variables), all Masked and
+# Protected, and the tag pattern is a Protected tag, so only a maintainer's tag can reach
+# them. docs/RELEASING.md has the one-time setup.
+build-release:
+  stage: build
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  <<: *sdk_setup
+  script:
+    - 'test -n "$SUDOSTAMP_KEYSTORE_B64" || { echo "SUDOSTAMP_KEYSTORE_B64 is not set (see docs/RELEASING.md)" >&2; exit 1; }'
+    # The tag must match what the app says it is, or the APK would lie about its version.
+    - ver="$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)"
+    - 'test "v$ver" = "$CI_COMMIT_TAG" || { echo "tag $CI_COMMIT_TAG does not match versionName v$ver" >&2; exit 1; }'
+    - export SUDOSTAMP_KEYSTORE="$CI_PROJECT_DIR/release.jks"
+    - echo "$SUDOSTAMP_KEYSTORE_B64" | base64 -d > "$SUDOSTAMP_KEYSTORE"
+    - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 assembleRelease
+    - rm -f "$SUDOSTAMP_KEYSTORE"
+    - apk="app/build/outputs/apk/release/app-release.apk"
+    - "$ANDROID_HOME/build-tools/$SDK_BUILD_TOOLS/apksigner verify --print-certs \"$apk\" | tee signer.txt"
+    - mkdir -p dist
+    - cp "$apk" "dist/sudostamp-$CI_COMMIT_TAG.apk"
+    - (cd dist && sha256sum "sudostamp-$CI_COMMIT_TAG.apk" > "sudostamp-$CI_COMMIT_TAG.apk.sha256" && cat "sudostamp-$CI_COMMIT_TAG.apk.sha256")
+  artifacts:
+    paths:
+      - dist/
+      - signer.txt
+
+publish-release:
+  stage: .post
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs: [build-release]
+  cache: []
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  script:
+    - echo "publishing $CI_COMMIT_TAG"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "SudoStamp $CI_COMMIT_TAG"
+    description: "Signed release APK. Verify with the .sha256 file, then see the README for setup. If you are upgrading from a debug build you must uninstall first (the signing key differs), which destroys the old key: see docs/RELEASING.md."
+    assets:
+      links:
+        - name: "sudostamp-$CI_COMMIT_TAG.apk"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/dist/sudostamp-$CI_COMMIT_TAG.apk?job=build-release"
+          link_type: package
+        - name: "sudostamp-$CI_COMMIT_TAG.apk.sha256"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/dist/sudostamp-$CI_COMMIT_TAG.apk.sha256?job=build-release"
+          link_type: other

@@ -95,7 +95,8 @@ against. [docs/DESIGN.md](docs/DESIGN.md) has the design and the reasoning behin
 
 ### 1. Phone
 
-There are no store releases; build the debug APK and install it (needs JDK 17 and an Android
+Use a signed APK from the project's Releases page once one is published (check it with the
+`.sha256` file next to it), or build the debug APK yourself and install it (needs JDK 17 and an Android
 SDK with platform 36 and build-tools 36.0.0 — `scripts/ci-setup-sdk.sh` installs a pinned one):
 
 ```sh
