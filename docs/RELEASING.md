@@ -47,6 +47,15 @@ open the app, Create key, and run `tools/install.sh stage` again to pin the new 
 (`rollback` first if you want to be sure nothing stale is left). Updates between release builds
 signed with the same key keep the key, like `adb install -r` does for debug builds.
 
+## Testing the shrunk build
+
+The release APK is minified (R8, no `-keep` rules). Unit tests never see that code, so before the
+first release and after any change to the manifest, `proguard-rules.pro` or anything loaded by
+name, install the SIGNED release build on an emulator or phone and check the paths that are
+reached only through the manifest: a full approval (`tools/simulate_pam_rssh.py`, 18/18), **Deny**
+on the notification, the app closing itself after approval, and the listener coming back after
+`adb install -r`. A throwaway keystore is enough for this.
+
 ## Without a key
 
 `./gradlew assembleRelease` with no `SUDOSTAMP_KEYSTORE*` variables builds an unsigned APK that

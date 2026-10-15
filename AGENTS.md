@@ -139,5 +139,10 @@ a snapshot first if you need to keep working. Runtime state outside the repo: th
     means uninstalling, which deletes the Keystore key and needs a new `install.sh stage`.
     `docs/RELEASING.md`. In CI YAML, a script line containing `: ` inside a plain scalar parses
     as a mapping and invalidates the whole pipeline: quote the line.
-17. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
+17. The release build is shrunk by R8 (~110 KB) with no `-keep` rules. Anything reflection-like
+    would break it silently, and unit tests run on the unshrunk code, so after touching
+    `proguard-rules.pro`, the manifest or anything loaded by name, re-test the shrunk, signed
+    build on a device: approval, Deny from the notification, restart on update
+    (`docs/RELEASING.md`).
+18. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
     key no longer matches.

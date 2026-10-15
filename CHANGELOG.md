@@ -4,6 +4,13 @@ Versions are the app's `versionName`. The host-side tooling is versioned with th
 
 ## Unreleased
 
+### Smaller release build
+- The release APK is shrunk with R8 and resource shrinking: 2.2 MB -> about 110 KB. There are no
+  `-keep` rules by design (no reflection or libraries; everything reached from outside is in the
+  manifest). Verified on a device with the shrunk, signed build: a full approval (18/18), Deny from
+  the notification, the app closing itself, and the listener restarting after an update.
+  `mapping.txt` is published with each release to decode stack traces. Debug builds are unchanged.
+
 ### Releases
 - Tagging `vX.Y.Z` builds a signed release APK in CI and publishes it with a SHA-256 checksum
   (`build-release`, `publish-release`). The signing key lives only in protected, masked CI

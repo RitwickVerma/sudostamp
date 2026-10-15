@@ -3,9 +3,11 @@
 </p>
 
 <p align="center">
+  <a href="https://gitlab.com/ritwick7/sudostamp/-/pipelines"><img src="https://gitlab.com/ritwick7/sudostamp/badges/master/pipeline.svg" alt="pipeline status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4ade80" alt="MIT licence"></a>
   <img src="https://img.shields.io/badge/Android-11%2B-4ade80" alt="Android 11+">
   <img src="https://img.shields.io/badge/runtime_dependencies-0-4ade80" alt="Zero runtime dependencies">
+  <img src="https://img.shields.io/badge/release_APK-~110_KB-4ade80" alt="Release APK about 110 KB">
   <img src="https://img.shields.io/badge/host-pam__rssh-4ade80" alt="Host side: pam_rssh">
   <a href="https://www.ritwickverma.dev/"><img src="https://img.shields.io/badge/site-ritwickverma.dev-ff6f00" alt="site"></a>
   <a href="https://buycovfefefor.ritwickverma.dev/"><img src="https://img.shields.io/badge/tip-buy_covfefe_for_Ritwick-e91e63" alt="tip"></a>

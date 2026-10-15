@@ -149,6 +149,8 @@ build-release:
     - "$ANDROID_HOME/build-tools/$SDK_BUILD_TOOLS/apksigner verify --print-certs \"$apk\" | tee signer.txt"
     - mkdir -p dist
     - cp "$apk" "dist/sudostamp-$CI_COMMIT_TAG.apk"
+    # Needed to decode a release stack trace (R8 renames classes): keep it with the release.
+    - cp app/build/outputs/mapping/release/mapping.txt "dist/mapping-$CI_COMMIT_TAG.txt"
     - (cd dist && sha256sum "sudostamp-$CI_COMMIT_TAG.apk" > "sudostamp-$CI_COMMIT_TAG.apk.sha256" && cat "sudostamp-$CI_COMMIT_TAG.apk.sha256")
   artifacts:
     paths:
@@ -173,6 +175,9 @@ publish-release:
         - name: "sudostamp-$CI_COMMIT_TAG.apk"
           url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/dist/sudostamp-$CI_COMMIT_TAG.apk?job=build-release"
           link_type: package
+        - name: "mapping-$CI_COMMIT_TAG.txt"
+          url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/dist/mapping-$CI_COMMIT_TAG.txt?job=build-release"
+          link_type: other
         - name: "sudostamp-$CI_COMMIT_TAG.apk.sha256"
           url: "$CI_PROJECT_URL/-/jobs/artifacts/$CI_COMMIT_TAG/raw/dist/sudostamp-$CI_COMMIT_TAG.apk.sha256?job=build-release"
           link_type: other
