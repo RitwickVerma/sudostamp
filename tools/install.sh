@@ -186,16 +186,23 @@ need_platform() {
   [ -n "$FAMILY" ] || die "unsupported platform ($OS, /etc/os-release: ${ids:-none}). See README.md for the lines to add by hand."
 }
 # host:port, strictly: this string is written into a PAM configuration line. An IPv4
-# address or a DNS name, and a port 1-65535; nothing else gets through.
+# address, a bracketed IPv6 address ([fd00::1]:7777) or a DNS name, and a port 1-65535;
+# nothing else gets through. (pam_rssh itself parses only literal addresses, so a name is
+# only usable where it is given as one; discovery always yields a literal.)
 need_phone() {
   local host="${PHONE_ADDR%:*}" port="${PHONE_ADDR##*:}"
   if [ -z "$PHONE_ADDR" ]; then
     echo "Which phone? Pass --phone <phone-ip>:7777 (the address on the app's setup screen)" >&2; exit 2
   fi
-  if ! printf '%s' "$host" | grep -qxE '[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?' ||
-     ! printf '%s' "$port" | grep -qxE '[1-9][0-9]{0,4}' || [ "$port" -gt 65535 ] ||
+  local ok_host=0
+  case "$host" in
+    \[*\]) printf '%s' "$host" | grep -qxE '\[[0-9A-Fa-f:]{2,39}\]' && \
+            [ "$(printf '%s' "$host" | tr -cd ':' | wc -c | tr -d ' ')" -ge 2 ] && ok_host=1 ;;
+    *)      printf '%s' "$host" | grep -qxE '[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?' && ok_host=1 ;;
+  esac
+  if [ "$ok_host" != 1 ] || ! printf '%s' "$port" | grep -qxE '[1-9][0-9]{0,4}' || [ "$port" -gt 65535 ] ||
      [ "$host:$port" != "$PHONE_ADDR" ]; then
-    echo "--phone must be host:port, e.g. 192.168.1.50:7777 (got: $PHONE_ADDR)" >&2; exit 2
+    echo "--phone must be host:port, e.g. 192.168.1.50:7777 or [fd00::1]:7777 (got: $PHONE_ADDR)" >&2; exit 2
   fi
 }
 need_user() {
@@ -523,7 +530,7 @@ fetch_key() {
   python3 -I - "$PHONE_ADDR" <<'PY'
 import base64, socket, struct, sys
 host, port = sys.argv[1].rsplit(":", 1)
-s = socket.create_connection((host, int(port)), timeout=10)
+s = socket.create_connection((host.strip("[]"), int(port)), timeout=10)
 s.settimeout(10)
 s.sendall(struct.pack(">I", 1) + bytes([11]))      # REQUEST_IDENTITIES
 def rx(n):

@@ -13,7 +13,6 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import java.io.InputStream
-import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
@@ -219,7 +218,10 @@ class AgentService : Service() {
     private fun bind(): ServerSocket? {
         while (running) {
             try {
-                return ServerSocket(PORT, 4, InetAddress.getByName("0.0.0.0")).also {
+                // Wildcard (null address): dual-stack where the platform has IPv6, so IPv4
+                // clients still connect (as IPv4-mapped addresses, which Java reports as
+                // Inet4Address) and the computer can use the phone's stable IPv6 address.
+                return ServerSocket(PORT, 4, null).also {
                     server = it
                     Log.i(TAG, "listening on $PORT")
                 }
