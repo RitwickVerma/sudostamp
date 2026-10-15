@@ -28,6 +28,12 @@ variables:
 
 image: eclipse-temurin:17-jdk
 
+# Every job runs on the self-hosted runner tagged `local` (docker executor): the shared
+# runners' free minutes ran out on the first pipelines (ci_quota_exceeded). The runner must
+# be enabled for this project (Settings > CI/CD > Runners) or jobs wait forever.
+default:
+  tags: [local]
+
 cache:
   key: "$CI_COMMIT_REF_SLUG"
   paths:
