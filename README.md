@@ -97,10 +97,17 @@ against. [docs/DESIGN.md](docs/DESIGN.md) has the design and the reasoning behin
 ## Setup
 
 **1. Phone.** Install the app from the [Releases](https://gitlab.com/ritwick7/sudostamp/-/releases)
-page (the APK and its `.sha256`), or let [Obtainium](https://github.com/ImranR98/Obtainium) install
-it and keep it updated: add `https://gitlab.com/ritwick7/sudostamp` as an app. Open it and tap
-**Get started**: the key is created inside the phone's secure hardware and the phone waits for your
-computer.
+page, or let [Obtainium](https://github.com/ImranR98/Obtainium) install it and keep it updated: add
+`https://gitlab.com/ritwick7/sudostamp` as an app. Open it and tap **Get started**: the key is created
+inside the phone's secure hardware and the phone waits for your computer.
+
+Every release APK is signed by the same key. To check a download before installing it:
+
+```sh
+sha256sum -c --ignore-missing SHA256SUMS                 # from the same release page
+apksigner verify --print-certs sudostamp-v*.apk | grep SHA-256
+# must be 7bcb0b51246197b9bb99779e09a3adcbbaeb2d59a0edecf8d2e8be67844d0657
+```
 
 **2. Computer.** Two lines, no clone needed:
 

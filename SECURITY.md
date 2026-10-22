@@ -90,6 +90,16 @@ python3 tools/check-secrets.py --all        # whole tree (CI runs this)
 Debug builds are signed with the developer's local `~/.android/debug.keystore`, which never enters
 the tree.
 
+## Release signing
+
+Release APKs are signed by one RSA-4096 key, certificate SHA-256
+`7B:CB:0B:51:24:61:97:B9:BB:99:77:9E:09:A3:AD:CB:BA:EB:2D:59:A0:ED:EC:F8:D2:E8:BE:67:84:4D:06:57`. It is checked against that pin
+by `scripts/release.sh` on every build and published in the README so anyone can check a download.
+The key exists only age-encrypted in the maintainer's private infrastructure repository, opened by a
+dedicated age key that unlocks nothing else. CI receives that age key only as a protected variable on
+protected `v*` tag pipelines, and the job that uses it is manual. A `gitleaks` scan of the full history
+and a pre-commit hook keep keystores and passwords out of this repository.
+
 ## The host installer runs as root
 
 `tools/install.sh` is run with `sudo` and takes several precautions because it touches files a
@@ -149,4 +159,4 @@ runner but contain no addresses or credentials (checked).
 
 ## Supported versions
 
-`master` only. There are no releases; build from source.
+The latest release only. Fixes ship as a new release; there are no backports.

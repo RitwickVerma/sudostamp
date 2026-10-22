@@ -19,14 +19,17 @@ tools/verify.sh                                           # four gates; needs JA
 - No SDK: `ANDROID_HOME=<dir> bash scripts/ci-setup-sdk.sh` installs the pinned one (CI does this).
 - If `~/.gradle/gradle.properties` sets a stale `org.gradle.java.home`, pass
   `-Dorg.gradle.java.home=$JAVA_HOME` (verify.sh does).
-- Host side: `tools/install.sh {stage|test|apply|rollback|status}`, configured by
+- Releases: `scripts/release.sh prepare X.Y.Z` (release branch + MR) and `package X.Y.Z` (signed
+  build into dist/, dry run). docs/RELEASING.md. **Merging, tagging, and `scripts/setup-ci-secrets.sh`
+  are the owner's actions; never run them.** The signing key is never decrypted outside tmpfs.
+- Host side: `tools/install.sh {setup|stage|test|apply|rollback|status}`, configured by
   `--phone <ip>:7777` (or `SUDOSTAMP_PHONE`), run with plain `sudo`, never `sudo -E`. **Never run `apply` or `rollback` unless asked**:
   they replace `/etc/pam.d/sudo`. `stage` and `test` leave it alone.
 
 ## Test
 
 ```sh
-./gradlew testDebugUnitTest                          # 31 JVM tests, no emulator, no mocks
+./gradlew testDebugUnitTest                          # 51 JVM tests, no emulator, no mocks
 python3 tools/verify_ssh_sig.py app/build/sshcheck   # AFTER the unit tests
 ./gradlew lintDebug
 python3 tools/check-secrets.py --all

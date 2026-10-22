@@ -13,7 +13,8 @@ invisible to reading the code and obvious minutes after pointing a real request 
 - A change to the listener or the approval flow is run against a device:
   `tools/reuse_connection_test.py` (no finger) and `tools/simulate_pam_rssh.py` (one approval).
 - The commit message says what was verified and how.
-- Run `python3 tools/check-secrets.py --staged` before committing; CI runs it over the whole tree.
+- Run `scripts/setup-dev.sh` once: it installs the pre-commit hook that runs the secret scan on
+  staged changes (CI scans the whole tree, and gitleaks the whole history).
 
 Deliberate choices, not oversights — please do not "fix" these without discussing first: no
 runtime dependencies (no AndroidX), `minSdk 30`, no TLS on the socket, one client at a time, the

@@ -1,75 +1,103 @@
-# Releasing
+# Releasing SudoStamp
 
-A release is a Git tag. CI builds the app, signs it with **your** release key, and publishes the
-APK with a SHA-256 checksum. The key lives only in CI variables; it is never in the repo.
+Source of truth: **https://gitlab.com/ritwick7/sudostamp**. A release is a merge request plus a tag.
+CI runs every check on the tag, and the one job that touches the signing key (`package`) runs only
+when the owner clicks it. `scripts/release.sh package X.Y.Z` does the same signed build locally, as a
+dry run or a fallback.
 
-## One-time setup
+## 1. One-time setup (owner)
 
-1. **Create the signing key** on a machine you trust, and keep a backup of it somewhere safe and
-   offline. If you lose it you can never publish an update that installs over the old one.
+1. **Signing key.** Already created: an RSA-4096 keystore (`CN=SudoStamp, O=Ritwick Verma`, valid
+   until 2054), certificate SHA-256
+   `7B:CB:0B:51:24:61:97:B9:BB:99:77:9E:09:A3:AD:CB:BA:EB:2D:59:A0:ED:EC:F8:D2:E8:BE:67:84:4D:06:57`,
+   pinned in `scripts/release.sh`. It lives only in the maintainer's infrastructure repository as
+   `sops/sudostamp/release-signing.sops.env` (keystore + passwords, age-encrypted). Two recipients:
+   - **its own age key**, `~/.config/sops/age/sudostamp-release.txt` on the maintainer's machine. It
+     opens this file and nothing else, so storing it in CI exposes no other secret;
+   - the homelab recovery key, so losing the first is recoverable.
 
-   ```sh
-   keytool -genkeypair -keystore sudostamp-release.jks -alias sudostamp \
-     -keyalg EC -groupname secp256r1 -validity 10000 -dname "CN=SudoStamp release"
-   ```
+   **Never put the keystore or a password in this repository.** `tools/check-secrets.py` (CI and the
+   pre-commit hook) blocks `*.jks`, `*.keystore` and credential-shaped text; `gitleaks` scans the whole
+   history on every pipeline. Losing the key means no update can ever install over a released app.
+2. **CI signing.** `scripts/setup-ci-secrets.sh` (owner only; it asks first) stores the age key and
+   the vault ciphertext as two **protected File variables** and protects the `v*` tags, so only a
+   maintainer's tag pipeline receives them. Without it, sign locally (section 3).
+3. `master` is protected (Maintainers merge, no force push).
 
-2. **Add four CI/CD variables** (Settings → CI/CD → Variables), each **Masked** and **Protected**:
+## 2. Cutting a release
 
-   | Variable | Value |
-   |---|---|
-   | `SUDOSTAMP_KEYSTORE_B64` | `base64 -w0 sudostamp-release.jks` |
-   | `SUDOSTAMP_KEYSTORE_PASSWORD` | the store password |
-   | `SUDOSTAMP_KEY_ALIAS` | `sudostamp` |
-   | `SUDOSTAMP_KEY_PASSWORD` | the key password |
+```sh
+# 1. On master (via a normal merge request): a "## X.Y.Z — unreleased" section in CHANGELOG.md and
+#    the store notes fastlane/metadata/android/en-US/changelogs/<next versionCode>.txt (<= 500 chars).
+# 2. Release branch + merge request. No secrets; your checkout is not touched:
+scripts/release.sh prepare X.Y.Z      # bumps versionCode/versionName, dates the section, runs release-check
+# 3. The MR pipeline (tests, release-check) goes green -> merge it.
+# 4. Tag THE MERGE COMMIT (not master before it):
+git switch master && git pull && git tag -a vX.Y.Z -m "SudoStamp X.Y.Z" && git push origin vX.Y.Z
+# 5. Tag pipeline: every check, then click `package` -> signed APK + installer uploaded,
+#    `publish-release` creates the GitLab Release.
+```
 
-3. **Protect the tag pattern** `v*` (Settings → Repository → Protected tags, allowed to create:
-   Maintainers). Protected variables are only exposed to protected refs, so this is what keeps the
-   key out of reach of anyone else's branch or tag.
+A tag on the wrong commit fails `release-check` within seconds and nothing else starts. Delete it
+(`git push origin :refs/tags/vX.Y.Z`) and tag again.
 
-## What a release publishes
+| Gate | Where |
+|---|---|
+| secret scan (tree), gitleaks (full history), shellcheck | `hygiene`, `gitleaks` |
+| unit tests + independent signature check, lint, debug build | `unit-test`, `lint`, `assemble-debug` |
+| host installer end to end on 7 distributions | `host-e2e` |
+| versions, store notes, dated changelog, store listing | `release-check` (tags and `release/*`) |
+| signed build, certificate == pinned release key, not debuggable | `package` (manual) |
+| GitLab Release with APK, installer, SHA256SUMS, mapping | `publish-release` |
 
-| File | When | Where people get it |
-|---|---|---|
-| `sudostamp-setup.sh` (+ `.sha256`) | every release | `curl` + `sudo bash`, linked from the README and the phone's pairing screen via `/-/releases/permalink/latest/downloads/sudostamp-setup.sh` |
-| `sudostamp-vX.Y.Z.apk` (+ `.sha256`, `mapping.txt`) | once the signing key is configured | Releases page, Obtainium, IzzyOnDroid |
+## 3. Signing locally (dry run, or no CI secrets)
 
-Both are uploaded to the project's generic package registry (permanent) and linked from the
-Release. Without the key, the release is created with the host installer only, and says so.
+```sh
+git worktree add --detach /tmp/rel vX.Y.Z && cd /tmp/rel
+JAVA_HOME=~/opt/jdk ANDROID_HOME=~/opt/android-sdk scripts/release.sh package X.Y.Z
+# dist/: sudostamp-vX.Y.Z.apk, sudostamp-setup.sh, mapping-vX.Y.Z.txt, SHA256SUMS. Nothing is uploaded.
+cd - && git worktree remove --force /tmp/rel
+```
 
-## After the release
+The vault is read from the infrastructure repository's `origin/master` (whatever branch its checkout
+is on) and decrypted into a private tmpfs directory that is wiped on exit. To publish such a build,
+create the GitLab Release by hand and attach the four files.
 
-- **AUR**: `scripts/update-aur.sh X.Y.Z` points `packaging/aur/PKGBUILD` at the new tag archive and
-  regenerates `.SRCINFO`; commit both into the AUR repository
-  (`ssh://aur@aur.archlinux.org/sudostamp.git`). The package depends on `pam_rssh` (AUR).
-- **IzzyOnDroid / F-Droid** read `fastlane/metadata/android/en-US/` (title, descriptions, icon,
-  screenshots, `changelogs/<versionCode>.txt`). Add a changelog file per versionCode.
+## 4. Before a release that touches the app
 
-## Cutting a release
+- Install the **signed** release build on an emulator or test phone (`package` output) and check the
+  paths R8 can break, since unit tests never see shrunk code: create key, pairing
+  (`tools/install.sh setup` against it), an approval (`tools/simulate_pam_rssh.py`, 18/18), **Deny**
+  from the notification, the app closing itself after approval, the listener coming back after
+  `adb install -r`.
+- `tools/test/e2e.sh` runs in CI on every push; check it is green on the merge request.
 
-1. Bump `versionCode` and `versionName` in `app/build.gradle.kts`, add a `CHANGELOG.md` section,
-   commit and push.
-2. Tag exactly the `versionName`: `git tag v1.3.0 && git push origin v1.3.0`.
-3. The `build-release` job refuses a tag that does not match `versionName`. It signs, verifies with
-   `apksigner`, and attaches `sudostamp-vX.Y.Z.apk` and its `.sha256`; `publish-release` creates the
-   Release page.
+## 5. Version numbers
 
-Check a download: `sha256sum -c sudostamp-vX.Y.Z.apk.sha256`, and
-`apksigner verify --print-certs sudostamp-vX.Y.Z.apk` (the certificate fingerprint should be the
-same on every release; publish it in the release notes once so people can pin it).
+`versionCode` only goes up (`release-check` compares it with every earlier tag). 1.3.0, the first public
+release, is versionCode 8; earlier codes were internal builds and never published.
 
-## Switching from a debug build to a release build
+## 6. Switching from a debug build to a release build
 
 Debug and release builds are signed with different keys, so Android will not install one over the
 other. You must **uninstall** first, and uninstalling **deletes the phone's Keystore key**. Afterwards:
-open the app, Create key, and run `tools/install.sh stage` again to pin the new key on the host
-(`rollback` first if you want to be sure nothing stale is left). Updates between release builds
-signed with the same key keep the key, like `adb install -r` does for debug builds.
+open the app, **Get started**, and run `setup` on the computer again to pair the new key. Updates
+between release builds keep the key, like `adb install -r` does for debug builds.
 
-## Updating dependencies
+## 7. Distribution channels
 
-Every build dependency is pinned by SHA-256 in `gradle/verification-metadata.xml`, and Gradle
-refuses anything that does not match. After bumping AGP, Kotlin, Gradle or JUnit, regenerate it
-**from an empty cache in the CI image**, or CI will fail on files your own cache already had:
+| Channel | How it gets the build | Who |
+|---|---|---|
+| GitLab Releases | `publish-release` | automatic after `package` |
+| Obtainium | reads GitLab Releases | nothing to do |
+| AUR (`sudostamp`, host side) | `scripts/update-aur.sh X.Y.Z`, push `packaging/aur/` to `aur@aur.archlinux.org:sudostamp.git` | owner (AUR account) |
+| IzzyOnDroid / F-Droid | `fastlane/metadata/android/en-US/` + the signed APK | owner files the inclusion request once |
+
+## 8. Updating dependencies
+
+Every build dependency is pinned by SHA-256 in `gradle/verification-metadata.xml`. After bumping AGP,
+Kotlin, Gradle or JUnit, regenerate it **from an empty cache in the CI image**, or CI fails on files your
+own cache already had:
 
 ```sh
 podman run --rm -v "$PWD":/src:ro -v "$PWD/gradle":/out eclipse-temurin:17-jdk bash -c '
@@ -81,18 +109,3 @@ podman run --rm -v "$PWD":/src:ro -v "$PWD/gradle":/out eclipse-temurin:17-jdk b
 ```
 
 Then review the diff: every changed checksum should belong to something you meant to upgrade.
-
-## Testing the shrunk build
-
-The release APK is minified (R8, no `-keep` rules). Unit tests never see that code, so before the
-first release and after any change to the manifest, `proguard-rules.pro` or anything loaded by
-name, install the SIGNED release build on an emulator or phone and check the paths that are
-reached only through the manifest: a full approval (`tools/simulate_pam_rssh.py`, 18/18), **Deny**
-on the notification, the app closing itself after approval, and the listener coming back after
-`adb install -r`. A throwaway keystore is enough for this.
-
-## Without a key
-
-`./gradlew assembleRelease` with no `SUDOSTAMP_KEYSTORE*` variables builds an unsigned APK that
-Android refuses to install. That is deliberate: there is no way to produce an installable release
-without the key.
