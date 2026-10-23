@@ -327,5 +327,9 @@ else
 fi
 cp /tmp/pam.good "$TARGET"
 
+# On failure, the installer's own output: a CI log shows only PASS/FAIL otherwise.
+if [ "$FAIL" -gt 0 ]; then
+  for f in /tmp/*.log; do printf '\n--- %s (last 15 lines)\n' "$f"; tail -15 "$f"; done
+fi
 printf '\n%s: %d passed, %d failed\n' "$( . /etc/os-release; echo "$ID $VERSION_ID")" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
