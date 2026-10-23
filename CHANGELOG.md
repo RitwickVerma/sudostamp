@@ -2,7 +2,20 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
-## Unreleased
+## 1.3.0 — 2026-10-22
+
+**First public release.** Everything below this line was developed and verified before the
+repository was published. The release APK is signed by the release key
+`7B:CB:0B:51:24:61:97:B9:BB:99:77:9E:09:A3:AD:CB:BA:EB:2D:59:A0:ED:EC:F8:D2:E8:BE:67:84:4D:06:57`
+(earlier debug builds are not: switching to it needs an uninstall, see docs/RELEASING.md).
+
+### Release process
+- Releases follow `scripts/release.sh prepare` (release branch + merge request), a tag on the
+  merge commit, and a tag pipeline whose signing job is manual. The signing key lives in a SOPS
+  vault, opened by its own age key; the APK certificate is pinned and checked on every build.
+- `release-check` (versions, store notes, dated changelog, listing) runs first on every tag.
+- `gitleaks` scans the full history on every pipeline; a pre-commit hook (`scripts/setup-dev.sh`)
+  scans staged changes.
 
 ### An address that survives DHCP changes
 - sudo's config holds the phone's address as a literal (pam_rssh parses `std::net::SocketAddr`:
@@ -45,7 +58,7 @@ Versions are the app's `versionName`. The host-side tooling is versioned with th
 - Fixed: the scripts were not executable in git, so `sudo tools/install.sh` failed with "command
   not found". CI now checks it.
 
-### One-command setup with pairing (1.3.0)
+### One-command setup with pairing
 - `sudo tools/install.sh setup` does everything: finds the phone on the LAN (mDNS, only while the
   phone's pairing screen is open), pairs, installs pam_rssh, tests on a scratch PAM service, and
   turns it on for sudo. The phone side is one tap: **Get started** creates the key and waits.

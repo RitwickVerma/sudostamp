@@ -5,6 +5,27 @@ hardware.** In daily use on one Arch Linux host with a Samsung Galaxy foldable (
 2026-09. This file is the verification log: what was checked, how, and what it showed. Release
 notes are in [CHANGELOG.md](../CHANGELOG.md).
 
+## 2026-10-22 — release 1.3.0 prepared (first public release)
+
+Release tooling modelled on the maintainer's other app (ShutUp!): `scripts/release.sh prepare|package`,
+`scripts/release-check.sh`, `scripts/check-listing.sh`, owner-only `scripts/setup-ci-secrets.sh`, a tag
+pipeline whose signing job is manual, gitleaks over the full history, a pre-commit hook.
+
+| check | evidence |
+|---|---|
+| signing key | RSA-4096 `CN=SudoStamp, O=Ritwick Verma`, cert SHA-256 `7B:CB:0B:51…4D:06:57`, generated in tmpfs, stored only SOPS-encrypted; its own age key opens it, Edith's ShutUp key is refused |
+| `release.sh package 1.3.0` (real vault) | release-check ok → decrypted to tmpfs → R8 APK signed (v2, RSA 4096) → certificate equals the pin → not debuggable → dist/ + SHA256SUMS; tmpfs empty afterwards, tree clean |
+| pin rejects other keys | same run with a throwaway vault and key → refused: "signed with 2C:16:…, not the release key" |
+| `release-check` | refuses an undated changelog; accepts the dated 1.3.0 tree |
+| gitleaks, full history | 11 commits, no leaks |
+| signed release APK on an emulator (Android 16) | Get started → key in TEE, listening, discoverable; the single-file `sudostamp-setup.sh` from dist/ in a fresh Debian 13 container paired with the code read off the screen, setup test approved, one PAM block, nothing left in /tmp; re-running setup replaced the block |
+| real `sudo` through the release build | approve via notification tap + fingerprint 7 of 8 (app closes itself, leaves recents); Deny from the notification → FAILURE, password fallback works; listener back after `adb install -r` |
+
+**Open:** one of eight approvals on the emulator failed with the TCP connection broken while the request
+was pending (`pam_rssh`: "Broken pipe"); not reproduced in seven more attempts, including the same
+first-sudo-after-pairing sequence. It resembles an earlier one-off emulator connection drop and has not
+been seen on the real phone, but it is not explained.
+
 ## 2026-10-14 — polish pass (app 1.2.2)
 
 Re-read every file and walked every state on a throwaway emulator (Android 16), with screenshots.
