@@ -1,4 +1,10 @@
-# SudoStamp CI (GitLab.com shared runners)
+# SudoStamp CI (the owner's self-hosted runner; GitLab.com shared runners are not used)
+#
+# CI NEVER SIGNS. The release key and the installer key are decrypted only on the
+# maintainer's machine, into tmpfs, by scripts/release.sh (docs/RELEASING.md). The runner is
+# shared with other projects and runs unprotected branches, and GitLab passes protected
+# variables to every job of a protected ref, not only to the one that needs them -- so a
+# signing key in CI variables would have been one compromised image away from leaking.
 #
 # Jobs use the Gradle wrapper (pinned to 9.3.1) and install the Android SDK from
 # Google cmdline-tools into ANDROID_HOME (cached), so CI never depends on a
@@ -18,7 +24,6 @@
 stages:
   - test
   - build
-  - release
 
 variables:
   ANDROID_HOME: "$CI_PROJECT_DIR/android-sdk"
@@ -175,47 +180,3 @@ release-check:
     - apk add --no-cache bash git >/dev/null
     - 'if [ -n "$CI_COMMIT_TAG" ]; then V="${CI_COMMIT_TAG#v}"; else V="${CI_COMMIT_BRANCH#release/}"; fi'
     - scripts/release-check.sh "$V"
-
-package:
-  stage: release
-  # Pinned by digest: this job decrypts the signing key. Bump deliberately.
-  image: eclipse-temurin:17-jdk@sha256:420933bf319e6aff4bec22eff8d2a31c824df5d853432e3dc0f46d6ea8dd5919
-  rules:
-    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
-      when: manual
-  needs: [release-check, unit-test, lint, hygiene, gitleaks, host-e2e]
-  allow_failure: false
-  <<: *sdk_setup
-  script:
-    - test -n "${SOPS_AGE_KEY_FILE:-}" && test -n "${SUDOSTAMP_SIGNING_SOPS:-}" || { echo "signing variables missing (scripts/setup-ci-secrets.sh, owner)" >&2; exit 1; }
-    # sops, pinned by checksum (matches the upstream checksums file for v3.13.3).
-    - curl -fsSL -o /usr/local/bin/sops https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64
-    - echo "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b  /usr/local/bin/sops" | sha256sum -c -
-    - chmod +x /usr/local/bin/sops
-    - SUDOSTAMP_GRADLE_ARGS="-Dorg.gradle.jvmargs=-Xmx2g" scripts/release.sh package "${CI_COMMIT_TAG#v}"
-    - pkg="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/sudostamp/${CI_COMMIT_TAG#v}"
-    - 'for f in sudostamp-$CI_COMMIT_TAG.apk sudostamp-setup.sh mapping-$CI_COMMIT_TAG.txt SHA256SUMS; do curl --fail -sS -H "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "dist/$f" "$pkg/$f"; done'
-    - '{ echo "APK_SHA256=$(grep "sudostamp-$CI_COMMIT_TAG.apk" dist/SHA256SUMS | cut -d" " -f1)"; echo "HOST_SHA256=$(grep sudostamp-setup.sh dist/SHA256SUMS | cut -d" " -f1)"; } > release.env'
-  artifacts:
-    reports:
-      dotenv: release.env
-
-publish-release:
-  stage: release
-  # Pinned (v0.24.0 by digest): it receives the job token that creates the Release.
-  image: registry.gitlab.com/gitlab-org/release-cli:v0.24.0@sha256:3f52d526f48e8d10625c722fa6d6423ee82aadeae1b1aa91f07b62551d96dacf
-  cache: []
-  before_script: []
-  needs: [package]
-  rules:
-    - *release_tag
-  script:
-    - ver="${CI_COMMIT_TAG#v}"
-    - pkg="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/sudostamp/$ver"
-    - 'notes="Phone: sudostamp-$CI_COMMIT_TAG.apk (SHA-256 $APK_SHA256), signed by the release key 7B:CB:0B:51:24:61:97:B9:BB:99:77:9E:09:A3:AD:CB:BA:EB:2D:59:A0:ED:EC:F8:D2:E8:BE:67:84:4D:06:57. Computer: curl -fsSLO $CI_PROJECT_URL/-/releases/permalink/latest/downloads/sudostamp-setup.sh and sudo bash sudostamp-setup.sh (SHA-256 $HOST_SHA256). Changes: CHANGELOG.md."'
-    - >-
-      release-cli create --name "SudoStamp $CI_COMMIT_TAG" --tag-name "$CI_COMMIT_TAG" --description "$notes"
-      --assets-link "{\"name\":\"sudostamp-$CI_COMMIT_TAG.apk\",\"url\":\"$pkg/sudostamp-$CI_COMMIT_TAG.apk\",\"direct_asset_path\":\"/sudostamp.apk\",\"link_type\":\"package\"}"
-      --assets-link "{\"name\":\"sudostamp-setup.sh\",\"url\":\"$pkg/sudostamp-setup.sh\",\"direct_asset_path\":\"/sudostamp-setup.sh\",\"link_type\":\"package\"}"
-      --assets-link "{\"name\":\"SHA256SUMS\",\"url\":\"$pkg/SHA256SUMS\",\"link_type\":\"other\"}"
-      --assets-link "{\"name\":\"mapping-$CI_COMMIT_TAG.txt\",\"url\":\"$pkg/mapping-$CI_COMMIT_TAG.txt\",\"link_type\":\"other\"}"

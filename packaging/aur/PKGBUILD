@@ -18,7 +18,7 @@ package() {
   # GitLab names the archive's top directory <project>-<tag>-<commit>.
   cd "$srcdir"/"$pkgname"-v"$pkgver"*/
   local f
-  for f in install.sh pair.py pam_check.py sudostamp-is-local.sh; do
+  for f in install.sh pair.py pam_check.py sudostamp-is-local.sh sudostamp-probe.sh; do
     install -Dm755 "tools/$f" "$pkgdir/usr/lib/$pkgname/$f"
   done
   install -Dm755 /dev/stdin "$pkgdir/usr/bin/$pkgname" <<'SH'

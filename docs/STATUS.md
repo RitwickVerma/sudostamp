@@ -5,6 +5,27 @@ hardware.** In daily use on one Arch Linux host with a Samsung Galaxy foldable (
 2026-09. This file is the verification log: what was checked, how, and what it showed. Release
 notes are in [CHANGELOG.md](../CHANGELOG.md).
 
+## 2026-10-23 — security audit and 1.4.0 (protocol 2)
+
+Four independent AI-run reviews (app, host installer + PAM, release chain, protocol), every
+high/medium finding re-checked against the code before fixing. Fixes and their tests are listed in
+CHANGELOG.md 1.4.0. No human security review yet (SECURITY.md, "Review status").
+
+| check | evidence |
+|---|---|
+| JVM unit tests | 67 pass (new: Hosts, Limiter, pairing v2 vectors shared with Python, subnet rule, overflow) |
+| Python tests (`test_pair.py`) | 10 pass; same pairing vectors as `PairingTest.kt` |
+| host e2e, all 7 images | Arch, Debian 12/13, Ubuntu 24.04, Fedora 44, Rocky 9: 53/53; openSUSE: 52/52. New negative checks: transparent relay during pairing refused; stalling phone → password within seconds (was: hang); foreign key → password, phone never asked; no phone → password; `--phone` with a hidden PAM line refused; gate flags vs real libpam (1.4 refuses, 1.3 authenticated); rollback refuses a BEGIN without END |
+| `--phone` validation | newline payload, host names, port 0/65536/07777, zone ids, bad IPv4 all refused; IPv4 and bracketed IPv6 accepted |
+| debug app on the Android 17 emulator, single-file installer in a Debian 13 container | pairing v2 via the real app (code read off the screen) → test approval → block applied, backup in `/var/lib/sudostamp/backups`; real sudo approved via notification tap (prompt opened for that request only); second sudo 0.2 s after an approval refused unprompted; sign request for an unknown key → FAILURE in 0.00 s, no notification; Deny in the notification; relay pairing refused against the real app ("reached at 127.0.0.1:7777, talking to 127.0.0.1:7790"); attacker finishing pairing first cancelled when the second computer arrived, its key deleted |
+| upgrade 1.3.0 → 1.4 (debug builds) | the 1.3 key becomes "Computers paired before version 1.4"; a sudo pinned to it still works, with the legacy warning |
+| installer signature command | verifies and runs in bash and fish; a modified installer fails verification and does not run |
+| installer key | ed25519, generated in tmpfs, stored only SOPS-encrypted (homelab-infra MR 5); decrypts with the release age key to exactly `keys/allowed_signers` |
+
+Seen once on the emulator while taking screenshots: a request queued behind another that was then
+denied ended with "Broken pipe" on the phone's reply (the client had gone). Failed closed; password
+fallback worked.
+
 ## 2026-10-22 — release 1.3.0 prepared (first public release)
 
 Release tooling modelled on the maintainer's other app (ShutUp!): `scripts/release.sh prepare|package`,

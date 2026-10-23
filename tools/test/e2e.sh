@@ -13,6 +13,12 @@
 #   3. apply  -> sudo succeeds with NO password while the phone approves
 #   4. phone denies -> sudo falls through to the password, which still works
 #   5. rollback -> the stack is byte-identical to before; the phone is no longer asked
+#   6-10. one-command setup, the single-file installer, a key-swapping man in the middle,
+#         migration from 1.2, an IPv6 address
+#   11. what must NOT work: a relay that passes pairing through unchanged, a phone that
+#       stalls (sudo must not hang), a phone with the wrong key, no phone at all, a hostile
+#       --phone value, a gate whose success must not count as authentication, a damaged
+#       block that rollback must refuse to "fix"
 #
 # Exit 0 only if every step behaved. CI runs this for each supported family.
 set -uo pipefail
@@ -191,6 +197,30 @@ check "and leaves nothing behind in /tmp" bash -c "! ls -d /tmp/sudostamp-setup.
 check "re-running setup leaves exactly one block" bash -c "[ \"\$(grep -c '^# >>> SudoStamp >>>' '$TARGET')\" = 1 ]"
 check "and the block points at the new phone" grep -q "ssh_agent_addr=127.0.0.1:7782" "$TARGET"
 check "sudo works via the new phone" as_user_sudo ""
+check "no backups or scratch services left in the PAM directory" \
+  bash -c "! ls /etc/pam.d/sudo.bak-* /etc/pam.d/sudostamp-test >/dev/null 2>&1"
+check "the backups are in /var/lib/sudostamp/backups, root-only" \
+  bash -c "ls /var/lib/sudostamp/backups/sudo.bak-* >/dev/null 2>&1 && [ \"\$(stat -c %a /var/lib/sudostamp/backups)\" = 700 ]"
+check "the probe guards pam_rssh" grep -q "pam_exec.so quiet /usr/local/sbin/sudostamp-probe phone=127.0.0.1:7782 keys=/etc/authorized_keys" "$TARGET"
+
+# The phone's address is held by something that accepts and never answers (another device
+# after a DHCP change, or someone squatting). pam_rssh has no timeout; the probe must keep sudo
+# from hanging, and the password must still work -- within seconds, not minutes.
+echo stall > /tmp/mode
+t0=$(date +%s)
+check "a stalling phone does not hang sudo: the password works" timeout 60 bash -c "$(declare -f as_user_sudo); U=$U; as_user_sudo '$PW'"
+check "and it took seconds, not the minute" bash -c "[ \$(( \$(date +%s) - $t0 )) -lt 30 ]"
+echo foreign > /tmp/mode
+before_signs=$(grep -c "^sign:" /tmp/p7782.log)
+check "a phone with a key nobody pinned: the password works" timeout 60 bash -c "$(declare -f as_user_sudo); U=$U; as_user_sudo '$PW'"
+check "and without the password sudo fails" \
+  bash -c "! timeout 60 su $U -c \"sudo -k; sudo -S -p '' true </dev/null\" >/dev/null 2>&1"
+check "and that phone was never asked to sign" bash -c "[ \"\$(grep -c '^sign:' /tmp/p7782.log)\" = '$before_signs' ]"
+echo approve > /tmp/mode
+pkill -f -- "--port 7782 " 2>/dev/null; sleep 0.5
+t0=$(date +%s)
+check "no phone at all: the password works, quickly" timeout 60 bash -c "$(declare -f as_user_sudo); U=$U; as_user_sudo '$PW'"
+check "and it took seconds" bash -c "[ \$(( \$(date +%s) - $t0 )) -lt 20 ]"
 
 step "8. a man in the middle cannot pin its key"
 pairing_phone 7783
@@ -206,6 +236,20 @@ check "setup refuses" bash -c "! grep -q 'Done.' /tmp/setup-mitm.log && grep -q 
 check "the pinned key and the PAM stack are unchanged" \
   bash -c "[ \"\$(cksum < /tmp/keys.before)\" = \"\$(cksum < /etc/authorized_keys/$U.keys)\" ] && [ \"\$(cksum < /tmp/pam.before)\" = \"\$(cksum < '$TARGET')\" ]"
 check "the attacker's key is nowhere" bash -c "! grep -qF \"\$(awk '{print \$2}' /tmp/mitm.pub)\" /etc/authorized_keys/$U.keys"
+
+step "8b. a relay that passes pairing through unchanged cannot pin its address"
+# Answering discovery first and relaying every byte, untouched, to the real phone: the codes
+# would match, and the relay's address would go into sudo's configuration for good. The phone
+# reports the address it was dialled on; it is not the relay's.
+pairing_phone 7787
+python3 "$W/tools/test/mock_agent.py" --port 7786 --relay-to 127.0.0.1:7787 > /tmp/relay.log 2>&1 &
+for _ in $(seq 1 50); do grep -q "relay on" /tmp/relay.log 2>/dev/null && break; sleep 0.1; done
+cp "$TARGET" /tmp/pam.before
+type_code_from /tmp/p7787.code | bash "$I" setup --phone 127.0.0.1:7786 > /tmp/setup-relay.log 2>&1
+check "setup refuses: something answered in the phone's place" \
+  bash -c "! grep -q 'Done.' /tmp/setup-relay.log && grep -q 'answered in the phone' /tmp/setup-relay.log"
+check "the PAM stack is unchanged and never names the relay" \
+  bash -c "[ \"\$(cksum < /tmp/pam.before)\" = \"\$(cksum < '$TARGET')\" ] && ! grep -q 7786 '$TARGET'"
 
 step "9. an older whole-file SudoStamp is migrated"
 bash "$I" rollback > /dev/null 2>&1
@@ -232,6 +276,7 @@ if python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1",0)
   type_code_from /tmp/p7791.code | "$I" setup --phone "[::1]:7791" > /tmp/setup-v6.log 2>&1
   check "setup accepts a bracketed IPv6 address" grep -q "Done. Every sudo now asks your phone first" /tmp/setup-v6.log
   check "the PAM line carries the IPv6 literal" grep -qF "ssh_agent_addr=[::1]:7791" "$TARGET"
+  check "and so does the probe, in a form PAM does not mangle" grep -qF "sudostamp-probe phone=[::1]:7791 keys=" "$TARGET"
   check "pam_rssh dials it: sudo works with NO password" as_user_sudo ""
   echo deny > /tmp/mode
   check "and the password still works when that phone denies" as_user_sudo "$PW"
@@ -239,6 +284,48 @@ if python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1",0)
 else
   echo "  (no IPv6 loopback in this container: skipped)"
 fi
+
+step "11. what must not work"
+# A --phone value with a second line is a second PAM rule. It must be refused before anything.
+cp "$TARGET" /tmp/pam.before
+bash "$I" stage --phone "$(printf '127.0.0.1:7777 x\nauth sufficient pam_permit.so\n127.0.0.1:7777')" >/tmp/evil-phone.log 2>&1
+check "a --phone value with a hidden PAM rule is refused" \
+  bash -c "grep -q 'must be an address and port' /tmp/evil-phone.log && [ \"\$(cksum < /tmp/pam.before)\" = \"\$(cksum < '$TARGET')\" ]"
+bash "$I" stage --phone "phone.example:7777" >/tmp/name-phone.log 2>&1
+check "a host name is refused (pam_rssh could never dial it)" grep -q 'must be an address and port' /tmp/name-phone.log
+
+# The gate's control flags: its success must not count as authentication. With 1.3's
+# [success=ok default=1], a stack of gate + failing `sufficient` modules and nothing required
+# below AUTHENTICATED. (pam_fprintd is not in these images; pam_deny stands in for every check.)
+GC="$(sed -n "s/^GATE_CONTROL='\(.*\)'\$/\1/p" "$I")"
+TRUE_BIN="$(ls /usr/bin/true /bin/true 2>/dev/null | head -1)"
+for form in new old; do
+  [ $form = new ] && ctl="$GC" || ctl='[success=ok default=1]'
+  { echo "#%PAM-1.0"; echo "auth $ctl pam_exec.so quiet $TRUE_BIN"; echo "auth sufficient pam_deny.so"
+    echo "auth sufficient pam_deny.so"; echo "account required pam_permit.so"; } > /etc/pam.d/sudostamp-gatecheck
+  if python3 "$W/tools/pam_check.py" sudostamp-gatecheck "$U" >/dev/null 2>&1; then echo "$form: authenticated"; else echo "$form: refused"; fi
+done > /tmp/gate.log
+rm -f /etc/pam.d/sudostamp-gatecheck
+check "the installer's gate flags do not authenticate when every check fails" grep -qx "new: refused" /tmp/gate.log
+check "(and 1.3's did -- the test can tell the difference)" grep -qx "old: authenticated" /tmp/gate.log
+
+# Rollback with a BEGIN marker and no END would have dropped every line after it -- the
+# whole auth stack, password included. It must refuse and change nothing.
+BEGIN_LINE="$(sed -n 's/^BEGIN_MARK="\(.*\)"$/\1/p' "$I")"
+cp "$TARGET" /tmp/pam.good
+{ head -1 /tmp/pam.good; echo "$BEGIN_LINE"; tail -n +2 /tmp/pam.good | grep -vF '# >>> SudoStamp >>>' | grep -vF '# <<< SudoStamp <<<'; } > "$TARGET"
+cp "$TARGET" /tmp/pam.broken
+bash "$I" rollback >/tmp/rollback-broken.log 2>&1
+if grep -qF "SudoStamp: copied from the vendor file" /tmp/pam.good; then
+  # openSUSE: the whole file is our copy of the vendor stack, so rollback deletes it and the
+  # vendor file applies again, exactly -- markers or not, nothing of the user's is lost.
+  check "rollback of our own vendor copy removes it, whatever its markers" \
+    bash -c "[ ! -f '$TARGET' ] && { [ -f /usr/lib/pam.d/sudo ] || [ -f /usr/etc/pam.d/sudo ]; }"
+else
+  check "rollback refuses a block with no end marker, and changes nothing" \
+    bash -c "grep -q 'damaged SudoStamp markers' /tmp/rollback-broken.log && [ \"\$(cksum < /tmp/pam.broken)\" = \"\$(cksum < '$TARGET')\" ]"
+fi
+cp /tmp/pam.good "$TARGET"
 
 printf '\n%s: %d passed, %d failed\n' "$( . /etc/os-release; echo "$ID $VERSION_ID")" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

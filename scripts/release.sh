@@ -8,19 +8,25 @@
 #       merges it and tags the merge commit: git tag -a vX.Y.Z -m "SudoStamp X.Y.Z" && git push origin vX.Y.Z
 #
 #   scripts/release.sh package X.Y.Z
-#       The signed build. Run by the tag pipeline's manual `package` job, and locally as a dry run
-#       (publishes nothing): release-check.sh, signing key from the SOPS vault into a private tmpfs
-#       directory wiped on exit, R8 release APK, certificate pinned to RELEASE_CERT below, not
-#       debuggable, the single-file host installer, mapping.txt and SHA256SUMS -> dist/.
+#       The signed build, on the maintainer's machine only (CI never sees a signing key):
+#       release-check.sh, both keys from the SOPS vault into a private tmpfs directory wiped on
+#       exit, R8 release APK, certificate pinned to RELEASE_CERT below, not debuggable, the
+#       single-file host installer, mapping.txt and SHA256SUMS, and SSH signatures (.sig) over
+#       the installer and SHA256SUMS -> dist/. Publishes nothing.
 #
-# Signing material, in this order:
-#   SUDOSTAMP_SIGNING_SOPS   path to the encrypted vault file (CI: a protected File variable);
-#                            default: sops/sudostamp/release-signing.sops.env in the maintainer's
-#                            infrastructure checkout (SUDOSTAMP_HOMELAB_INFRA, default ../homelab-infra),
-#                            read from origin/master so the checkout's own branch does not matter.
-#   SOPS_AGE_KEY_FILE        age key that opens ONLY this vault file;
-#                            default ~/.config/sops/age/sudostamp-release.txt.
-# Needs: JDK 17 (JAVA_HOME), Android SDK with build-tools 36.0.0 (ANDROID_HOME), sops.
+#   scripts/release.sh publish X.Y.Z
+#       package, then upload dist/ to the GitLab package registry and create the Release (asks
+#       first). Run from a worktree at the tag: the tag pipeline must be green.
+#
+# Signing material, read from the maintainer's infrastructure checkout (SUDOSTAMP_HOMELAB_INFRA,
+# default ../homelab-infra) at origin/master, so the checkout's own branch does not matter:
+#   sops/sudostamp/release-signing.sops.env    the APK keystore and its passwords
+#   sops/sudostamp/installer-signing.sops.env  the ed25519 key that signs the installer
+#                                              (public half: keys/allowed_signers)
+#   SOPS_AGE_KEY_FILE   the age key that opens ONLY these two files;
+#                       default ~/.config/sops/age/sudostamp-release.txt.
+# Needs: JDK 17 (JAVA_HOME), Android SDK with build-tools 36.0.0 (ANDROID_HOME), sops,
+# ssh-keygen; for publish, glab logged in to gitlab.com.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -32,9 +38,12 @@ RELEASE_CERT="7B:CB:0B:51:24:61:97:B9:BB:99:77:9E:09:A3:AD:CB:BA:EB:2D:59:A0:ED:
 
 die() { echo "release: $*" >&2; exit 1; }
 step() { printf '\n== %s\n' "$*"; }
-USAGE="usage: scripts/release.sh prepare X.Y.Z | package X.Y.Z"
+USAGE="usage: scripts/release.sh prepare X.Y.Z | package X.Y.Z | publish X.Y.Z"
 MODE="${1:-}"; VERSION="${2:-}"
-case "$MODE" in prepare|package) ;; *) die "$USAGE" ;; esac
+case "$MODE" in prepare|package|publish) ;; *) die "$USAGE" ;; esac
+# The installer's signatures: verified against this file, which is also what users paste.
+SIGNERS=keys/allowed_signers
+NAMESPACE=sudostamp-release
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "$USAGE"
 GRADLE=app/build.gradle.kts
 TAG="v$VERSION"
@@ -90,29 +99,42 @@ step "preconditions"
 [ -z "$(git status --porcelain)" ] || die "working tree not clean"
 # Before anything can fail: a dist/ left by an earlier run must never pass for this run's output.
 rm -rf dist
-if [ -n "${CI_COMMIT_TAG:-}" ]; then
-  [ "$CI_COMMIT_TAG" = "$TAG" ] || die "pipeline tag $CI_COMMIT_TAG is not $TAG"
-fi
 scripts/release-check.sh "$VERSION" || die "this tree is not release $VERSION"
+if [ "$MODE" = publish ]; then
+  git fetch -q origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse -q --verify "$TAG^{commit}")" ] || \
+    die "HEAD is not $TAG: publish from a worktree at the tag (git worktree add --detach /tmp/rel $TAG)"
+  command -v glab >/dev/null || die "glab is not installed"
+  glab api "projects/:id/releases/$TAG" >/dev/null 2>&1 && die "a GitLab Release for $TAG already exists"
+fi
 CODE=$(sed -nE 's/^\s*versionCode = ([0-9]+).*/\1/p' "$GRADLE")
 
 step "signing material"
 HOMELAB="${SUDOSTAMP_HOMELAB_INFRA:-$PWD/../homelab-infra}"
-VAULT="${SUDOSTAMP_SIGNING_SOPS:-}"
 export SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/sudostamp-release.txt}"
 [ -f "$SOPS_AGE_KEY_FILE" ] || die "no age key at $SOPS_AGE_KEY_FILE"
-SECRETS=$(mktemp -d "${XDG_RUNTIME_DIR:-/dev/shm}/sudostamp-signing.XXXXXX")
+command -v ssh-keygen >/dev/null || die "ssh-keygen is not installed"
+# tmpfs only: never a disk-backed /tmp.
+RUNDIR="${XDG_RUNTIME_DIR:-/dev/shm}"
+case "$(df -P "$RUNDIR" 2>/dev/null | awk 'NR==2{print $1}')" in tmpfs|shm|none) ;; *)
+  [ "$(stat -f -c %T "$RUNDIR" 2>/dev/null)" = tmpfs ] || die "$RUNDIR is not tmpfs" ;; esac
+SECRETS=$(mktemp -d "$RUNDIR/sudostamp-signing.XXXXXX")
 chmod 700 "$SECRETS"
-if [ -n "$VAULT" ]; then
-  cp "$VAULT" "$SECRETS/vault.sops.env"
-else
-  [ -d "$HOMELAB/.git" ] || die "no SUDOSTAMP_SIGNING_SOPS and no infrastructure checkout at $HOMELAB"
-  git -C "$HOMELAB" fetch -q origin master
-  git -C "$HOMELAB" show origin/master:sops/sudostamp/release-signing.sops.env > "$SECRETS/vault.sops.env" 2>/dev/null || \
-    die "sops/sudostamp/release-signing.sops.env is not on $HOMELAB origin/master"
-fi
-(umask 077; sops decrypt --input-type dotenv --output-type dotenv "$SECRETS/vault.sops.env" > "$SECRETS/signing.env") || \
+[ -d "$HOMELAB/.git" ] || die "no infrastructure checkout at $HOMELAB (SUDOSTAMP_HOMELAB_INFRA)"
+git -C "$HOMELAB" fetch -q origin master
+for v in release-signing installer-signing; do
+  git -C "$HOMELAB" show "origin/master:sops/sudostamp/$v.sops.env" > "$SECRETS/$v.sops.env" 2>/dev/null || \
+    die "sops/sudostamp/$v.sops.env is not on $HOMELAB origin/master"
+done
+(umask 077; sops decrypt --input-type dotenv --output-type dotenv "$SECRETS/release-signing.sops.env" > "$SECRETS/signing.env") || \
   die "could not decrypt the signing vault with $SOPS_AGE_KEY_FILE"
+(umask 077; sops decrypt --input-type dotenv --output-type dotenv "$SECRETS/installer-signing.sops.env" \
+  | sed -n 's/^INSTALLER_KEY_B64=//p' | base64 -d > "$SECRETS/installer") || \
+  die "could not decrypt the installer key with $SOPS_AGE_KEY_FILE"
+[ -s "$SECRETS/installer" ] || die "the installer vault holds no key"
+# The installer key must be the one users verify against.
+[ "$(ssh-keygen -y -f "$SECRETS/installer" | awk '{print $2}')" = "$(awk '{print $NF}' "$SIGNERS")" ] || \
+  die "the installer key in the vault is not the one in $SIGNERS"
 # Parsed, never sourced: the file's contents are data.
 while IFS='=' read -r k v; do
   case "$k" in
@@ -122,16 +144,21 @@ while IFS='=' read -r k v; do
     KEY_PASSWORD) export SUDOSTAMP_KEY_PASSWORD="$v" ;;
   esac
 done < "$SECRETS/signing.env"
-rm -f "$SECRETS/signing.env" "$SECRETS/vault.sops.env"
+rm -f "$SECRETS/signing.env" "$SECRETS"/*.sops.env
 [ -s "$SECRETS/release.jks" ] && [ -n "${SUDOSTAMP_KEY_ALIAS:-}" ] || die "the vault does not hold a complete keystore"
 export SUDOSTAMP_KEYSTORE="$SECRETS/release.jks"
 echo "decrypted into $SECRETS (wiped on exit)"
 
 step "signed release build"
-./gradlew -q --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" ${SUDOSTAMP_GRADLE_ARGS:-} assembleRelease
+# --project-cache-dir inside the tmpfs directory: Gradle records the signing config (the alias,
+# and unsalted hashes of both passwords) as task inputs in its execution history, which would
+# otherwise stay behind in .gradle/ on disk.
+./gradlew -q --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" --project-cache-dir "$SECRETS/gradle-project" \
+  ${SUDOSTAMP_GRADLE_ARGS:-} assembleRelease
 APK=app/build/outputs/apk/release/app-release.apk
 [ -f "$APK" ] || die "no signed APK (was the keystore read?)"
-wipe; SECRETS=""
+rm -rf "$SECRETS/release.jks" "$SECRETS/gradle-project"
+unset SUDOSTAMP_KEYSTORE_PASSWORD SUDOSTAMP_KEY_PASSWORD SUDOSTAMP_KEY_ALIAS SUDOSTAMP_KEYSTORE
 
 step "verify"
 "$BT/apksigner" verify "$APK" || die "apksigner rejects $APK"
@@ -149,4 +176,81 @@ cp "$APK" "dist/sudostamp-$TAG.apk"
 cp app/build/outputs/mapping/release/mapping.txt "dist/mapping-$TAG.txt"
 scripts/bundle-host.sh "$VERSION" >/dev/null
 (cd dist && sha256sum "sudostamp-$TAG.apk" sudostamp-setup.sh > SHA256SUMS && cat SHA256SUMS)
-echo "dist/ ready for $TAG (nothing published)"
+
+step "installer signatures"
+# What protects the people who run the installer as root: the package registry accepts a
+# second upload under the same name, so a file there can be replaced. A replaced file fails
+# this signature; users verify it before running anything (README, the app's command).
+for f in sudostamp-setup.sh SHA256SUMS; do
+  ssh-keygen -Y sign -q -f "$SECRETS/installer" -n "$NAMESPACE" "dist/$f" || die "could not sign $f"
+done
+wipe; SECRETS=""
+for f in sudostamp-setup.sh SHA256SUMS; do
+  ssh-keygen -Y verify -f "$SIGNERS" -I sudostamp-release -n "$NAMESPACE" -s "dist/$f.sig" < "dist/$f" >/dev/null || \
+    die "the signature over $f does not verify against $SIGNERS"
+done
+echo "signed and verified: sudostamp-setup.sh.sig, SHA256SUMS.sig"
+
+if [ "$MODE" = package ]; then
+  echo "dist/ ready for $TAG (nothing published)"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- publish: registry + Release
+step "publish $TAG"
+FILES="sudostamp-$TAG.apk sudostamp-setup.sh sudostamp-setup.sh.sig SHA256SUMS SHA256SUMS.sig mapping-$TAG.txt"
+printf '  %s\n' $FILES
+if [ "${SUDOSTAMP_YES:-}" != 1 ]; then
+  read -r -p "Upload these and create the public GitLab Release $TAG? [yes/no] " answer
+  [ "$answer" = yes ] || die "stopped; nothing published"
+fi
+PKG="projects/:id/packages/generic/sudostamp/$VERSION"
+for f in $FILES; do
+  glab api -X PUT "$PKG/$f" --input "dist/$f" -H "Content-Type: application/octet-stream" >/dev/null || die "upload of $f failed"
+done
+URL=$(glab api projects/:id | sed -n 's/.*"web_url":"\([^"]*\)".*/\1/p' | head -1)
+API="https://gitlab.com/api/v4/projects/$(glab api projects/:id | sed -n 's/.*"id":\([0-9]*\),.*/\1/p' | head -1)/packages/generic/sudostamp/$VERSION"
+APK_SHA=$(awk -v f="sudostamp-$TAG.apk" '$2==f{print $1}' dist/SHA256SUMS)
+HOST_SHA=$(awk '$2=="sudostamp-setup.sh"{print $1}' dist/SHA256SUMS)
+python3 - "$TAG" "$URL" "$API" "$APK_SHA" "$HOST_SHA" "$RELEASE_CERT" "$(cat "$SIGNERS")" > dist/release.json <<'PY'
+import json, sys
+tag, url, api, apk_sha, host_sha, cert, signers = sys.argv[1:]
+perm = url + "/-/releases/permalink/latest/downloads"
+notes = f"""**Phone:** `sudostamp-{tag}.apk` (SHA-256 `{apk_sha}`), signed by the release key `{cert}`.
+
+**Computer** -- download, verify, run:
+```
+curl -fsSLO {perm}/sudostamp-setup.sh
+curl -fsSLO {perm}/sudostamp-setup.sh.sig
+echo '{signers}' > sudostamp.signers
+ssh-keygen -Y verify -f sudostamp.signers -I sudostamp-release -n sudostamp-release -s sudostamp-setup.sh.sig < sudostamp-setup.sh && sudo bash sudostamp-setup.sh
+```
+(SHA-256 `{host_sha}`; `SHA256SUMS` is signed the same way.)
+
+Changes: [CHANGELOG.md]({url}/-/blob/{tag}/CHANGELOG.md)."""
+def link(name, path=None, kind="package"):
+    d = {"name": name, "url": f"{api}/{name}", "link_type": kind}
+    if path:
+        d["direct_asset_path"] = path
+    return d
+print(json.dumps({"tag_name": tag, "name": f"SudoStamp {tag}", "description": notes, "assets": {"links": [
+    link(f"sudostamp-{tag}.apk", "/sudostamp.apk"),
+    link("sudostamp-setup.sh", "/sudostamp-setup.sh"),
+    link("sudostamp-setup.sh.sig", "/sudostamp-setup.sh.sig", "other"),
+    link("SHA256SUMS", "/SHA256SUMS", "other"),
+    link("SHA256SUMS.sig", "/SHA256SUMS.sig", "other"),
+    link(f"mapping-{tag}.txt", None, "other"),
+]}}))
+PY
+glab api -X POST projects/:id/releases --input dist/release.json >/dev/null || die "creating the Release failed"
+rm -f dist/release.json
+step "verify what anyone downloads"
+CHK=$(mktemp -d)
+for f in sudostamp-setup.sh sudostamp-setup.sh.sig sudostamp.apk; do
+  curl -fsSL -o "$CHK/$f" "$URL/-/releases/permalink/latest/downloads/$f" || die "anonymous download of $f failed"
+done
+ssh-keygen -Y verify -f "$SIGNERS" -I sudostamp-release -n "$NAMESPACE" -s "$CHK/sudostamp-setup.sh.sig" < "$CHK/sudostamp-setup.sh" >/dev/null || \
+  die "the published installer does not verify"
+[ "$(sha256sum < "$CHK/sudostamp.apk" | cut -d' ' -f1)" = "$APK_SHA" ] || die "the published APK is not the one built"
+rm -rf "$CHK"
+echo "published $TAG: $URL/-/releases/$TAG"

@@ -19,9 +19,10 @@ tools/verify.sh                                           # four gates; needs JA
 - No SDK: `ANDROID_HOME=<dir> bash scripts/ci-setup-sdk.sh` installs the pinned one (CI does this).
 - If `~/.gradle/gradle.properties` sets a stale `org.gradle.java.home`, pass
   `-Dorg.gradle.java.home=$JAVA_HOME` (verify.sh does).
-- Releases: `scripts/release.sh prepare X.Y.Z` (release branch + MR) and `package X.Y.Z` (signed
-  build into dist/, dry run). docs/RELEASING.md. **Merging, tagging, and `scripts/setup-ci-secrets.sh`
-  are the owner's actions; never run them.** The signing key is never decrypted outside tmpfs.
+- Releases: `scripts/release.sh prepare X.Y.Z` (release branch + MR), `package X.Y.Z` (signed build
+  into dist/, dry run) and `publish X.Y.Z` (package + upload + GitLab Release). docs/RELEASING.md.
+  **Merging, tagging and `publish` are the owner's actions; never run them unasked.** CI never signs
+  and never holds a key; the keys are never decrypted outside tmpfs.
 - Host side: `tools/install.sh {setup|stage|test|apply|rollback|status}`, configured by
   `--phone <ip>:7777` (or `SUDOSTAMP_PHONE`), run with plain `sudo`, never `sudo -E`. **Never run `apply` or `rollback` unless asked**:
   they replace `/etc/pam.d/sudo`. `stage` and `test` leave it alone.
@@ -54,26 +55,27 @@ shellcheck -S warning tools/*.sh scripts/*.sh
 
 | Path (`app/src/main/java/com/ritwick/sudostamp/`) | Responsibility |
 |---|---|
-| `AgentProtocol.kt` | ssh-agent framing; only REQUEST_IDENTITIES and SIGN_REQUEST; `refusal()` = sign policy (our key, exactly 32 bytes) |
-| `AgentService.kt` | Foreground service: serial TCP listener on 7777, LAN-only peers, per-connection budget, parks one `Approval`, wake lock while pending, notifications |
-| `Approval.kt` | One pending request; resolves exactly once (approve/deny/timeout) |
-| `Keys.kt` | Keystore EC P-256 key, fresh strong biometric per use, invalidation detection |
+| `AgentProtocol.kt` | ssh-agent framing; only REQUEST_IDENTITIES and SIGN_REQUEST (+ pairing extensions); `refusal()` = sign policy (a paired computer's key, exactly 32 bytes) |
+| `AgentService.kt` | Foreground service: serial TCP listener on 7777, peers on the Wi-Fi/Ethernet subnet only, per-connection budget, key lookup per computer, `Limiter`, parks one `Approval`, wake lock while pending, notifications tied to one request |
+| `Approval.kt` | One pending request (with its computer); resolves exactly once (approve/deny/timeout) |
+| `Hosts.kt` | Paired computers, one Keystore key each; pending until first approved; reconciled with the Keystore |
+| `Keys.kt` | Keystore EC P-256 keys (one per computer), fresh strong biometric per use, secure-hardware check, invalidation detection |
+| `Limiter.kt` | When a paired computer's request is refused unprompted: 3 s after an approval, per-computer cooldown, global cap |
 | `SshSig.kt` | SSH key blob, authorized_keys line, DER -> SSH signature blob; no crypto |
 | `MainActivity.kt` | Setup screen + approval flow; `sync()` is the single place that reconciles UI and prompt with the service |
-| `Pairing.kt`, `PairingSession.kt` | Pairing protocol (commitment + 6-digit code) and the phone's one-attempt-per-tap state machine |
-| `Cooldown.kt` | Refuses never-approved hosts unprompted for 30 s after a denial or timeout (approval fatigue) |
-| `KnownHosts.kt` | Hosts approved before (first-host warning) |
+| `Pairing.kt`, `PairingSession.kt` | Pairing protocol v2 (commitment over key, nonce and addresses + 6-digit code) and the phone's one-attempt-per-tap state machine; a second commit cancels, even after done |
 | `StartReceiver.kt` | Restarts the listener on boot and app update |
 | `Ui.kt` | The design system: colours, type, cards, pills, buttons, checklist rows, the width-capped column |
 | `FingerprintView.kt`, `ResultMark.kt` | The animated mark (radar, or countdown ring on approval); the drawn check/cross result |
-| `Net.kt` | Address helpers, LAN check |
+| `Net.kt` | Address helpers, `allowedPeer` (subnet of the arrival address), endpoint encoding, stable address |
 
 UI text lives in `res/values/strings.xml`. Screenshots: the BiometricPrompt is a secure window, so
 `screencap` shows it black -- that is not a rendering bug.
 
 `tools/`: `install.sh` (host installer, every platform; `setup` is the one-command path), `pair.py` (pairing + mDNS discovery, used by install.sh), `pam_check.py` (authenticates one PAM
 service via libpam; replaces pamtester), `sudostamp-is-local.sh` (PAM gate: exit 1 under
-sshd/sshd-session/mosh-server), device probes, `verify.sh`, `verify_ssh_sig.py`,
+sshd/sshd-session/mosh-server), `sudostamp-probe.sh` (PAM check before pam_rssh: the phone must
+answer with this user's key within 4 s, else skip), device probes, `verify.sh`, `verify_ssh_sig.py`,
 `check-secrets.py`. `tools/test/`: `mock_agent.py` (software-key stand-in for the phone,
 loopback only, tests only) and `e2e.sh` (the host side end to end in a throwaway container).
 
@@ -85,7 +87,8 @@ podman run --rm -v "$PWD":/src:ro <image> bash /src/tools/test/e2e.sh   # CI: ho
 
 Do not edit `e2e.sh` while a run is reading it: bash reads scripts as it goes. Copy the tree to
 a snapshot first if you need to keep working. Runtime state outside the repo: the key in the phone's TEE,
-`/etc/authorized_keys/<user>.keys`, `/etc/pam.d/sudo`, `/usr/local/sbin/sudostamp-is-local`.
+`/etc/authorized_keys/<user>.keys`, `/etc/pam.d/sudo`, `/usr/local/sbin/sudostamp-{is-local,probe}`,
+`/var/lib/sudostamp/backups/`.
 
 ## Conventions
 

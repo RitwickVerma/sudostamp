@@ -77,11 +77,19 @@ class MainActivity : Activity() {
         private const val TAG = "SudoStamp"
 
         /** What the user runs on the computer: the single-file installer from the latest
-         *  release (scripts/bundle-host.sh), no clone needed. Its SHA-256 is on the release
-         *  page; on Arch, `sudo sudostamp setup` from the AUR package does the same. */
+         *  release (scripts/bundle-host.sh), no clone needed -- VERIFIED before it runs as root.
+         *  The release's package files can be replaced after publishing; a replaced installer
+         *  fails this signature check. The signer line is keys/allowed_signers, carried here in
+         *  the signed APK (scripts/release-check.sh keeps the two identical). On Arch,
+         *  `sudo sudostamp setup` from the AUR package does the same. */
+        private const val RELEASES = "https://gitlab.com/ritwick7/sudostamp/-/releases/permalink/latest/downloads"
+        private const val SIGNERS = "sudostamp-release namespaces=\"sudostamp-release\" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILytyVXX+Jze6AVLpKTLjHbktDqympGfBq9NPEAhwW4Y"
         private const val SETUP_COMMAND =
-            "curl -fsSLO https://gitlab.com/ritwick7/sudostamp/-/releases/permalink/latest/downloads/sudostamp-setup.sh\n" +
-                "sudo bash sudostamp-setup.sh"
+            "curl -fsSLO $RELEASES/sudostamp-setup.sh\n" +
+                "curl -fsSLO $RELEASES/sudostamp-setup.sh.sig\n" +
+                "echo '$SIGNERS' > sudostamp.signers\n" +
+                "ssh-keygen -Y verify -f sudostamp.signers -I sudostamp-release -n sudostamp-release " +
+                "-s sudostamp-setup.sh.sig < sudostamp-setup.sh && sudo bash sudostamp-setup.sh"
         private const val REQ_NOTIFICATIONS = 7
 
         /** How long the "Approved" result stays up before the app closes itself. Instant
@@ -716,8 +724,9 @@ class MainActivity : Activity() {
                     addView(text(getString(R.string.pair_run), Type.BODY, Ui.MUTED, center = true), matchWrap(top = dp(10)))
                     addView(card().apply {
                         addView(field(getString(R.string.pair_command_label), SETUP_COMMAND, mono = true).apply {
-                            // The URL is long: smaller mono so it wraps in two or three lines.
-                            (getChildAt(1) as TextView).setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12f)
+                            // Long (four lines with the signature check): small mono, and Copy is the
+                            // real way to get it across.
+                            (getChildAt(1) as TextView).setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 10f)
                         })
                         addView(text(getString(R.string.pair_arch), Type.CAPTION, Ui.MUTED), matchWrap(top = dp(8)))
                         addView(button(getString(R.string.copy_command), Kind.SECONDARY, R.drawable.ic_terminal) {
