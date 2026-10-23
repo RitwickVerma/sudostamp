@@ -12,7 +12,7 @@ license=('MIT')
 depends=('bash' 'python' 'openssh' 'pam_rssh')
 optdepends=("fprintd: try this computer's own fingerprint reader first when at the desk")
 source=("$pkgname-v$pkgver.tar.gz::$url/-/archive/v$pkgver/$pkgname-v$pkgver.tar.gz")
-sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums=('ea1ca9a634dfa0c208b283a5898eb642491451ccb693c34360b3f111de4ae2fd')
 
 package() {
   # GitLab names the archive's top directory <project>-<tag>-<commit>.
