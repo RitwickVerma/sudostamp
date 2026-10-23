@@ -16,9 +16,16 @@ import java.util.concurrent.TimeoutException
  * makes "the agent sent this signature" and "the UI says approved" the same fact.
  */
 class Approval(
+    /** Unique per request: the notification's buttons name the request they were posted for. */
+    val id: Long,
     val signer: Signature,
     val data: ByteArray,
-    /** Remote address that asked. Shown before the finger touches the sensor. */
+    /** The paired computer whose key is asked for: its id and name ([Host]). */
+    val hostId: String,
+    val label: String,
+    /** False while that computer has never had a request approved: flagged on screen. */
+    val trusted: Boolean,
+    /** Remote address that asked. Shown under the name, for the record. */
     val client: String,
     /** When the request arrived (epoch ms). */
     val arrivedAt: Long,

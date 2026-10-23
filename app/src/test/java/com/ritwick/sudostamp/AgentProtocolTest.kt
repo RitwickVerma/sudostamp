@@ -70,15 +70,18 @@ class AgentProtocolTest {
     }
 
     @Test
-    fun identitiesAnswerCarriesExactlyOneKeyWithItsComment() {
-        val key = "keyblob".toByteArray(StandardCharsets.UTF_8)
-        val frame = AgentProtocol.identitiesAnswer(key, "sudostamp")
+    fun identitiesAnswerListsEveryComputersKeyWithItsComment() {
+        val keys = listOf("key-a".toByteArray(StandardCharsets.UTF_8), "key-b".toByteArray(StandardCharsets.UTF_8))
+        val frame = AgentProtocol.identitiesAnswer(keys, "sudostamp")
         val r = AgentProtocol.Reader(frame)
         assertEquals(AgentProtocol.SSH2_AGENT_IDENTITIES_ANSWER, r.type())
         r.skipType()
-        assertEquals(1, r.int32())
-        assertArrayEquals(key, r.blob())
-        assertArrayEquals("sudostamp".toByteArray(StandardCharsets.UTF_8), r.blob())
+        assertEquals(2, r.int32())
+        for (k in keys) {
+            assertArrayEquals(k, r.blob())
+            assertArrayEquals("sudostamp".toByteArray(StandardCharsets.UTF_8), r.blob())
+        }
+        assertEquals("nothing paired: an empty list, not an error", 5, AgentProtocol.identitiesAnswer(emptyList(), "x").size)
     }
 
     @Test
@@ -116,6 +119,15 @@ class AgentProtocolTest {
     }
 
     @Test
+    fun readerRejectsALengthThatWouldOverflowTheBoundsCheck() {
+        // pos + n overflows to a negative number when n is near Int.MAX_VALUE; the check must
+        // not be written as a sum.
+        val r = AgentProtocol.Reader(byteArrayOf(11, 0x7F, 0xFF.toByte(), 0xFF.toByte(), 0xFE.toByte(), 1, 2))
+        r.skipType()
+        assertThrows(IOException::class.java) { r.blob() }
+    }
+
+    @Test
     fun readerRejectsTruncatedInts() {
         val r = AgentProtocol.Reader(byteArrayOf(11, 0, 0))
         r.skipType()
@@ -124,16 +136,15 @@ class AgentProtocolTest {
 
     // ------------------------------------------------------------- sign policy
 
-    private val ourKey = byteArrayOf(1, 2, 3, 4)
-
     @Test
-    fun aPamRsshChallengeForOurKeyMayBePutToTheUser() {
-        assertNull(AgentProtocol.refusal(ourKey, ByteArray(32), ourKey))
+    fun aPamRsshChallengeForAPairedComputersKeyMayBePutToTheUser() {
+        assertNull(AgentProtocol.refusal(true, ByteArray(32)))
     }
 
     @Test
-    fun aSignRequestForAnotherKeyIsRefused() {
-        assertNotNull(AgentProtocol.refusal(byteArrayOf(9), ByteArray(32), ourKey))
+    fun aSignRequestForAnyOtherKeyIsRefusedBeforeTheUserSeesIt() {
+        // A device that never paired cannot make the phone ask anything.
+        assertNotNull(AgentProtocol.refusal(false, ByteArray(32)))
     }
 
     @Test
@@ -150,7 +161,7 @@ class AgentProtocolTest {
             "ssh userauth" to userauth,
             "sshsig" to sshsig,
         )) {
-            assertNotNull("must refuse $name", AgentProtocol.refusal(ourKey, data, ourKey))
+            assertNotNull("must refuse $name", AgentProtocol.refusal(true, data))
         }
     }
 

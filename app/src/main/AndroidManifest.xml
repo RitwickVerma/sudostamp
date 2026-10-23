@@ -3,7 +3,10 @@
   SudoStamp — approve a sudo prompt on a Linux host with the phone's fingerprint.
 
   Permission audit. Every entry has a reason; nothing else is requested:
-    INTERNET                        a TCP listener requires it. Binds LAN-only.
+    INTERNET                        a TCP listener requires it. Serves LAN peers only.
+    ACCESS_NETWORK_STATE            to tell Wi-Fi and Ethernet from mobile data and VPNs:
+                                    only a peer on the Wi-Fi/Ethernet subnet a connection
+                                    arrived on is served (Net.allowedPeer).
     USE_BIOMETRIC                   gates the Keystore key behind a fingerprint.
     POST_NOTIFICATIONS              tells you a sudo request is waiting (API 33+).
     FOREGROUND_SERVICE              the listener must survive being backgrounded.
@@ -31,6 +34,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

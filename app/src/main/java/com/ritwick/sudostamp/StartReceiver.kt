@@ -20,7 +20,7 @@ class StartReceiver : BroadcastReceiver() {
             Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED -> Unit
             else -> return
         }
-        if (!Keys.exists()) return   // not set up yet: nothing to serve
+        if (Hosts.all(context).isEmpty()) return   // nothing paired yet: nothing to serve
         try {
             context.startForegroundService(Intent(context, AgentService::class.java))
             Log.i(AgentService.TAG, "listener started on ${intent.action}")

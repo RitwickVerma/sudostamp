@@ -3,25 +3,24 @@
     <string name="app_name">SudoStamp</string>
     <string name="tagline">sudo, approved by your fingerprint</string>
 
-    <!-- Onboarding (no key yet) -->
+    <!-- Onboarding (nothing paired yet) -->
     <string name="onboard_title">Approve sudo with a touch</string>
-    <string name="onboard_step1_title">Create a key</string>
-    <string name="onboard_step1_body">It is made inside this phone\'s secure hardware and can never leave it.</string>
-    <string name="onboard_step2_title">Pair it with your computer</string>
-    <string name="onboard_step2_body">Run one command there, then type the 6-digit code this phone shows.</string>
+    <string name="onboard_step1_title">Pair your computer</string>
+    <string name="onboard_step1_body">Run one command there, then type the 6-digit code this phone shows.</string>
+    <string name="onboard_step2_title">A key just for it</string>
+    <string name="onboard_step2_body">Made inside this phone\'s secure hardware for that one computer. It can never leave the phone.</string>
     <string name="onboard_step3_title">Touch to approve</string>
     <string name="onboard_step3_body">Each sudo asks here. No touch, no signature — and your password still works.</string>
     <string name="onboard_create">Get started</string>
-    <string name="onboard_footnote">The key needs your fingerprint for every single signature.</string>
+    <string name="onboard_footnote">Every signature needs your fingerprint, every single time.</string>
     <string name="onboard_enroll">Set up a fingerprint first</string>
-    <string name="onboard_enroll_hint">The key can only be created once a fingerprint is enrolled on this phone.</string>
+    <string name="onboard_enroll_hint">Keys can only be created once a fingerprint is enrolled on this phone.</string>
     <string name="onboard_unsupported">This phone has no strong (Class 3) biometric sensor, so it cannot hold a SudoStamp key.</string>
 
     <!-- Status -->
     <string name="status_ready">Ready</string>
     <string name="status_starting">Starting…</string>
     <string name="status_notifications_off">Notifications off</string>
-    <string name="status_invalidated">Key invalidated</string>
 
     <!-- Phone checklist -->
     <string name="section_phone">This phone</string>
@@ -42,14 +41,20 @@
     <string name="action_allow">Allow</string>
     <string name="action_fix">Fix</string>
 
-    <!-- Key card -->
-    <string name="field_fingerprint">Key fingerprint</string>
+    <!-- Computers -->
     <string name="field_address">Phone address</string>
-    <string name="copy_key">Copy public key</string>
     <string name="copy_command">Copy command</string>
     <string name="section_computers">Computers</string>
     <string name="computers_body">Pair a computer once, and its sudo asks this phone.</string>
-    <string name="by_hand_hint">Pinning by hand instead? The README shows where this key goes.</string>
+    <string name="host_legacy">Computers paired before version 1.4</string>
+    <string name="host_legacy_detail">One key shared by all of them. Pair each again to give it its own, then remove this.</string>
+    <string name="host_trusted">Paired %1$s</string>
+    <string name="host_pending">Paired %1$s · new: its first request will be flagged</string>
+    <string name="host_invalidated">Its key was destroyed by a fingerprint change. Remove it and pair again.</string>
+    <string name="action_remove">Remove</string>
+    <string name="remove_title">Unpair %1$s?</string>
+    <string name="remove_message">Deletes the key this phone made for it. Its sudo falls back to the password until you pair it again.</string>
+    <string name="remove_confirm">Unpair</string>
 
     <!-- Pairing -->
     <string name="pair_start">Pair a computer</string>
@@ -63,29 +68,26 @@
     <string name="pair_code_from">Requested from %1$s</string>
     <string name="pair_code_hint">Only on the computer you are setting up. If you did not start this, tap Cancel.</string>
     <string name="pair_done">Paired</string>
-    <string name="pair_done_detail">%1$s will now ask this phone for sudo. Approve its test request next.</string>
+    <string name="pair_done_detail">%1$s now has its own key on this phone. Approve its test request next: until one of its requests is approved, it is marked as new.</string>
     <string name="pair_finish">Done</string>
     <string name="pair_interrupted">Pairing stopped</string>
-    <string name="pair_interrupted_detail">Another device tried to pair at the same time, so nothing was pinned. If that was not you, someone on this network may be trying their luck.</string>
+    <string name="pair_interrupted_detail">A second device tried to pair while this pairing was open, so nothing was kept. If that was not you, someone on this network may be trying their luck.</string>
     <string name="pair_expired">Pairing timed out</string>
     <string name="pair_expired_detail">No computer finished pairing within two minutes.</string>
     <string name="pair_again">Try again</string>
     <string name="nsd_name">SudoStamp on %1$s</string>
-    <string name="reset_key">Reset key</string>
-
-    <!-- Invalidated key -->
-    <string name="invalidated_title">This key can no longer sign</string>
-    <string name="invalidated_body">The phone\'s fingerprints changed, so the key destroyed itself on purpose: a newly enrolled finger must never inherit the old one\'s authority. Until you pin a new key, sudo uses your password.</string>
-    <string name="invalidated_action">Reset and create a new key</string>
+    <string name="reset_key">Unpair all computers</string>
 
     <!-- Approval -->
     <string name="approval_overline">sudo request</string>
-    <string name="approval_title">Approve sudo?</string>
-    <string name="approval_from">From</string>
+    <string name="approval_title">Approve sudo on %1$s?</string>
+    <string name="approval_from">Request from</string>
     <string name="approval_received">Received %1$s</string>
     <string name="approval_left">Denied automatically in %1$d s</string>
-    <string name="approval_new_host">First request from this host. If you did not just run sudo there, deny it.</string>
+    <string name="approval_new_host">First request from this computer since it was paired. If you did not just run sudo there, deny it.</string>
+    <string name="approval_legacy">Paired before version 1.4, so any of those computers could be asking. Pair them again to tell them apart.</string>
     <string name="approval_hint">Touch the sensor to approve</string>
+    <string name="approval_approve">Approve with fingerprint</string>
     <string name="deny">Deny</string>
 
     <!-- Result -->
@@ -97,26 +99,26 @@
     <string name="result_expired_detail">The request timed out before the touch. Run sudo again.</string>
 
     <!-- Biometric prompt -->
-    <string name="prompt_title">Approve sudo</string>
-    <string name="prompt_subtitle">From %1$s</string>
+    <string name="prompt_title">Approve sudo on %1$s</string>
+    <string name="prompt_subtitle">Request from %1$s</string>
     <string name="prompt_description">Touch the sensor to sign this one request.</string>
 
     <!-- Reset dialog -->
-    <string name="reset_title">Reset key?</string>
-    <string name="reset_message">Deletes the key from this phone. Phone approvals stop until you create a new key and pin it on your host again. Your password keeps working.</string>
-    <string name="reset_confirm">Reset</string>
+    <string name="reset_title">Unpair all computers?</string>
+    <string name="reset_message">Deletes every key this phone made. Phone approvals stop until you pair again. Your password keeps working.</string>
+    <string name="reset_confirm">Unpair all</string>
     <string name="cancel">Cancel</string>
 
     <!-- Toasts -->
-    <string name="copied_key">Public key copied</string>
     <string name="copied_command">Command copied</string>
-    <string name="key_failed">Could not create the key: %1$s</string>
+    <string name="key_failed">This phone cannot hold a SudoStamp key: %1$s</string>
     <string name="battery_manual">Settings → Battery → Battery optimization → Don\'t optimize</string>
 
     <!-- Notifications -->
     <string name="notif_listener_title">Ready to approve sudo</string>
-    <string name="notif_approval_title">Approve sudo?</string>
+    <string name="notif_approval_title">Approve sudo on %1$s?</string>
     <string name="notif_approval_text">From %1$s · tap to approve</string>
+    <string name="notif_approval_text_new">First request since pairing · from %1$s</string>
     <string name="channel_listener">Listener</string>
     <string name="channel_listener_desc">The always-on notice that keeps the listener running. Quiet by design.</string>
     <string name="channel_approval">Approval requests</string>

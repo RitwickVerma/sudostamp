@@ -55,7 +55,8 @@ import com.ritwick.sudostamp.Ui.text
 import com.ritwick.sudostamp.Ui.wrap
 
 /**
- * Three screens: setup (or onboarding, before there is a key), the approval, and a brief result.
+ * Four screens: setup (or onboarding, before any computer is paired), pairing, the approval,
+ * and a brief result.
  *
  * THE NOTIFICATION IS THE INTERFACE. Approval starts from the notification, so the setup screen
  * has one job -- get the public key onto the host, once -- and otherwise reports, honestly,
@@ -94,6 +95,9 @@ class MainActivity : Activity() {
 
     private enum class Screen { SETUP, APPROVAL, RESULT, PAIRING }
 
+    /** The request the approval screen is showing, so it is drawn once, not on every sync. */
+    private var shownRequest = -1L
+
     /** The pairing state last drawn, so the screen redraws only when it changes. */
     private var shownPairing: PairingSession.View? = null
 
@@ -122,7 +126,8 @@ class MainActivity : Activity() {
     /** What the setup screen depends on. Re-rendered only when this changes, so the
      *  animated mark does not restart on every unrelated event. */
     private data class SetupState(
-        val key: Keys.State,
+        val hosts: List<Host>,
+        val invalidated: Set<String>,
         val canNotify: Boolean,
         val batteryOptimized: Boolean,
         val listening: Boolean,
@@ -163,13 +168,36 @@ class MainActivity : Activity() {
      *  that, a second refusal means the system will not ask again. */
     private var askedNotifications = false
 
+    /** The request whose notification the user tapped ([AgentService.EXTRA_REQUEST]). Only
+     *  that request gets the fingerprint prompt raised automatically; any other request --
+     *  one that arrives while the app is already open, or right behind an approval -- waits
+     *  for a tap on Approve. Raising the prompt for whatever is pending let a request timed
+     *  to land just after a real one read as "sudo asked twice". */
+    private var tappedRequest = -1L
+
+    /** Computers whose key a fingerprint change destroyed. Checked on resume, not on every
+     *  sync: each check opens a Keystore operation (see [Keys.state]). */
+    private var invalidated: Set<String> = emptySet()
+
+    private fun takeRequest(i: Intent?) {
+        val id = i?.getLongExtra(AgentService.EXTRA_REQUEST, -1L) ?: -1L
+        if (id >= 0) tappedRequest = id
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        takeRequest(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         AgentService.ensureChannels(this)
 
+        takeRequest(intent)
         // Start the listener as soon as the app opens. A phone-side agent that is not
         // listening is indistinguishable from a broken setup, so never make this a tap.
-        if (Keys.exists()) {
+        Hosts.reconcile(this)
+        if (Hosts.all(this).isNotEmpty()) {
             runCatching { startForegroundService(Intent(this, AgentService::class.java)) }
         }
 
@@ -180,8 +208,9 @@ class MainActivity : Activity() {
         if (!canNotify()) requestNotifications()
 
         // No other app may draw over the approval screen: an overlay could cover the
-        // requesting host, or dress up an unexpected request as an expected one. The
-        // biometric prompt itself is system UI; this protects what surrounds it.
+        // requesting computer, or dress up an unexpected request as an expected one. The
+        // biometric prompt itself is system UI; this protects what surrounds it. On Android 11,
+        // which has no such switch, touches through an overlay are dropped instead (frame()).
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) window.setHideOverlayWindows(true)
         render()
     }
@@ -197,12 +226,22 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         if (AgentService.onChange === onServiceChange) AgentService.onChange = null
+        // Leaving the pairing screen ends the pairing: an armed pairing nobody is watching is an
+        // open door (and the screen stays on while it is up, so this is a real departure).
+        if (screen == Screen.PAIRING && !isChangingConfigurations) {
+            AgentService.pairing.disarm()
+            AgentService.discardAbandoned(this)
+            stopAdvertising()
+            screen = Screen.SETUP
+        }
         super.onStop()
     }
 
     override fun onResume() {
         super.onResume()
         resumed = true
+        invalidated = Hosts.all(this).filter { Keys.state(Keys.aliasFor(it.id)) == Keys.State.INVALIDATED }
+            .map { it.id }.toSet()
         // Covers the notification-tap path (the request is already parked in the service)
         // and any setup state that changed while we were away.
         sync()
@@ -227,7 +266,10 @@ class MainActivity : Activity() {
     /** Nothing scheduled may outlive the activity (the flash-close included). */
     override fun onDestroy() {
         // Leaving the app ends a pairing: an armed pairing nobody is watching is an open door.
-        if (isFinishing) AgentService.pairing.disarm()
+        if (isFinishing) {
+            AgentService.pairing.disarm()
+            AgentService.discardAbandoned(this)
+        }
         interceptBack(false)
         stopAdvertising()
         ui.removeCallbacksAndMessages(null)
@@ -248,10 +290,11 @@ class MainActivity : Activity() {
         !(getSystemService(Context.POWER_SERVICE) as PowerManager)
             .isIgnoringBatteryOptimizations(packageName)
 
-    private fun address() = Net.hostPort(AgentService.PORT)
+    private fun address() = Net.hostPort(Net.stable(), AgentService.PORT)
 
     private fun setupState() = SetupState(
-        key = Keys.state(),
+        hosts = Hosts.all(this),
+        invalidated = invalidated,
         canNotify = canNotify(),
         batteryOptimized = batteryOptimized(),
         listening = AgentService.listening,
@@ -332,19 +375,27 @@ class MainActivity : Activity() {
      *     the previous approval's flash window would be closed on and never prompt.
      */
     private fun sync() {
+        AgentService.discardAbandoned(this)
         val p = AgentService.currentRequest()?.takeIf { !it.isResolved }
         if (promptFor != null && promptFor !== p) {
             Log.i(TAG, "request resolved elsewhere: taking the prompt down")
             closePrompt()?.cancel()
         }
         when {
-            p != null && promptFor == null && resumed && Keys.exists() -> {
+            p != null && promptFor == null && resumed && p.id == tappedRequest -> {
+                // The user tapped THIS request's notification: straight to the fingerprint.
                 ui.removeCallbacksAndMessages(null)
+                tappedRequest = -1L
                 renderApproval(p)
                 prompt(p)
             }
+            p != null && promptFor == null && !(screen == Screen.APPROVAL && shownRequest == p.id) -> {
+                // Any other request is shown, and waits for a tap on Approve.
+                ui.removeCallbacksAndMessages(null)
+                renderApproval(p)
+            }
             p == null && screen == Screen.APPROVAL ->
-                if (AgentService.pairing.view().state == PairingSession.State.DONE) renderPairing() else render()
+                if (AgentService.pairing.armed()) renderPairing() else render()
             screen == Screen.SETUP && shownSetup != setupState() -> render()
             screen == Screen.PAIRING && shownPairing != AgentService.pairing.view() -> renderPairing()
         }
@@ -376,6 +427,8 @@ class MainActivity : Activity() {
             build()
         }
         val scroll = ScrollView(this).apply {
+            // A touch that passed through another app's window is dropped (tapjacking).
+            filterTouchesWhenObscured = true
             isFillViewport = true
             clipToPadding = false
             isVerticalScrollBarEnabled = false
@@ -432,16 +485,13 @@ class MainActivity : Activity() {
 
     private fun render() {
         interceptBack(false)
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val state = setupState()
         Log.i(TAG, "setup: $state")
         screen = Screen.SETUP
         shownSetup = state
         tick.removeCallbacksAndMessages(null)
-        show(when (state.key) {
-            Keys.State.MISSING -> onboarding(state.biometric)
-            Keys.State.INVALIDATED -> invalidated()
-            Keys.State.READY -> setup(state)
-        })
+        show(if (state.hosts.isEmpty()) onboarding(state.biometric) else setup(state))
     }
 
     /** Before there is a key: what this is, the three steps, one button. */
@@ -460,9 +510,7 @@ class MainActivity : Activity() {
         // and offer the fix, instead of letting "Create key" fail with an exception message.
         when (biometric) {
             BiometricManager.BIOMETRIC_SUCCESS -> {
-                addView(button(getString(R.string.onboard_create), Kind.PRIMARY, R.drawable.ic_key) {
-                    if (doCreate()) startPairing()
-                },
+                addView(button(getString(R.string.onboard_create), Kind.PRIMARY, R.drawable.ic_key) { startPairing() },
                     matchWrap(top = dp(24)))
                 addView(text(getString(R.string.onboard_footnote), Type.CAPTION, Ui.FAINT, center = true),
                     matchWrap(top = dp(12)))
@@ -493,21 +541,6 @@ class MainActivity : Activity() {
                 addView(text(getString(body), Type.CAPTION, Ui.MUTED), matchWrap(top = dp(2)))
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }, matchWrap())
-    }
-
-    /** The key exists but can never sign again. Not "listening": the agent IS listening,
-     *  and refusing every request. */
-    private fun invalidated() = frame(centered = false) {
-        header()
-        addView(pill(getString(R.string.status_invalidated), Ui.DANGER, Ui.DANGER_DIM, R.drawable.ic_error),
-            wrap(top = dp(32)))
-        addView(text(getString(R.string.invalidated_title), Type.DISPLAY, center = true),
-            matchWrap(top = dp(20)))
-        addView(text(getString(R.string.invalidated_body), Type.BODY, Ui.MUTED, center = true),
-            matchWrap(top = dp(12)))
-        addView(button(getString(R.string.invalidated_action), Kind.DANGER) { confirmReset() },
-            matchWrap(top = dp(32)))
-        entrance()
     }
 
     /** Status, colour, tint, icon: the one status pill on the setup screen. */
@@ -562,19 +595,27 @@ class MainActivity : Activity() {
             ))
         }, matchWrap())
 
-        // The one-time job: get the key onto a computer. Pairing does it with a 6-digit code;
-        // the fingerprint and the raw key stay available for pinning by hand.
+        // The paired computers, each with its own key, and the way to add one.
         addView(text(getString(R.string.section_computers), Type.OVERLINE, Ui.FAINT), matchWrap(top = dp(28), bottom = dp(8)))
         addView(card().apply {
+            val date = android.text.format.DateFormat.getMediumDateFormat(context)
+            s.hosts.sortedBy { it.pairedAt }.forEachIndexed { i, h ->
+                if (i > 0) addView(divider())
+                val name = Ui.hostName(context, h.id, h.label)
+                val broken = h.id in s.invalidated
+                val detail = when {
+                    broken -> getString(R.string.host_invalidated)
+                    h.id == Hosts.LEGACY_ID -> getString(R.string.host_legacy_detail)
+                    h.confirmed -> getString(R.string.host_trusted, date.format(h.pairedAt))
+                    else -> getString(R.string.host_pending, date.format(h.pairedAt))
+                }
+                addView(checkRow(R.drawable.ic_computer, !broken && h.confirmed && h.id != Hosts.LEGACY_ID, name, detail,
+                    getString(R.string.action_remove) to { confirmRemove(h) }))
+            }
+            addView(divider())
             addView(text(getString(R.string.computers_body), Type.BODY, Ui.MUTED))
             addView(button(getString(R.string.pair_start), Kind.PRIMARY, R.drawable.ic_computer) { startPairing() },
                 matchWrap(top = dp(16)))
-            addView(divider())
-            addView(field(getString(R.string.field_fingerprint), fingerprint(), mono = true))
-            addView(button(getString(R.string.copy_key), Kind.SECONDARY, R.drawable.ic_content_copy) {
-                copy(Keys.authorizedKeyLine(), getString(R.string.copied_key))
-            }, matchWrap(top = dp(14)))
-            addView(text(getString(R.string.by_hand_hint), Type.CAPTION, Ui.MUTED), matchWrap(top = dp(10)))
         }, matchWrap())
 
         addView(button(getString(R.string.reset_key), Kind.GHOST) { confirmReset() }, wrap(top = dp(20)))
@@ -582,9 +623,32 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- pairing
 
-    /** "Pair a computer": arm one pairing exchange, become discoverable, show the screen. */
+    /** Set once this process has seen the phone make a key in secure hardware. */
+    private var hardwareChecked = false
+
+    /**
+     * "Pair a computer": arm one pairing exchange, become discoverable, show the screen.
+     *
+     * The key itself is made when the computer asks (it is part of what the phone commits
+     * to), so first make sure this phone CAN make one: a fingerprint enrolled, and a Keystore
+     * that really puts keys in secure hardware. Otherwise the computer would only hear
+     * "refused", with the reason visible nowhere.
+     */
     private fun startPairing() {
-        if (!Keys.exists()) return
+        if (biometricStatus() != BiometricManager.BIOMETRIC_SUCCESS) { render(); return }
+        if (!hardwareChecked) {
+            val probe = "sudostamp-probe"
+            try {
+                Log.i(TAG, "a test key landed in ${Keys.create(probe, allowSoftware = AgentService.debuggable(this))}")
+                hardwareChecked = true
+            } catch (e: Exception) {
+                Log.w(TAG, "cannot make keys", e)
+                toast(getString(R.string.key_failed, e.message ?: e.javaClass.simpleName))
+                return
+            } finally {
+                runCatching { Keys.delete(probe) }
+            }
+        }
         runCatching { startForegroundService(Intent(this, AgentService::class.java)) }
         AgentService.pairing.arm()
         startAdvertising()
@@ -593,6 +657,7 @@ class MainActivity : Activity() {
 
     private fun cancelPairing() {
         AgentService.pairing.disarm()
+        AgentService.discardAbandoned(this)
         stopAdvertising()
         render()
     }
@@ -633,9 +698,13 @@ class MainActivity : Activity() {
         interceptBack(true)
         shownPairing = v
         tick.removeCallbacksAndMessages(null)
-        if (v.state !in setOf(PairingSession.State.WAITING, PairingSession.State.COMMITTED, PairingSession.State.CODE)) {
-            stopAdvertising()
-        }
+        // Discoverable only until a computer has asked: after that, an advertisement only tells
+        // others on the network that a pairing is in progress.
+        if (!AgentService.pairing.discoverable()) stopAdvertising()
+        // The screen stays on while a pairing is open, so leaving it (onStop) is a deliberate
+        // act that ends the pairing rather than the display timing out mid-code.
+        if (AgentService.pairing.armed()) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         show(frame(centered = true) {
             when (v.state) {
                 PairingSession.State.WAITING, PairingSession.State.COMMITTED -> {
@@ -723,8 +792,10 @@ class MainActivity : Activity() {
      *  notification tap goes straight to the fingerprint. Deny is always one tap away. */
     private fun renderApproval(p: Approval) {
         screen = Screen.APPROVAL
+        shownRequest = p.id
+        interceptBack(false)
         tick.removeCallbacksAndMessages(null)
-        val known = KnownHosts.isKnown(this, p.client)
+        val name = Ui.hostName(this, p.hostId, p.label)
         val left = text("", Type.CODE_SMALL, Ui.MUTED, center = true)
 
         show(frame(centered = true) {
@@ -732,7 +803,7 @@ class MainActivity : Activity() {
             addView(mark(200, top = dp(16), bottom = dp(8)).apply {
                 countDown(p.arrivedAt, AgentService.APPROVAL_TIMEOUT_MS)
             })
-            addView(text(getString(R.string.approval_title), Type.DISPLAY, center = true), matchWrap())
+            addView(text(getString(R.string.approval_title, name), Type.DISPLAY, center = true), matchWrap())
             addView(left, matchWrap(top = dp(6)))
 
             addView(card().apply {
@@ -742,23 +813,29 @@ class MainActivity : Activity() {
                         android.text.format.DateFormat.getTimeFormat(context).format(p.arrivedAt)),
                     Type.CAPTION, Ui.MUTED
                 ), matchWrap(top = dp(4)))
-                if (!known) {
-                    // Approving a request you did not start is the one way this goes wrong.
-                    // A host that has never been approved before is worth a second look.
+                // Approving a request you did not start is the one way this goes wrong. A computer
+                // never approved before, or the old shared key, is worth a second look.
+                val warning = when {
+                    p.hostId == Hosts.LEGACY_ID -> R.string.approval_legacy
+                    !p.trusted -> R.string.approval_new_host
+                    else -> null
+                }
+                if (warning != null) {
                     addView(row().apply {
                         gravity = Gravity.TOP
                         background = Ui.rounded(Ui.WARN_DIM, dpf(12f))
                         setPadding(dp(12), dp(10), dp(12), dp(10))
                         addView(icon(R.drawable.ic_warning, Ui.WARN, 18))
-                        addView(text(getString(R.string.approval_new_host), Type.CAPTION, Ui.WARN).apply {
+                        addView(text(getString(warning), Type.CAPTION, Ui.WARN).apply {
                             setPadding(dp(10), 0, 0, 0)
                         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                     }, matchWrap(top = dp(14)))
                 }
             }, matchWrap(top = dp(24)))
 
-            addView(text(getString(R.string.approval_hint), Type.CAPTION, Ui.FAINT, center = true),
-                matchWrap(top = dp(20)))
+            addView(button(getString(R.string.approval_approve), Kind.PRIMARY, R.drawable.ic_lock) {
+                if (promptFor == null && !p.isResolved && resumed) prompt(p)
+            }, matchWrap(top = dp(20)))
             addView(button(getString(R.string.deny), Kind.DANGER) { deny(p) }, matchWrap(top = dp(12)))
             entrance()
         })
@@ -793,12 +870,12 @@ class MainActivity : Activity() {
      * reads as a crash. And a request that arrives during the flash wins -- sync()
      * cancels this close and puts the approval screen back up.
      */
-    private fun renderResult(outcome: Outcome, client: String) {
+    private fun renderResult(outcome: Outcome, name: String) {
         screen = Screen.RESULT
         tick.removeCallbacksAndMessages(null)
         val (color, title, detail) = when (outcome) {
             Outcome.APPROVED -> Triple(Ui.ACCENT, getString(R.string.result_approved),
-                getString(R.string.result_approved_detail, client))
+                getString(R.string.result_approved_detail, name))
             Outcome.DENIED -> Triple(Ui.DANGER, getString(R.string.result_denied),
                 getString(R.string.result_denied_detail))
             Outcome.EXPIRED -> Triple(Ui.WARN, getString(R.string.result_expired),
@@ -836,13 +913,6 @@ class MainActivity : Activity() {
         Log.i(TAG, "approved: closing the app")
         finishAndRemoveTask()
     }
-
-    /** `SHA256:<base64>` — what `ssh-keygen -lf` prints, so it can be cross-checked. */
-    private fun fingerprint(): String = runCatching {
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(SshSig.keyBlob(Keys.publicKey()))
-        "SHA256:" + java.util.Base64.getEncoder().withoutPadding().encodeToString(digest)
-    }.getOrElse { "unavailable" }
 
     // ------------------------------------------------------------------ actions
 
@@ -895,41 +965,26 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Creates the key and starts the listener. True on success. */
-    private fun doCreate(): Boolean {
-        try {
-            val where = Keys.create()          // "StrongBox" or "TEE"
-            Log.i(TAG, "key created in $where")
-            logKey()
-            // The listener must be running the moment the key exists. Without this the
-            // screen would show "listening" while no socket was open -- a silent failure
-            // exactly like the one the listener auto-start was built to prevent.
-            runCatching { startForegroundService(Intent(this, AgentService::class.java)) }
-            return true
-        } catch (e: Exception) {
-            Log.w(TAG, "key creation failed", e)
-            toast(getString(R.string.key_failed, e.message ?: e.javaClass.simpleName))
-            render()
-            return false
-        }
-    }
-
-    /**
-     * Log the PUBLIC key. It is not secret, and logging it is what lets the whole setup be
-     * automated over adb instead of copied off the screen by hand.
-     */
-    private fun logKey() {
-        runCatching { Log.i(TAG, "AUTHORIZED_KEY ${Keys.authorizedKeyLine()}") }
-    }
-
     private fun confirmReset() {
         AlertDialog.Builder(this)
             .setTitle(R.string.reset_title)
             .setMessage(R.string.reset_message)
             .setPositiveButton(R.string.reset_confirm) { _, _ ->
-                runCatching { Keys.delete() }
-                KnownHosts.clear(this)
+                Hosts.all(this).forEach { AgentService.forget(this, it.id) }
                 stopService(Intent(this, AgentService::class.java))
+                render()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun confirmRemove(h: Host) {
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.remove_title, Ui.hostName(this, h.id, h.label)))
+            .setMessage(R.string.remove_message)
+            .setPositiveButton(R.string.remove_confirm) { _, _ ->
+                AgentService.forget(this, h.id)
+                if (Hosts.all(this).isEmpty()) stopService(Intent(this, AgentService::class.java))
                 render()
             }
             .setNegativeButton(R.string.cancel, null)
@@ -943,7 +998,7 @@ class MainActivity : Activity() {
     private fun deny(p: Approval) {
         val first = p.deny()
         closePrompt()?.cancel()
-        if (first) renderResult(Outcome.DENIED, p.client) else sync()
+        if (first) renderResult(Outcome.DENIED, p.label) else sync()
     }
 
     /** Forgets the open prompt and returns its cancel handle. Its callbacks see that they
@@ -964,7 +1019,9 @@ class MainActivity : Activity() {
 
         try {
             BiometricPrompt.Builder(this)
-                .setTitle(getString(R.string.prompt_title))
+                // The computer's name in the title, where it cannot be missed: the system sheet
+                // covers the app's own screen.
+                .setTitle(getString(R.string.prompt_title, Ui.hostName(this, p.hostId, p.label)))
                 .setSubtitle(getString(R.string.prompt_subtitle, p.client))
                 .setDescription(getString(R.string.prompt_description))
                 // Stated, not left to the default: with a passive biometric (Class 3 face
@@ -974,7 +1031,7 @@ class MainActivity : Activity() {
                     val first = p.deny()               // => SSH_AGENT_FAILURE
                     if (current()) {
                         closePrompt()
-                        if (first) renderResult(Outcome.DENIED, p.client) else sync()
+                        if (first) renderResult(Outcome.DENIED, p.label) else sync()
                     }
                 }
                 .build()
@@ -1000,7 +1057,8 @@ class MainActivity : Activity() {
                             closePrompt()
                             // Signed too late, the agent had already answered FAILURE:
                             // claiming success here would be a lie about sudo.
-                            renderResult(if (delivered) Outcome.APPROVED else Outcome.EXPIRED, p.client)
+                            renderResult(if (delivered) Outcome.APPROVED else Outcome.EXPIRED,
+                                Ui.hostName(this@MainActivity, p.hostId, p.label))
                         }
 
                         override fun onAuthenticationError(code: Int, msg: CharSequence?) {
@@ -1010,7 +1068,7 @@ class MainActivity : Activity() {
                             // Back, or a tap outside the sheet, is the user saying no; say
                             // so. Anything else (lockout, hardware) goes back to setup.
                             if (first && code == BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED) {
-                                renderResult(Outcome.DENIED, p.client)
+                                renderResult(Outcome.DENIED, p.label)
                             } else {
                                 sync()
                             }

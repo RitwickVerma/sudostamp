@@ -23,7 +23,7 @@ class ApprovalTest {
     private val sig = byteArrayOf(0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01)
 
     private fun approval() =
-        Approval(Signature.getInstance("SHA256withECDSA"), ByteArray(32), "192.0.2.1", 0L)
+        Approval(1L, Signature.getInstance("SHA256withECDSA"), ByteArray(32), "0123456789abcdef", "edith", true, "192.0.2.1", 0L)
 
     @Test
     fun `approval before the deadline delivers the signature`() {
