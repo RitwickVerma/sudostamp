@@ -122,7 +122,9 @@ def split_addr(addr):
 
 
 class Agent:
-    def __init__(self, addr, timeout=10):
+    # 30 s: the phone makes a new Keystore key while answering pair-commit, and StrongBox key
+    # generation can take seconds. 10 s timed out on a loaded machine.
+    def __init__(self, addr, timeout=30):
         host, port = split_addr(addr)
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(timeout)

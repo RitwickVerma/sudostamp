@@ -63,6 +63,9 @@ echo "Defaults:$U timestamp_timeout=0" >> /etc/sudoers.d/90-sudostamp-test
 chmod 0440 /etc/sudoers.d/90-sudostamp-test
 
 TARGET=/etc/pam.d/sudo
+# What the sudo stack is right now, as one comparable line: openSUSE may have no /etc file at all
+# (the vendor file applies), and a `cp` of a missing file would silently compare stale copies.
+stack_state() { if [ -f "$TARGET" ]; then cksum < "$TARGET"; else echo absent; fi; }
 before="$(mktemp)"
 if [ -f "$TARGET" ]; then cp "$TARGET" "$before"; had_target=1; else had_target=0; fi
 
@@ -171,10 +174,10 @@ pairing_phone() {   # $1 = port; writes /tmp/p$1.pub and, once paired, /tmp/p$1.
   rm -f "/tmp/p$1.code"
   python3 "$W/tools/test/mock_agent.py" --port "$1" --pubkey-out "/tmp/p$1.pub" --mode-file /tmp/mode \
     --code-file "/tmp/p$1.code" "${@:2}" > "/tmp/p$1.log" 2>&1 &
-  for _ in $(seq 1 50); do [ -s "/tmp/p$1.pub" ] && break; sleep 0.1; done
+  for _ in $(seq 1 300); do [ -s "/tmp/p$1.pub" ] && break; sleep 0.1; done
 }
 # The person: waits for the phone to show a code, then types it (and answers yes, if asked).
-type_code_from() { for _ in $(seq 1 100); do [ -s "$1" ] && break; sleep 0.1; done; cat "$1"; echo yes; }
+type_code_from() { for _ in $(seq 1 600); do [ -s "$1" ] && break; sleep 0.1; done; cat "$1"; echo yes; }
 
 step "6. setup: pair + install + test + apply, one command"
 pairing_phone 7781
@@ -244,12 +247,12 @@ step "8b. a relay that passes pairing through unchanged cannot pin its address"
 pairing_phone 7787
 python3 "$W/tools/test/mock_agent.py" --port 7786 --relay-to 127.0.0.1:7787 > /tmp/relay.log 2>&1 &
 for _ in $(seq 1 50); do grep -q "relay on" /tmp/relay.log 2>/dev/null && break; sleep 0.1; done
-cp "$TARGET" /tmp/pam.before
+state0="$(stack_state)"
 type_code_from /tmp/p7787.code | bash "$I" setup --phone 127.0.0.1:7786 > /tmp/setup-relay.log 2>&1
 check "setup refuses: something answered in the phone's place" \
   bash -c "! grep -q 'Done.' /tmp/setup-relay.log && grep -q 'answered in the phone' /tmp/setup-relay.log"
 check "the PAM stack is unchanged and never names the relay" \
-  bash -c "[ \"\$(cksum < /tmp/pam.before)\" = \"\$(cksum < '$TARGET')\" ] && ! grep -q 7786 '$TARGET'"
+  bash -c "[ '$state0' = \"\$($(declare -f stack_state); TARGET='$TARGET'; stack_state)\" ] && ! grep -qs 7786 '$TARGET'"
 
 step "9. an older whole-file SudoStamp is migrated"
 bash "$I" rollback > /dev/null 2>&1
@@ -287,10 +290,10 @@ fi
 
 step "11. what must not work"
 # A --phone value with a second line is a second PAM rule. It must be refused before anything.
-cp "$TARGET" /tmp/pam.before
+state0="$(stack_state)"
 bash "$I" stage --phone "$(printf '127.0.0.1:7777 x\nauth sufficient pam_permit.so\n127.0.0.1:7777')" >/tmp/evil-phone.log 2>&1
 check "a --phone value with a hidden PAM rule is refused" \
-  bash -c "grep -q 'must be an address and port' /tmp/evil-phone.log && [ \"\$(cksum < /tmp/pam.before)\" = \"\$(cksum < '$TARGET')\" ]"
+  bash -c "grep -q 'must be an address and port' /tmp/evil-phone.log && [ '$state0' = \"\$($(declare -f stack_state); TARGET='$TARGET'; stack_state)\" ]"
 bash "$I" stage --phone "phone.example:7777" >/tmp/name-phone.log 2>&1
 check "a host name is refused (pam_rssh could never dial it)" grep -q 'must be an address and port' /tmp/name-phone.log
 
@@ -312,6 +315,11 @@ check "(and 1.3's did -- the test can tell the difference)" grep -qx "old: authe
 # Rollback with a BEGIN marker and no END would have dropped every line after it -- the
 # whole auth stack, password included. It must refuse and change nothing.
 BEGIN_LINE="$(sed -n 's/^BEGIN_MARK="\(.*\)"$/\1/p' "$I")"
+# Needs a sudo stack carrying a block; set one up if an earlier step left none.
+if ! grep -qsF '# >>> SudoStamp >>>' "$TARGET"; then
+  pairing_phone 7792
+  type_code_from /tmp/p7792.code | bash "$I" setup --phone 127.0.0.1:7792 > /tmp/setup-rb.log 2>&1
+fi
 cp "$TARGET" /tmp/pam.good
 { head -1 /tmp/pam.good; echo "$BEGIN_LINE"; tail -n +2 /tmp/pam.good | grep -vF '# >>> SudoStamp >>>' | grep -vF '# <<< SudoStamp <<<'; } > "$TARGET"
 cp "$TARGET" /tmp/pam.broken
