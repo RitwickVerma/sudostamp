@@ -2,7 +2,7 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
-## 1.4.0 — unreleased
+## 1.4.0 — 2026-10-24
 
 **Security release.** Fixes every finding of a four-part security audit (2026-10-23: the app, the
 host installer and PAM stack, the release chain, the protocol). **Pairing changed**: after updating
