@@ -18,6 +18,11 @@
 #       package, then upload dist/ to the GitLab package registry and create the Release (asks
 #       first). Run from a worktree at the tag: the tag pipeline must be green.
 #
+#   scripts/release.sh ship X.Y.Z
+#       Everything after the release MR is merged, in one go, from any checkout: tags the merge
+#       commit, waits for the tag pipeline, runs publish in a temporary worktree (asks once
+#       before uploading), removes the worktree, and prepares the AUR update on a branch.
+#
 # Signing material, read from the maintainer's infrastructure checkout (SUDOSTAMP_HOMELAB_INFRA,
 # default ../homelab-infra) at origin/master, so the checkout's own branch does not matter:
 #   sops/sudostamp/release-signing.sops.env    the APK keystore and its passwords
@@ -38,9 +43,9 @@ RELEASE_CERT="7B:CB:0B:51:24:61:97:B9:BB:99:77:9E:09:A3:AD:CB:BA:EB:2D:59:A0:ED:
 
 die() { echo "release: $*" >&2; exit 1; }
 step() { printf '\n== %s\n' "$*"; }
-USAGE="usage: scripts/release.sh prepare X.Y.Z | package X.Y.Z | publish X.Y.Z"
+USAGE="usage: scripts/release.sh prepare X.Y.Z | package X.Y.Z | publish X.Y.Z | ship X.Y.Z"
 MODE="${1:-}"; VERSION="${2:-}"
-case "$MODE" in prepare|package|publish) ;; *) die "$USAGE" ;; esac
+case "$MODE" in prepare|package|publish|ship) ;; *) die "$USAGE" ;; esac
 # The installer's signatures: verified against this file, which is also what users paste.
 SIGNERS=keys/allowed_signers
 NAMESPACE=sudostamp-release
@@ -79,6 +84,55 @@ if [ "$MODE" = prepare ]; then
   )
   echo "release/$VERSION pushed with a merge request. When its pipeline is green: merge, then tag the merge commit:"
   echo "  git switch master && git pull && git tag -a $TAG -m \"SudoStamp $VERSION\" && git push origin $TAG"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- ship: tag -> CI -> publish -> AUR
+if [ "$MODE" = ship ]; then
+  command -v glab >/dev/null || die "glab is not installed"
+  git fetch -q origin master --tags
+  # The merge commit of release/X.Y.Z, and nothing else: the tag names exactly what was reviewed.
+  MERGE=$(git log origin/master --merges --format='%H %s' | awk -v b="'release/$VERSION'" '$0 ~ b {print $1; exit}')
+  [ -n "$MERGE" ] || die "no merge of release/$VERSION on origin/master yet: merge the release MR first"
+  if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+    [ "$(git rev-parse "$TAG^{commit}")" = "$MERGE" ] || die "$TAG exists but is not the release merge commit"
+    echo "$TAG already tags $MERGE"
+  else
+    git tag -a "$TAG" -m "SudoStamp $VERSION" "$MERGE" && git push -q origin "$TAG" || die "could not push $TAG"
+    echo "tagged $MERGE as $TAG"
+  fi
+  step "waiting for the $TAG pipeline"
+  status=""
+  for _ in $(seq 1 120); do                      # up to an hour; the shared runner queues
+    status=$(glab api "projects/:id/pipelines?ref=$TAG&per_page=1" 2>/dev/null \
+      | python3 -c 'import json,sys
+try: p=json.load(sys.stdin); print(p[0]["status"] if p else "none")
+except Exception: print("unknown")')
+    case "$status" in success) break ;; failed|canceled|skipped) die "the $TAG pipeline $status" ;; esac
+    sleep 30
+  done
+  [ "$status" = success ] || die "the $TAG pipeline did not finish within an hour (last: $status)"
+  echo "pipeline: success"
+  WT=$(mktemp -d "${TMPDIR:-/tmp}/sudostamp-ship.XXXXXX"); rmdir "$WT"
+  cleanup_ship() { git worktree remove --force "$WT" 2>/dev/null || true; }
+  trap cleanup_ship EXIT
+  git worktree add -q --detach "$WT" "$TAG"
+  [ -f local.properties ] && cp local.properties "$WT/"
+  HOMELAB="${SUDOSTAMP_HOMELAB_INFRA:-$PWD/../homelab-infra}"
+  (cd "$WT" && SUDOSTAMP_HOMELAB_INFRA="$(cd "$HOMELAB" && pwd)" scripts/release.sh publish "$VERSION") || die "publish failed"
+  step "AUR"
+  if [ -x scripts/update-aur.sh ]; then
+    AUR_BRANCH="packaging/aur-$VERSION"
+    git worktree remove --force "$WT"
+    git worktree add -q -b "$AUR_BRANCH" "$WT" origin/master
+    (cd "$WT" && scripts/update-aur.sh "$VERSION" >/dev/null && git add packaging/aur && \
+      git commit -q -m "AUR: sudostamp $VERSION" && \
+      git push -q -u origin "$AUR_BRANCH" -o merge_request.create -o merge_request.target=master \
+        -o merge_request.remove_source_branch -o "merge_request.title=AUR: sudostamp $VERSION") || \
+      die "the AUR update failed (the release itself is published)"
+    git branch -D "$AUR_BRANCH" >/dev/null 2>&1 || true
+    echo "AUR update: merge request opened. After merging, push packaging/aur/ to aur@aur.archlinux.org:sudostamp.git"
+  fi
   exit 0
 fi
 
@@ -208,8 +262,12 @@ PKG="projects/:id/packages/generic/sudostamp/$VERSION"
 for f in $FILES; do
   glab api -X PUT "$PKG/$f" --input "dist/$f" -H "Content-Type: application/octet-stream" >/dev/null || die "upload of $f failed"
 done
-URL=$(glab api projects/:id | sed -n 's/.*"web_url":"\([^"]*\)".*/\1/p' | head -1)
-API="https://gitlab.com/api/v4/projects/$(glab api projects/:id | sed -n 's/.*"id":\([0-9]*\),.*/\1/p' | head -1)/packages/generic/sudostamp/$VERSION"
+# Parsed as JSON, not with sed: the project object nests a namespace with its own "id" and
+# "web_url", and the first match (1.4.0's links) was the namespace's -- every link 401'd.
+PROJECT=$(glab api projects/:id) || die "cannot read the project from GitLab"
+URL=$(printf '%s' "$PROJECT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["web_url"])')
+PID=$(printf '%s' "$PROJECT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+API="https://gitlab.com/api/v4/projects/$PID/packages/generic/sudostamp/$VERSION"
 APK_SHA=$(awk -v f="sudostamp-$TAG.apk" '$2==f{print $1}' dist/SHA256SUMS)
 HOST_SHA=$(awk '$2=="sudostamp-setup.sh"{print $1}' dist/SHA256SUMS)
 python3 - "$TAG" "$URL" "$API" "$APK_SHA" "$HOST_SHA" "$RELEASE_CERT" "$(cat "$SIGNERS")" > dist/release.json <<'PY'

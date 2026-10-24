@@ -34,13 +34,14 @@ compromised container image away from leaking.
 # 2. Release branch + merge request. No secrets; your checkout is not touched:
 scripts/release.sh prepare X.Y.Z      # bumps versionCode/versionName, dates the section, runs release-check
 # 3. The MR pipeline (tests, release-check) goes green -> merge it.
-# 4. Tag THE MERGE COMMIT (not master before it):
-git switch master && git pull && git tag -a vX.Y.Z -m "SudoStamp X.Y.Z" && git push origin vX.Y.Z
-# 5. The tag pipeline goes green. Then, on your machine, from a worktree at the tag:
-git worktree add --detach /tmp/rel vX.Y.Z && cp local.properties /tmp/rel/ && cd /tmp/rel
-JAVA_HOME=~/opt/jdk ANDROID_HOME=~/opt/android-sdk scripts/release.sh publish X.Y.Z
-cd - && git worktree remove --force /tmp/rel
+# 4. Everything else, one command, from any checkout:
+JAVA_HOME=~/opt/jdk ANDROID_HOME=~/opt/android-sdk scripts/release.sh ship X.Y.Z
 ```
+
+`ship` tags the release merge commit, waits for the tag pipeline, runs `publish` in a temporary
+worktree (one question, before uploading), and opens the AUR update as a merge request. After
+merging that, push `packaging/aur/` to the AUR. The steps it runs can also be run by hand: tag,
+then `publish` from a worktree at the tag.
 
 `publish` builds and signs (as `package` below), shows the six files and asks, then uploads them to
 the package registry, creates the GitLab Release with permanent `/-/releases/permalink/latest/`
