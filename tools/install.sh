@@ -50,6 +50,10 @@
 # Portable bash: macOS still ships bash 3.2, so no associative arrays, no ${x,,}, no mapfile,
 # and no GNU-only flags (stat -c, sed -i, install -o root).
 set -uo pipefail
+# Our own PATH, not the caller's: this runs as root, and where sudoers sets no secure_path a
+# python3 or git earlier in the user's PATH would run as root. Homebrew's last, for macOS.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/homebrew/bin
+export PATH
 
 PHONE_ADDR="${SUDOSTAMP_PHONE:-}"
 # Whose key is pinned: SUDOSTAMP_USER, else the user who ran sudo, else (for a plain
@@ -59,6 +63,13 @@ TARGET_USER="${SUDOSTAMP_USER:-${SUDO_USER:-}}"
 KEYDIR="/etc/authorized_keys"
 KEYFILE="${KEYDIR}/${TARGET_USER}.keys"
 GATE="/usr/local/sbin/sudostamp-is-local"
+PROBE="/usr/local/sbin/sudostamp-probe"
+# The gate's control flags. NOT `[success=ok default=1]`: in Linux-PAM `ok` makes a
+# successful gate count towards the stack's result, after which a failing `sufficient` module
+# changes nothing -- on a stack with no required module below (a hand-written one), every
+# check failing would still have authenticated. `ignore` makes success mean only "carry on".
+# The probe in front of pam_rssh uses the same flags: success carries on, failure skips one line.
+GATE_CONTROL='[success=ignore ignore=ignore default=1]'
 # How long the LOCAL sensor waits for a finger. Only ever paid at the desk: the gate skips
 # pam_fprintd on remote (SSH/mosh) sessions.
 FPRINT_TIMEOUT=15
@@ -77,6 +88,9 @@ RSSH_COMMIT="e8dd046c423f85df266c23bcc3d7033bfee81255"
 CARGO_MIN_MINOR=88
 
 BEGIN_MARK="# >>> SudoStamp >>> managed by tools/install.sh; 'install.sh rollback' removes it"
+# The form a 1.3 install wrote, recognised so 'status' can say the block needs updating.
+OLD_GATE_CONTROL='[success=ok default=1]'
+
 END_MARK="# <<< SudoStamp <<<"
 VENDOR_MARK="# SudoStamp: copied from the vendor file; rollback deletes this file"
 
@@ -141,6 +155,28 @@ pam_target() {
 }
 PAM_TEST="$(pam_dir)/sudostamp-test"
 
+# Where the module goes on macOS. NOT /usr/local/lib: Intel Homebrew makes /usr/local/lib the
+# user's, and a user-writable directory anywhere on the path to a module sudo loads lets
+# anything running as the user swap in its own module -- root on the next sudo.
+MACOS_MODULE_DIR=/opt/sudostamp/lib
+
+# Create $1 (and its parents) root-owned, and refuse if any directory on its path can be
+# written by anyone but root.
+root_owned_dir() {
+  local d="$1" p
+  mkdir -p "$d" || die "cannot create $d"
+  chown 0:0 "$d" && chmod 0755 "$d"
+  p="$d"
+  while [ "$p" != / ] && [ -n "$p" ]; do
+    [ -L "$p" ] && die "$p is a symbolic link -- refusing to install a PAM module under it"
+    # shellcheck disable=SC2012,SC2046  # ls -ldn, split: the portable way to read owner and mode
+    set -- $(ls -ldn "$p")
+    [ "$3" = 0 ] || die "$p is not owned by root -- refusing to install a PAM module under it"
+    case "$1" in ?????w????*|????????w?*) die "$p is writable by others -- refusing to install a PAM module under it" ;; esac
+    p="$(dirname "$p")"
+  done
+}
+
 # The directory PAM loads bare module names from: wherever pam_unix.so lives.
 module_dir() {
   local d
@@ -158,7 +194,7 @@ module_dir() {
 find_pam_rssh() {
   local d c
   case "$FAMILY" in
-    macos)   [ -f /usr/local/lib/pam/pam_rssh.so ] && { echo /usr/local/lib/pam/pam_rssh.so; return 0; }; return 1 ;;
+    macos)   [ -f "$MACOS_MODULE_DIR/pam_rssh.so" ] && { echo "$MACOS_MODULE_DIR/pam_rssh.so"; return 0; }; return 1 ;;
     freebsd) for c in /usr/local/lib/pam_rssh.so /usr/local/lib/security/pam_rssh.so; do
                [ -f "$c" ] && { echo "$c"; return 0; }; done; return 1 ;;
   esac
@@ -185,24 +221,35 @@ need_root() {
 need_platform() {
   [ -n "$FAMILY" ] || die "unsupported platform ($OS, /etc/os-release: ${ids:-none}). See README.md for the lines to add by hand."
 }
-# host:port, strictly: this string is written into a PAM configuration line. An IPv4
-# address, a bracketed IPv6 address ([fd00::1]:7777) or a DNS name, and a port 1-65535;
-# nothing else gets through. (pam_rssh itself parses only literal addresses, so a name is
-# only usable where it is given as one; discovery always yields a literal.)
+# host:port, strictly: this string is written into a PAM configuration line. An IPv4 address
+# or a bracketed IPv6 address ([fd00::1]:7777), and a port 1-65535 -- nothing else, and checked
+# character by character FIRST: a test that matches one line (grep -x) passed a value whose
+# second line was a whole PAM rule. No host names either: pam_rssh parses only literal
+# addresses, so a name could never work at sudo time anyway.
 need_phone() {
-  local host="${PHONE_ADDR%:*}" port="${PHONE_ADDR##*:}"
   if [ -z "$PHONE_ADDR" ]; then
-    echo "Which phone? Pass --phone <phone-ip>:7777 (the address on the app's setup screen)" >&2; exit 2
+    echo "Which phone? Pass --phone <phone-ip>:7777 (the address on the app's pairing screen)" >&2; exit 2
   fi
-  local ok_host=0
-  case "$host" in
-    \[*\]) printf '%s' "$host" | grep -qxE '\[[0-9A-Fa-f:]{2,39}\]' && \
-            [ "$(printf '%s' "$host" | tr -cd ':' | wc -c | tr -d ' ')" -ge 2 ] && ok_host=1 ;;
-    *)      printf '%s' "$host" | grep -qxE '[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?' && ok_host=1 ;;
+  local ok=0
+  case "$PHONE_ADDR" in
+    *[!0-9A-Fa-f.:\[\]]*) ok=0 ;;                       # any other character, newline included
+    *) python3 -I - "$PHONE_ADDR" <<'PY' && ok=1 ;;
+import ipaddress, sys
+v = sys.argv[1]
+host, _, port = v.rpartition(":")
+try:
+    if host.startswith("[") and host.endswith("]"):
+        ipaddress.IPv6Address(host[1:-1])
+    else:
+        ipaddress.IPv4Address(host)
+    if not (port.isdigit() and 1 <= int(port) <= 65535 and str(int(port)) == port):
+        raise ValueError
+except ValueError:
+    sys.exit(1)
+PY
   esac
-  if [ "$ok_host" != 1 ] || ! printf '%s' "$port" | grep -qxE '[1-9][0-9]{0,4}' || [ "$port" -gt 65535 ] ||
-     [ "$host:$port" != "$PHONE_ADDR" ]; then
-    echo "--phone must be host:port, e.g. 192.168.1.50:7777 or [fd00::1]:7777 (got: $PHONE_ADDR)" >&2; exit 2
+  if [ "$ok" != 1 ]; then
+    echo "--phone must be an address and port, e.g. 192.168.1.50:7777 or [fd00::1]:7777" >&2; exit 2
   fi
 }
 need_user() {
@@ -214,6 +261,42 @@ need_user() {
 
 # Root-owned and world-readable, numerically: macOS and FreeBSD have no `root` group.
 own_root() { chown 0:0 "$@" && chmod 0644 "$@"; }
+
+# Backups of sudo's PAM file. NOT next to it: every file in /etc/pam.d is a PAM service that
+# any program may name, and 1.3 left a sudo.bak-<time> there on every apply.
+backup_dir() {
+  case "$FAMILY" in
+    macos) echo /var/db/sudostamp/backups ;;
+    *)     echo /var/lib/sudostamp/backups ;;
+  esac
+}
+# Copy $1 into the backup directory; prints the copy's path.
+backup_of() {
+  local d; d="$(backup_dir)"
+  mkdir -p "$d" && chown 0:0 "$d" && chmod 0700 "$d" || return 1
+  local b
+  b="$d/$(basename "$1").bak-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -p "$1" "$b" && echo "$b"
+}
+# Move backups an older version left inside the PAM directory into the backup directory.
+tidy_old_backups() {
+  local target="$1" b d moved=0
+  d="$(backup_dir)"
+  for b in "${target}".bak-*; do
+    [ -f "$b" ] || continue
+    mkdir -p "$d" && chown 0:0 "$d" && chmod 0700 "$d" || return 0
+    mv -f "$b" "$d/" && moved=$((moved + 1))
+  done
+  [ "$moved" -eq 0 ] || ok "moved $moved old backup(s) of $target out of $(dirname "$target") into $d"
+}
+# Every backup of $1 without pam_rssh, oldest first (names end in a UTC timestamp).
+clean_backups() {
+  local b
+  for b in "$(backup_dir)/$(basename "$1")".bak-* "${1}".bak-*; do
+    [ -f "$b" ] || continue
+    grep -q pam_rssh "$b" || echo "$b"
+  done | awk -F'.bak-' '{print $NF "\t" $0}' | sort | cut -f2-
+}
 
 # Write stdin to $1 atomically: sudo only ever sees the old file or the complete new one.
 # Writing in place left a window -- a full disk, a kill mid-write -- with a truncated PAM
@@ -382,7 +465,7 @@ build_pam_rssh() {
     die "cargo build failed"
 
   case "$FAMILY" in
-    macos) dest=/usr/local/lib/pam/pam_rssh.so; mkdir -p /usr/local/lib/pam ;;
+    macos) dest="$MACOS_MODULE_DIR/pam_rssh.so"; root_owned_dir "$MACOS_MODULE_DIR" ;;
     *)     dest="$(module_dir)/pam_rssh.so" || die "no PAM module directory found" ;;
   esac
   local built="$work/pam_rssh/target/release/libpam_rssh.so"
@@ -407,15 +490,8 @@ install_pam_rssh() {
   local mod
   if mod="$(find_pam_rssh)"; then ok "pam_rssh already installed: $mod"; return 0; fi
   case "$FAMILY" in
-    arch)
-      local aur
-      for aur in yay paru; do
-        if command -v "$aur" >/dev/null 2>&1; then
-          warn "installing pam_rssh from the AUR with $aur"
-          sudo -u "$TARGET_USER" "$aur" -S --noconfirm pam_rssh && find_pam_rssh >/dev/null && return 0
-        fi
-      done
-      build_pam_rssh ;;
+    # Arch too: an AUR helper would install whatever the AUR package says today, with no
+    # version or commit pin and no review. The pinned build below is the same everywhere.
     freebsd)
       pkg_install pam_rssh || die "pkg install pam_rssh failed" ;;
     *)
@@ -425,14 +501,26 @@ install_pam_rssh() {
   ok "module: $mod"
 }
 
-# The local-vs-remote gate, only where a local sensor can exist (Linux with pam_fprintd).
-install_gate() {
-  mkdir -p "$(dirname "$GATE")"
+# Install one of our helper scripts ($1, from tools/) as root-owned $2.
+install_helper() {
+  mkdir -p "$(dirname "$2")"
   # Read as the user, for the same reason as the module: never follow their symlinks as root.
   # shellcheck disable=SC2024  # intended: read as the user, write (the redirect) as root
-  sudo -u "$TARGET_USER" cat "$HERE/sudostamp-is-local.sh" > "$GATE.sudostamp-new" && \
-    chown 0:0 "$GATE.sudostamp-new" && chmod 0755 "$GATE.sudostamp-new" && mv -f "$GATE.sudostamp-new" "$GATE"
+  sudo -u "$TARGET_USER" cat "$HERE/$1" > "$2.sudostamp-new" && \
+    chown 0:0 "$2.sudostamp-new" && chmod 0755 "$2.sudostamp-new" && mv -f "$2.sudostamp-new" "$2"
 }
+# The local-vs-remote gate, only where a local sensor can exist (Linux with pam_fprintd), and
+# the reachability probe, wherever the PAM syntax can skip a line on its answer (Linux-PAM).
+install_helpers() {
+  linux_pam || return 0
+  install_helper sudostamp-probe.sh "$PROBE" || die "could not install $PROBE"
+  if has_fprintd; then
+    install_helper sudostamp-is-local.sh "$GATE" || die "could not install $GATE"
+    ok "local fingerprint reader found: it is tried first at the desk"
+  fi
+}
+# Linux-PAM, with its [value=action] syntax. OpenPAM (macOS, FreeBSD) has no way to skip a line.
+linux_pam() { [ "$OS" = Linux ]; }
 has_fprintd() {
   [ "$OS" = Linux ] || return 1
   local d; d="$(module_dir)" || return 1
@@ -467,13 +555,22 @@ warn_targetpw() {
 
 # ------------------------------------------------------------------ the block
 
-# Our lines. The sensor pair only with a local fingerprint reader, and only on Linux-PAM:
-# `[success=ok default=1]` is Linux-PAM syntax that OpenPAM does not have.
+# Our lines, on Linux-PAM:
+#   gate   (only with a local reader) remote session? then skip the reader
+#   reader (only with a local reader) pam_fprintd, sufficient
+#   probe  phone not answering with this user's key within seconds? then skip pam_rssh
+#   phone  pam_rssh, sufficient
+# Nothing here can grant anything by itself: only pam_fprintd and pam_rssh say yes, and both
+# are `sufficient` -- on failure the stack below (the password) decides, untouched. OpenPAM has
+# no skipping syntax, so there it is the phone line alone.
 block_lines() {
   local mod; mod="$(module_ref)" || die "pam_rssh is not installed -- run 'stage' first"
-  if has_fprintd; then
-    printf 'auth       [success=ok default=1]  pam_exec.so quiet %s\n' "$GATE"
+  if linux_pam && has_fprintd; then
+    printf 'auth       %s  pam_exec.so quiet %s\n' "$GATE_CONTROL" "$GATE"
     printf 'auth       sufficient   pam_fprintd.so timeout=%s max-tries=1\n' "$FPRINT_TIMEOUT"
+  fi
+  if linux_pam; then
+    printf 'auth       %s  pam_exec.so quiet %s phone=%s keys=%s\n' "$GATE_CONTROL" "$PROBE" "$PHONE_ADDR" "$KEYDIR"
   fi
   printf 'auth       sufficient   %s ssh_agent_addr=%s auth_key_file=%s/${user}.keys cue cue_prompt=SudoStamp-approve-on-your-phone-(up-to-60s)\n' \
     "$mod" "$PHONE_ADDR" "$KEYDIR"
@@ -504,8 +601,15 @@ with_block() {
   rm -f "$1.sudostamp-block"
   return $rc
 }
+# $1 without our block. Refuses unless the markers are exactly one BEGIN followed by one END:
+# a BEGIN with no END (a hand edit, a truncated file) would otherwise drop every line after
+# it -- the whole auth stack, which locks out the password too.
 without_block() {
-  awk -v b="$BEGIN_MARK" -v e="$END_MARK" '$0==b{s=1; next} $0==e{s=0; next} !s' "$1"
+  awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+    $0==b { nb++; if (s || ne) bad=1; s=1; next }
+    $0==e { ne++; if (!s) bad=1; s=0; next }
+    !s { print }
+    END { exit (bad || s || nb > 1 || ne > 1 || nb != ne) }' "$1"
 }
 
 # The vendor file sudo falls back to when there is no override in /etc (openSUSE).
@@ -527,9 +631,10 @@ fetch_key() {
   # -I: isolated mode. This runs as root, and plain `python3 -` puts the CURRENT directory
   # first on the import path, so a stray socket.py wherever the user happened to be would
   # run as root.
-  python3 -I - "$PHONE_ADDR" <<'PY'
-import base64, socket, struct, sys
+  python3 -I - "$PHONE_ADDR" "$SUDOSTAMP_FINGERPRINT" <<'PY'
+import base64, hashlib, socket, struct, sys
 host, port = sys.argv[1].rsplit(":", 1)
+want = sys.argv[2]
 s = socket.create_connection((host.strip("[]"), int(port)), timeout=10)
 s.settimeout(10)
 s.sendall(struct.pack(">I", 1) + bytes([11]))      # REQUEST_IDENTITIES
@@ -548,8 +653,8 @@ body = rx(ln)
 if body[0] != 12:
     raise SystemExit("unexpected reply type %d" % body[0])
 n = struct.unpack(">I", body[1:5])[0]
-if n != 1:
-    raise SystemExit("expected exactly 1 key, got %d" % n)
+if not 1 <= n <= 64:
+    raise SystemExit("expected 1 to 64 keys, got %d" % n)
 
 def string(buf, o):
     if o + 4 > len(buf):
@@ -559,16 +664,25 @@ def string(buf, o):
         raise SystemExit("truncated answer")
     return buf[o+4:o+4+l], o + 4 + l
 
-blob, _ = string(body, 5)
-# The key must be exactly what the app makes: an uncompressed P-256 point, nothing more.
-t, o = string(blob, 0)
-c, o = string(blob, o)
-q, o = string(blob, o)
-if (t, c) != (b"ecdsa-sha2-nistp256", b"nistp256") or len(q) != 65 or q[0] != 4 or o != len(blob):
-    raise SystemExit("not a SudoStamp key (expected one ecdsa-sha2-nistp256 public key)")
-# The phone's comment is ignored, deliberately: it is attacker-controlled text that would go
-# verbatim into a root-owned key file, and a newline in it pins a SECOND key.
-print("ecdsa-sha2-nistp256 %s sudostamp" % base64.b64encode(blob).decode())
+# One key per paired computer: take the one whose fingerprint is the one we were given.
+o = 5
+for _ in range(n):
+    blob, o = string(body, o)
+    _, o = string(body, o)
+    fp = "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+    if fp != want:
+        continue
+    # The key must be exactly what the app makes: an uncompressed P-256 point, nothing more.
+    t, p = string(blob, 0)
+    c, p = string(blob, p)
+    q, p = string(blob, p)
+    if (t, c) != (b"ecdsa-sha2-nistp256", b"nistp256") or len(q) != 65 or q[0] != 4 or p != len(blob):
+        raise SystemExit("not a SudoStamp key (expected one ecdsa-sha2-nistp256 public key)")
+    # The phone's comment is ignored, deliberately: it is attacker-controlled text that would go
+    # verbatim into a root-owned key file, and a newline in it pins a SECOND key.
+    print("ecdsa-sha2-nistp256 %s sudostamp" % base64.b64encode(blob).decode())
+    raise SystemExit(0)
+raise SystemExit("fingerprint mismatch: no key with %s at this address" % want)
 PY
 }
 
@@ -587,13 +701,26 @@ acquire_key() {
     fp="$(printf '%s\n' "$key" | ssh-keygen -lf - | awk '{print $2}')"
     [ "$fp" = "$SUDOSTAMP_FINGERPRINT" ] || { bad "fingerprint mismatch: the phone's key is $fp" >&2; return 1; }
   else
-    key="$(python3 -I "$HERE/pair.py" pair --phone "$PHONE_ADDR" --label "$(hostname 2>/dev/null || uname -n)")" || return 1
+    local addr_file; addr_file="$(root_tmp)/phone-addr"
+    key="$(python3 -I "$HERE/pair.py" pair --phone "$PHONE_ADDR" --label "$(hostname 2>/dev/null || uname -n)" \
+             --addr-out "$addr_file")" || return 1
   fi
   # Exactly one line of exactly this shape, whatever produced it: this is the content of a
   # root-owned file that decides who may approve sudo.
   printf '%s\n' "$key" | grep -qxE 'ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABB[A-Za-z0-9+/]{87}= sudostamp' && \
     [ "$(printf '%s\n' "$key" | wc -l | tr -d ' ')" = 1 ] || { bad "not a single SudoStamp key" >&2; return 1; }
   printf '%s\n' "$key"
+}
+
+# After pairing: the address the phone vouched for (its stable one, if this computer reaches
+# it there), checked again before it can go into a PAM line. acquire_key runs in a subshell,
+# so it hands this over in a file in the private temporary directory.
+adopt_paired_addr() {
+  local f="$ROOT_TMP/phone-addr"
+  [ -s "$f" ] || return 0
+  PHONE_ADDR="$(head -1 "$f")"
+  need_phone
+  rm -f "$f"
 }
 
 # Root-owned dir AND file. auth_keys.rs:87 does a bare read_to_string with no symlink or
@@ -620,7 +747,10 @@ find_phone() {
     say "  More than one phone is pairing right now:"
     printf '%s\n' "$found" | awk -F'\t' '{printf "    %d) %s  (%s)\n", NR, $2, $1}'
     read -r -p "  Which one? [1-$n] " choice
-    PHONE_ADDR="$(printf '%s\n' "$found" | sed -n "${choice:-0}p" | cut -f1)"
+    # A number, and only a number: it is used to pick a line.
+    case "$choice" in ''|*[!0-9]*) die "not a choice: $choice" ;; esac
+    [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ] || die "not a choice: $choice"
+    PHONE_ADDR="$(printf '%s\n' "$found" | awk -v n="$choice" 'NR==n' | cut -f1)"
   else
     say "  Not found automatically. Something on this network blocks mDNS (port 5353):"
     say "  a firewall here (firewalld: firewall-cmd --add-service=mdns), or Wi-Fi client isolation."
@@ -636,7 +766,11 @@ run_test() {
   { echo "#%PAM-1.0"; block; echo "auth       required     pam_deny.so"; \
     echo "account    required     pam_permit.so"; } | write_atomic "$PAM_TEST"
   say "  Approve the request on your phone now (a local fingerprint reader, if any, is asked first):"
-  if python3 -I "$HERE/pam_check.py" "$(basename "$PAM_TEST")" "$TARGET_USER"; then
+  local rc=0
+  python3 -I "$HERE/pam_check.py" "$(basename "$PAM_TEST")" "$TARGET_USER" || rc=1
+  # Never left behind: every file in the PAM directory is a service any program can name.
+  rm -f "$PAM_TEST"
+  if [ "$rc" = 0 ]; then
     ok "the phone approved through PAM"
   else
     bad "the test did not succeed -- see the result above. sudo is untouched."
@@ -648,13 +782,10 @@ run_test() {
 # by this script) hold the stack from before it; restore the newest one without pam_rssh, after
 # keeping a copy of what is there now. Asks first: other edits made since would go too.
 migrate_legacy() {
-  local target b bak="" answer
+  local target bak answer
   target="$(pam_target)"
   has_foreign_rssh "$target" || return 0
-  for b in "${target}".bak-*; do
-    [ -f "$b" ] || continue
-    grep -q pam_rssh "$b" || bak="$b"
-  done
+  bak="$(clean_backups "$target" | tail -1)"
   [ -n "$bak" ] || die "$target has pam_rssh lines this script did not write, and no backup from before them. Remove those lines by hand, then run setup again."
   warn "$target holds an older SudoStamp stack (or hand-added pam_rssh lines)."
   say "     It will be replaced by $bak (from before SudoStamp), and then get the new block."
@@ -663,7 +794,7 @@ migrate_legacy() {
     read -r -p "     Continue? [yes/no] " answer
     [ "$answer" = yes ] || die "stopped; nothing changed"
   fi
-  cp -p "$target" "${target}.bak-$(date +%Y%m%dT%H%M%SZ)"
+  backup_of "$target" >/dev/null || die "could not back up $target"
   cp -p "$bak" "$target.sudostamp-new" && mv -f "$target.sudostamp-new" "$target"
   ok "restored $target from $bak"
 }
@@ -690,18 +821,20 @@ do_apply() {
     die "no $target to modify. Is sudo installed?"
   fi
   if [ -f "$target" ]; then
-    bak="${target}.bak-$(date +%Y%m%dT%H%M%SZ)"
-    cp -p "$target" "$bak" && ok "backed up $bak"
+    bak="$(backup_of "$target")" || die "could not back up $target"
+    ok "backed up $bak"
   fi
+  tidy_old_backups "$target"
   new="$(root_tmp)/new"
   if [ "$FAMILY" = macos ]; then
     # sudo_local holds only additions: our block first, then whatever else is there.
-    { block; [ "$src" = /dev/null ] || without_block "$src"; } > "$new"
+    { block; [ "$src" = /dev/null ] || without_block "$src" || exit 1; } > "$new" || \
+      die "$src has damaged SudoStamp markers -- fix them by hand first"
   else
     if [ -n "$vendor" ]; then
       { head -1 "$vendor"; echo "$VENDOR_MARK"; tail -n +2 "$vendor"; } > "$new.src"
     else
-      without_block "$src" > "$new.src"
+      without_block "$src" > "$new.src" || die "$src has damaged SudoStamp markers -- fix them by hand first"
     fi
     with_block "$new.src" > "$new" || die "no auth rule found in $src -- not guessing where the block goes"
   fi
@@ -716,6 +849,7 @@ cmd_setup() {
   need_root setup; need_platform; need_user
   say "=== SudoStamp setup ($FAMILY) ==="
   base_deps >/dev/null || die "could not install base dependencies (python3, ssh-keygen, git)"
+  root_tmp >/dev/null
   [ -n "$PHONE_ADDR" ] || find_phone
   need_phone
 
@@ -723,11 +857,13 @@ cmd_setup() {
   say "1/4  Pairing with the phone at $PHONE_ADDR"
   local key
   key="$(acquire_key)" || die "not paired; nothing on this computer was changed"
+  adopt_paired_addr
+  ok "the phone will be reached at $PHONE_ADDR"
 
   say
   say "2/4  Installing pam_rssh"
   install_pam_rssh
-  has_fprintd && { install_gate; ok "local fingerprint reader found: it is tried first at the desk"; }
+  install_helpers
   pin_key "$key"
 
   say
@@ -754,9 +890,11 @@ cmd_stage() {
   base_deps || die "could not install base dependencies (python3, ssh-keygen, git)"
   # The key first: a wrong phone or an impostor is refused before minutes of building.
   local key
+  root_tmp >/dev/null
   key="$(acquire_key)" || die "no key pinned"
+  adopt_paired_addr
   install_pam_rssh
-  has_fprintd && { install_gate; ok "local fingerprint reader found; gate installed: $GATE"; }
+  install_helpers
   warn_targetpw
   pin_key "$key"
   say
@@ -766,6 +904,7 @@ cmd_stage() {
 cmd_test() {
   need_root test; need_platform; need_phone; need_user
   [ -f "$KEYFILE" ] || die "no pinned key -- run 'stage' first"
+  install_helpers
   say "=== test: a scratch PAM service. $(pam_target) is NOT touched. ==="
   run_test || exit 1
   say
@@ -776,7 +915,7 @@ cmd_apply() {
   need_root apply; need_platform; need_phone; need_user
   [ -f "$KEYFILE" ] || die "no pinned key -- run 'stage' first"
   find_pam_rssh >/dev/null || die "pam_rssh is not installed -- run 'stage' first"
-  has_fprintd && install_gate
+  install_helpers
   say "=== apply: add the SudoStamp block to $(pam_target) ==="
   do_apply
   sed 's/^/     /' "$(pam_target)"
@@ -799,26 +938,28 @@ cmd_rollback() {
       # stack exactly.
       rm -f "$target" && ok "removed $target (the vendor file applies again)"
     else
-      without_block "$target" | write_atomic "$target"
+      local new; new="$(root_tmp)/rollback"
+      without_block "$target" > "$new" || \
+        die "$target has damaged SudoStamp markers (a BEGIN without its END, or two blocks). Nothing changed; fix it by hand."
+      # The result must still authenticate somehow, or the password would be locked out too.
+      # (macOS sudo_local holds additions only, and may legitimately end up empty.)
+      if [ "$FAMILY" != macos ] && ! grep -qE '^[[:space:]]*-?auth[[:space:]]|^@include[[:space:]]+common-auth' "$new"; then
+        die "removing the block would leave $target with no auth rule at all. Nothing changed."
+      fi
+      write_atomic "$target" < "$new"
       ok "removed the SudoStamp block from $target"
     fi
   else
     # An older SudoStamp replaced the whole file. Put back the newest backup WITHOUT
     # pam_rssh: re-applying that old version made a backup of its own previous output each
     # time, so "the latest backup" is usually just another SudoStamp stack.
-    local b
-    bak=""
-    # Names end in a UTC timestamp (YYYYmmddTHHMMSSZ), so glob order is age order: the last
-    # match is the newest.
-    for b in "${target}".bak-*; do
-      [ -f "$b" ] || continue
-      grep -q pam_rssh "$b" || bak="$b"
-    done
+    bak="$(clean_backups "$target" | tail -1)"
     [ -n "$bak" ] || die "no SudoStamp block in $target and no backup without pam_rssh to restore"
     cp -p "$bak" "$target.sudostamp-new" && mv -f "$target.sudostamp-new" "$target"
     ok "restored $target from $bak"
   fi
-  rm -f "$PAM_TEST" "$GATE"
+  rm -f "$PAM_TEST" "$GATE" "$PROBE"
+  tidy_old_backups "$target"
   say "Check the password works:   sudo -k && sudo true"
 }
 
@@ -833,13 +974,16 @@ cmd_status() {
   if [ -f "$KEYFILE" ]; then say "pinned key      : $KEYFILE ($(ls -l "$KEYFILE" | awk '{print $1, $3":"$4}'))"
   else say "pinned key      : absent ($KEYFILE)"; fi
   say "local reader    : $(has_fprintd && echo "pam_fprintd (gate: $GATE)" || echo none)"
-  if has_block "$target"; then say "PAM             : SudoStamp block present in $target"
+  say "probe           : $([ -x "$PROBE" ] && echo "$PROBE" || echo "absent$(linux_pam || echo ' (not used on OpenPAM)')")"
+  if has_block "$target" && grep -qF "$OLD_GATE_CONTROL" "$target"; then
+    say "PAM             : SudoStamp block from an older version in $target -- run 'sudo $PROG setup' to update it"
+  elif has_block "$target"; then say "PAM             : SudoStamp block present in $target"
   elif has_foreign_rssh "$target"; then say "PAM             : pam_rssh lines NOT written by this script in $target"
   else say "PAM             : not applied ($target)"; fi
   say "scratch service : $([ -f "$PAM_TEST" ] && echo present || echo absent)"
   if sudo_auths_as_root; then say "sudo auth as    : ROOT (targetpw/rootpw) -- the phone is never asked; see 'stage' output"
   else say "sudo auth as    : the invoking user"; fi
-  say "backups         : $(ls -1 "${target}".bak-* 2>/dev/null | wc -l | tr -d ' ')"
+  say "backups         : $(ls -1 "$(backup_dir)/$(basename "$target")".bak-* "${target}".bak-* 2>/dev/null | wc -l | tr -d ' ') ($(backup_dir))"
   [ -f "$target" ] && { say "--- $target ---"; sed 's/^/  /' "$target"; }
 }
 

@@ -2,6 +2,80 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
+## 1.4.0 — unreleased
+
+**Security release.** Fixes every finding of a four-part security audit (2026-10-23: the app, the
+host installer and PAM stack, the release chain, the protocol). **Pairing changed**: after updating
+the app, pair each computer again (`sudo bash sudostamp-setup.sh`), then remove "Computers paired
+before 1.4" from the app's list. Until then the old pairing keeps working, flagged on every request.
+
+### Phone
+- **One key per computer.** The phone makes a separate Keystore key for every computer it pairs
+  with, and the approval screen and fingerprint prompt name the computer the key belongs to. A
+  signature made for one computer no longer verifies on another, and a request relayed from one
+  computer into another's sudo cannot borrow its name.
+- **Devices that never paired cannot prompt at all**: a sign request for any other key is refused
+  before anything is shown.
+- **Pairing v2** commits to the address the phone was dialled on: something that answered
+  discovery first and passed everything through unchanged used to get its own address pinned into
+  sudo's configuration. It is now refused.
+- A computer is marked *new* until one of its requests is approved; finishing pairing alone grants
+  nothing. Any second pairing attempt while the pairing screen is open cancels the pairing, even
+  one that already finished (an attacker racing your computer is cancelled when yours arrives).
+- **No automatic fingerprint prompt** except for the request whose notification you tapped. A
+  request arriving while the app is open waits for *Approve with fingerprint*, and every request
+  is refused unprompted for 3 s after an approval, so a request queued behind yours cannot read as
+  "sudo asked twice". Deny in a notification only ever denies that notification's request.
+- Rate limits per computer and overall (4 unapproved requests in 10 minutes), instead of per IP
+  address, which changing addresses defeated.
+- Serves only peers on the Wi-Fi or Ethernet subnet a connection arrived on: no longer mobile
+  data (carriers' 10.x networks), VPNs or tethering. Loopback only in debug builds.
+- Refuses to create a key the Keystore would put in software instead of secure hardware.
+- The app lists paired computers; **Remove** deletes that computer's key.
+- Pairing ends when its screen is left (the screen stays on while it is open), and the phone stops
+  advertising itself once a computer has started pairing.
+- Touches through another app's overlay are dropped on Android 11.
+
+### Computer
+- **Sudo no longer hangs when the phone does not answer.** pam_rssh has no timeout; a check in
+  front of it (`sudostamp-probe`) skips it unless the phone answers with this user's key within 4 s,
+  so a dead phone, another device on its old address, or anything that accepts and never answers
+  goes straight to the password.
+- The PAM block's helper lines use `[success=ignore ignore=ignore default=1]`. 1.3's
+  `[success=ok …]` made the gate's success count as authentication: on a sudo stack with no
+  required module below the block, every check failing would have let sudo through. The stacks the
+  installer supports were not affected; re-run setup to update the block (`status` says so).
+- `--phone` is checked character by character and must be an IP literal and port: a value with a
+  second line was written into the PAM file as a second rule.
+- Rollback refuses damaged markers (a BEGIN without its END removed the whole auth stack) and never
+  leaves a file with no auth rule.
+- Backups moved from `/etc/pam.d` (where every file is a PAM service) to
+  `/var/lib/sudostamp/backups`; old ones are moved there on the next setup or rollback. The scratch
+  test service is always removed.
+- pam_rssh is always built from the pinned commit; the unpinned AUR-helper path is gone.
+- The installer sets its own `PATH`; discovery drops implausible answers and cleans displayed names;
+  the phone menu takes a number and nothing else.
+- macOS (experimental): the module goes to `/opt/sudostamp/lib`, and only if every directory on the
+  path is root-owned and not writable by others.
+
+### Releases
+- **The installer is signed.** The documented command and the app download `sudostamp-setup.sh` and
+  its `.sig` and verify them (`ssh-keygen -Y verify`, key in `keys/allowed_signers`) before running
+  anything as root; `SHA256SUMS` is signed too. Files on the release page could be replaced after
+  publishing.
+- **CI no longer signs anything.** GitLab hands protected variables to every job of a protected
+  ref, on a runner shared with other projects; signing and publishing now run only on the
+  maintainer's machine (`scripts/release.sh publish`).
+- Gradle's execution history (hashes of the keystore passwords) stays in tmpfs during a signed
+  build. The secret scan refuses key files by name and knows age keys and the vault's entries.
+
+### Tests
+- End to end on all seven distributions, what must **not** work: a relay during pairing, a phone
+  that stalls, a phone with a key nobody pinned, no phone at all, a hostile `--phone`, the gate
+  flags against real libpam, rollback of a damaged block.
+- Unit tests for the computer list, the rate limiter, pairing v2 (same vectors on both sides), the
+  LAN rule, and the length check that could overflow.
+
 ## 1.3.0 — 2026-10-22
 
 **First public release.** Everything below this line was developed and verified before the

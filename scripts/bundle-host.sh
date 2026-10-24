@@ -21,7 +21,7 @@ version="${1:-$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
 out=dist/sudostamp-setup.sh
 mkdir -p dist
 
-files="tools/install.sh tools/pair.py tools/pam_check.py tools/sudostamp-is-local.sh"
+files="tools/install.sh tools/pair.py tools/pam_check.py tools/sudostamp-is-local.sh tools/sudostamp-probe.sh"
 for f in $files; do
   # A file containing its own heredoc terminator would cut the bundle short.
   if grep -q '^SUDOSTAMP_BUNDLE_EOF' "$f"; then echo "$f contains the bundle terminator" >&2; exit 1; fi

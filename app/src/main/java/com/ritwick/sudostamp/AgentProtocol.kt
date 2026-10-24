@@ -93,22 +93,27 @@ object AgentProtocol {
     }
 
     /**
-     * Why a sign request must be refused without asking the user, or null if it may be
-     * put to them. [ourKey] is our public key blob.
+     * Why a sign request must be refused without asking the user, or null if it may be put to
+     * them. [knownKey]: the key it names belongs to a paired computer. An unknown key is
+     * refused before anything is shown -- so a device that never paired cannot put a prompt on
+     * the screen at all.
      */
-    fun refusal(keyBlob: ByteArray, data: ByteArray, ourKey: ByteArray): String? = when {
-        !keyBlob.contentEquals(ourKey) -> "sign request for an unknown key"
+    fun refusal(knownKey: Boolean, data: ByteArray): String? = when {
+        !knownKey -> "sign request for a key this phone did not make for any paired computer"
         data.size != CHALLENGE_BYTES -> "refusing to sign ${data.size} bytes: not a pam_rssh challenge"
         else -> null
     }
 
-    /** IDENTITIES_ANSWER carrying exactly one key. */
-    fun identitiesAnswer(keyBlob: ByteArray, comment: String): ByteArray {
+    /** IDENTITIES_ANSWER listing [keyBlobs]: one key per paired computer. pam_rssh uses the
+     *  one its computer pinned. */
+    fun identitiesAnswer(keyBlobs: List<ByteArray>, comment: String): ByteArray {
         val o = ByteArrayOutputStream()
         o.write(SSH2_AGENT_IDENTITIES_ANSWER)
-        putInt(o, 1)                                     // one key
-        putBlob(o, keyBlob)
-        putBlob(o, comment.toByteArray(Charsets.UTF_8))
+        putInt(o, keyBlobs.size)
+        for (k in keyBlobs) {
+            putBlob(o, k)
+            putBlob(o, comment.toByteArray(Charsets.UTF_8))
+        }
         return o.toByteArray()
     }
 
@@ -149,7 +154,8 @@ object AgentProtocol {
                     ((buf[pos + 2].toInt() and 0xFF) shl 8) or
                     (buf[pos + 3].toInt() and 0xFF)
             pos += 4
-            if (n < 0 || pos + n > buf.size) throw EOFException("truncated blob")
+            // Not `pos + n > size`: with n near Int.MAX_VALUE that sum overflows negative.
+            if (n < 0 || n > buf.size - pos) throw EOFException("truncated blob")
             return buf.copyOfRange(pos, pos + n).also { pos += n }
         }
 

@@ -1,0 +1,1 @@
+Security release. One key per paired computer; the approval names the computer, and devices that never paired cannot make the phone ask. Pairing binds the phone's address, so a relay is refused. No automatic fingerprint prompt except for the request you tapped. Only peers on your Wi-Fi/Ethernet subnet are served. After updating, pair each computer again.

@@ -33,6 +33,12 @@ done
 [ -s "fastlane/metadata/android/en-US/changelogs/$CODE.txt" ] || bad "missing fastlane/metadata/android/en-US/changelogs/$CODE.txt"
 grep -qE "^## $VERSION — [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md || bad "CHANGELOG.md has no dated '## $VERSION — YYYY-MM-DD' section"
 
+# The installer's signer, everywhere a user copies it from: the app (signed APK) and the README
+# must carry exactly keys/allowed_signers, or a correct installer would fail its own check.
+SIGNER_KEY=$(awk '{print $NF}' keys/allowed_signers)
+grep -qF "$SIGNER_KEY" app/src/main/java/com/ritwick/sudostamp/MainActivity.kt || bad "the app's setup command does not carry keys/allowed_signers"
+grep -qF "$(cat keys/allowed_signers)" README.md || bad "README.md does not carry keys/allowed_signers"
+
 scripts/check-listing.sh || fail=1
 [ "$fail" = 0 ] && echo "release-check: $VERSION (versionCode $CODE) is consistent"
 exit "$fail"

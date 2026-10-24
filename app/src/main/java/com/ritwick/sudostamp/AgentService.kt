@@ -48,6 +48,9 @@ class AgentService : Service() {
         /** Intent action behind the notification's Deny button. */
         const val ACTION_DENY = "com.ritwick.sudostamp.DENY"
 
+        /** The request a notification (and its Deny button) was posted for ([Approval.id]). */
+        const val EXTRA_REQUEST = "com.ritwick.sudostamp.REQUEST"
+
         /** How long we wait for the user to touch the sensor before denying. */
         const val APPROVAL_TIMEOUT_MS = 60_000L
 
@@ -75,13 +78,12 @@ class AgentService : Service() {
          */
         @Volatile private var current: Approval? = null
 
-        /** Unknown hosts that were denied or ignored are refused unprompted for a while:
-         *  see [Cooldown]. Process-wide, like the listener. */
-        private val cooldown = Cooldown(COOLDOWN_MS)
+        /** When a paired computer's request may not be put to the user: see [Limiter].
+         *  Process-wide, like the listener. */
+        private val limiter = Limiter()
 
-        /** Long enough to stop a prompt every few seconds, short enough that a real first
-         *  setup that timed out can simply be retried. */
-        private const val COOLDOWN_MS = 30_000L
+        /** Numbers requests, so a notification acts only on the request it announced. */
+        private val requestIds = java.util.concurrent.atomic.AtomicLong()
 
         /** True while the server socket is bound and accepting. The setup screen shows
          *  THIS, not "a key exists", so a dead listener can never read as healthy. */
@@ -107,6 +109,27 @@ class AgentService : Service() {
 
         /** Identifies connections, so a pairing's reveal must arrive on its commit's. */
         private val connections = java.util.concurrent.atomic.AtomicLong()
+
+        /** A debug build: loopback clients (adb forward) and software keys (the emulator)
+         *  are allowed. Never true for a release build. */
+        fun debuggable(ctx: Context) =
+            (ctx.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+
+        /** Deletes the keys of pairings that were abandoned or cancelled (see
+         *  [PairingSession.drainDiscarded]), with their computer if one was recorded. */
+        fun discardAbandoned(ctx: Context) {
+            for (id in pairing.drainDiscarded()) {
+                Log.w(TAG, "pairing: discarding key $id")
+                Hosts.remove(ctx, id)
+                limiter.forget(id)
+            }
+        }
+
+        /** Unpairs [id] (from the app's list of computers). */
+        fun forget(ctx: Context, id: String) {
+            Hosts.remove(ctx, id)
+            limiter.forget(id)
+        }
 
         /**
          * Creates both channels (idempotent). Called up front, not when the first
@@ -145,6 +168,7 @@ class AgentService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureChannels(this)
+        Hosts.reconcile(this)
         // A foreground service MUST show an ongoing notification (Android 8+) or the
         // OS kills the listener; there is no way around it without losing the
         // always-on property. Keep it quiet (LOW channel) and minimal: what it is.
@@ -164,8 +188,12 @@ class AgentService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_DENY) {
-            // From the approval notification: reject without opening the app at all.
-            current?.deny()?.let { if (it) Log.i(TAG, "denied from the notification") }
+            // From the approval notification: reject without opening the app at all -- but only
+            // the request that notification was about. A stale tap must not deny the next one.
+            val p = current
+            if (p != null && p.id == intent.getLongExtra(EXTRA_REQUEST, -1) && p.deny()) {
+                Log.i(TAG, "denied from the notification")
+            }
         }
         if (!running) {
             running = true
@@ -233,16 +261,19 @@ class AgentService : Service() {
         return null
     }
 
+    /** Who is on the other end of one connection, and where they reached us. */
+    private class Conn(val id: Long, val client: String, val local: java.net.InetAddress, val localPort: Int)
+
     private fun handle(s: Socket) {
-        val client = s.inetAddress.hostAddress ?: "unknown"
-        val connId = connections.incrementAndGet()
-        // LAN-only is enforced here, not just assumed. The socket binds every interface,
-        // and some carriers hand out publicly reachable addresses on mobile data; a request
-        // from the internet must not be able to post an approval prompt at all.
-        if (!Net.isLan(s.inetAddress)) {
-            Log.w(TAG, "refusing non-LAN client $client")
+        val client = Net.hostPort(s.inetAddress, s.port).substringBeforeLast(':')
+        // LAN-only is enforced here, not just assumed. The socket binds every interface: the
+        // peer must be on the Wi-Fi or Ethernet subnet the connection arrived on (Net.allowedPeer),
+        // so neither the internet, a carrier's network nor a VPN can post an approval prompt.
+        if (!Net.allowedPeer(s.localAddress, s.inetAddress, Net.lanPrefixes(this), debuggable(this))) {
+            Log.w(TAG, "refusing $client: not on this phone's Wi-Fi or Ethernet subnet")
             return
         }
+        val conn = Conn(connections.incrementAndGet(), client, s.localAddress, s.localPort)
         val out = s.getOutputStream()
         val input = DeadlineInput(
             s, s.getInputStream(), SystemClock.elapsedRealtimeNanos() + CONNECTION_BUDGET_MS * 1_000_000
@@ -267,7 +298,7 @@ class AgentService : Service() {
                 return
             }
             try {
-                val waited = serve(frame, out, client, connId)
+                val waited = serve(frame, out, conn)
                 input.deadline += waited     // the user's time is not the client's budget
             } catch (e: Exception) {
                 Log.w(TAG, "request failed: ${e.message}")
@@ -283,35 +314,37 @@ class AgentService : Service() {
 
     /** Serves exactly one request frame. Throws IOException on malformed input.
      *  Returns how long (ns) it spent waiting on the user. */
-    private fun serve(frame: ByteArray, out: java.io.OutputStream, client: String, connId: Long): Long {
+    private fun serve(frame: ByteArray, out: java.io.OutputStream, conn: Conn): Long {
         val r = AgentProtocol.Reader(frame)
+        val client = conn.client
 
         when (r.type()) {
             AgentProtocol.SSH2_AGENTC_REQUEST_IDENTITIES -> {
-                AgentProtocol.writeFrame(
-                    out,
-                    AgentProtocol.identitiesAnswer(SshSig.keyBlob(Keys.publicKey()), "sudostamp")
-                )
-                Log.i(TAG, "identities requested")
+                val blobs = Hosts.all(this).mapNotNull { Keys.blob(Keys.aliasFor(it.id)) }
+                AgentProtocol.writeFrame(out, AgentProtocol.identitiesAnswer(blobs, "sudostamp"))
+                Log.i(TAG, "identities requested by $client (${blobs.size})")
             }
 
             AgentProtocol.SSH2_AGENTC_SIGN_REQUEST -> {
                 r.skipType()
-                val keyBlob = r.blob()          // which key (we have exactly one)
+                val keyBlob = r.blob()          // which computer's key
                 val data = r.blob()             // what to sign
                 r.int32()                       // flags
 
-                val known = KnownHosts.isKnown(this, client)
-                val refusal = AgentProtocol.refusal(keyBlob, data, SshSig.keyBlob(Keys.publicKey()))
-                    ?: if (cooldown.active(client, known)) "cooling down after an unapproved request" else null
+                val host = Hosts.all(this).firstOrNull { Keys.blob(Keys.aliasFor(it.id))?.contentEquals(keyBlob) == true }
+                val refusal = AgentProtocol.refusal(host != null, data) ?: limiter.refusal(host!!.id)
                 if (refusal != null) {
                     Log.w(TAG, "$refusal (from $client)")
                     AgentProtocol.writeFrame(out, AgentProtocol.failure())
                     return 0
                 }
+                host!!
 
                 // Hand off to the Activity for a biometric. THIS is the gate.
-                val p = Approval(Keys.newSigner(), data, client, System.currentTimeMillis())
+                val p = Approval(
+                    requestIds.incrementAndGet(), Keys.newSigner(Keys.aliasFor(host.id)), data,
+                    host.id, host.label, host.confirmed, client, System.currentTimeMillis(),
+                )
                 current = p
                 notifyApprovalNeeded(p)
                 // Tell a foreground Activity right now. The notification alone is not
@@ -341,21 +374,23 @@ class AgentService : Service() {
                 }
                 val waited = SystemClock.elapsedRealtimeNanos() - waitStart
                 if (der == null) {
-                    cooldown.unapproved(client, known)
+                    limiter.unapproved(host.id, host.confirmed)
                     // Timeout, cancel, or any failure: deny. Never guess.
                     Log.w(TAG, "denied")
                     AgentProtocol.writeFrame(out, AgentProtocol.failure())
                     return waited
                 }
+                limiter.approved()
                 AgentProtocol.writeFrame(out, AgentProtocol.signResponse(SshSig.signatureBlob(der)))
-                Log.i(TAG, "signed via biometric")
-                if (KnownHosts.remember(this, client)) Log.i(TAG, "$client approved for the first time")
+                Log.i(TAG, "signed via biometric for ${host.id}")
+                if (Hosts.confirm(this, host.id)) Log.i(TAG, "${host.id} approved for the first time: trusted")
                 return waited
             }
 
             AgentProtocol.SSH2_AGENTC_EXTENSION -> {
                 r.skipType()
-                AgentProtocol.writeFrame(out, pair(String(r.blob(), Charsets.US_ASCII), r, client, connId))
+                AgentProtocol.writeFrame(out, pair(String(r.blob(), Charsets.US_ASCII), r, conn))
+                discardAbandoned(this)
                 changed()
             }
 
@@ -372,27 +407,45 @@ class AgentService : Service() {
      * The pairing extensions (protocol in Pairing.kt). Every refusal is a plain FAILURE: the
      * computer learns nothing about why. No signing happens here -- the key is public.
      */
-    private fun pair(name: String, r: AgentProtocol.Reader, client: String, connId: Long): ByteArray {
-        if (!Keys.exists()) return AgentProtocol.failure()
+    private fun pair(name: String, r: AgentProtocol.Reader, conn: Conn): ByteArray {
+        val client = conn.client
         return when (name) {
             Pairing.EXT_COMMIT -> {
-                val c = pairing.commit(client, connId, r.blob(), SshSig.keyBlob(Keys.publicKey()))
+                val label = r.blob()
+                val dialled = Net.endpoint(conn.local, conn.localPort)
+                val stable = Net.endpoint(Net.stable() ?: conn.local, PORT)
+                val c = pairing.commit(client, conn.id, label, dialled, stable) {
+                    // A new key for this computer alone. Made here, before the commitment,
+                    // because the commitment covers it.
+                    val id = Keys.newId()
+                    try {
+                        val where = Keys.create(Keys.aliasFor(id), allowSoftware = debuggable(this))
+                        Log.i(TAG, "pairing: key $id created in $where")
+                        PairingSession.NewKey(id, Keys.blob(Keys.aliasFor(id))!!)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "pairing: cannot create a key: ${e.message}")
+                        runCatching { Keys.delete(Keys.aliasFor(id)) }
+                        null
+                    }
+                }
                 Log.i(TAG, if (c != null) "pairing: commit from $client" else "pairing: commit from $client refused")
                 if (c != null) AgentProtocol.success(c) else AgentProtocol.failure()
             }
             Pairing.EXT_REVEAL -> {
-                val kn = pairing.reveal(client, connId, r.blob())
-                Log.i(TAG, if (kn != null) "pairing: code shown for $client" else "pairing: reveal from $client refused")
-                if (kn != null) AgentProtocol.success(kn.first, kn.second) else AgentProtocol.failure()
+                val v = pairing.reveal(client, conn.id, r.blob())
+                Log.i(TAG, if (v != null) "pairing: code shown for $client" else "pairing: reveal from $client refused")
+                if (v != null) AgentProtocol.success(v.keyBlob, v.phoneNonce, v.dialled, v.stable) else AgentProtocol.failure()
             }
             Pairing.EXT_DONE -> {
-                val ok = pairing.done(client, r.blob())
-                // The computer has pinned our key: its sudo requests are from a known host now.
-                if (ok) {
-                    KnownHosts.remember(this, client)
-                    Log.i(TAG, "pairing: $client paired")
+                val nh = r.blob()
+                val label = pairing.view().label ?: "a computer"
+                val id = pairing.done(client, nh)
+                // Recorded as PENDING: trusted only once one of its requests is approved.
+                if (id != null) {
+                    Hosts.add(this, Host(id, label, System.currentTimeMillis(), false, client))
+                    Log.i(TAG, "pairing: $client paired as $id (pending its first approval)")
                 }
-                if (ok) AgentProtocol.success() else AgentProtocol.failure()
+                if (id != null) AgentProtocol.success() else AgentProtocol.failure()
             }
             else -> AgentProtocol.failure()
         }
@@ -432,14 +485,17 @@ class AgentService : Service() {
     // ------------------------------------------------------------------ notify
 
     private fun notifyApprovalNeeded(p: Approval) {
+        // Both intents name THIS request. The tap opens the fingerprint prompt for it and for
+        // nothing else; Deny rejects it and nothing else.
         val i = Intent(this, MainActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .putExtra(EXTRA_REQUEST, p.id)
         val pi = PendingIntent.getActivity(
             this, 0, i,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val deny = PendingIntent.getService(
-            this, 2, Intent(this, AgentService::class.java).setAction(ACTION_DENY),
+            this, 2, Intent(this, AgentService::class.java).setAction(ACTION_DENY).putExtra(EXTRA_REQUEST, p.id),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         // Separate ID and channel from the persistent notice: the foreground
@@ -448,8 +504,8 @@ class AgentService : Service() {
         mgr().notify(
             APPROVAL_NOTIF_ID,
             buildNotification(
-                getString(R.string.notif_approval_title),
-                getString(R.string.notif_approval_text, p.client),
+                getString(R.string.notif_approval_title, Ui.hostName(this, p.hostId, p.label)),
+                getString(if (p.trusted) R.string.notif_approval_text else R.string.notif_approval_text_new, p.client),
                 CHANNEL_APPROVAL, pi,
                 // An unexpected request should be one tap to reject, without opening anything.
                 Notification.Action.Builder(

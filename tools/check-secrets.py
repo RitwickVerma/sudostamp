@@ -30,10 +30,24 @@ PATTERNS = [
     ("slack/discord webhook", re.compile(rb"https://(hooks\.slack\.com|discord(app)?\.com/api/webhooks)/\S+")),
     ("google api key", re.compile(rb"AIza[0-9A-Za-z_\-]{35}")),
     ("jwt", re.compile(rb"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
+    # This project's own secrets: the age key that opens the signing vault, and the vault's
+    # decrypted form (dotenv, unquoted) -- the shapes a slip during a release would produce.
+    ("age secret key", re.compile(rb"AGE-SECRET-KEY-1[0-9A-Z]{50,}")),
+    ("signing vault entry", re.compile(
+        rb"(?m)^\s*(KEYSTORE_JKS_B64|STORE_PASSWORD|KEY_PASSWORD|INSTALLER_KEY_B64)\s*=\s*[^\s\"'$]{6,}")),
+    # Quoted literals; also camelCase names (storePassword, keyPassword), which a leading \b
+    # before "pass" never matched.
     ("assignment with literal", re.compile(
-        rb"(?i)\b(pass(word|wd|phrase)?|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key)"
+        rb"(?i)(\b|_|(?<=[a-z]))(pass(word|wd|phrase)?|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key)"
         rb"\s*[:=]\s*[\"'][^\"'\s]{8,}[\"']")),
+    # Unquoted: KEY_PASSWORD=hunter22, password: hunter22 (dotenv, YAML, properties).
+    ("unquoted credential assignment", re.compile(
+        rb"(?im)^\s*[A-Z0-9_.-]*(password|passwd|secret|api_?key|token)\s*[:=][ \t]*"
+        rb"(?![A-Za-z_][A-Za-z0-9_.]*\()[^\s\"'$({<][^\s]{7,}$")),   # not a call: getenv(...)
 ]
+
+# Never committed, whatever they contain: a keystore is binary, so no pattern sees inside it.
+FORBIDDEN_EXT = (".jks", ".keystore", ".p12", ".pfx", ".pem", ".key", ".age")
 
 # Paths that are allowed to contain pattern text (this scanner's own pattern list,
 # test fixtures that assert a scanner rejects something, etc).
@@ -42,7 +56,8 @@ ALLOWLIST_PATHS = (
 )
 ALLOWLIST_MARKERS = (b"allowlist-secret", b"EXAMPLE_NOT_A_SECRET", b"placeholder")
 
-BINARY_EXT = (".png", ".jpg", ".jpeg", ".bin", ".jar", ".apk", ".p12", ".pem", ".zip", ".pdf")
+# Not scanned as text. (.pem and .p12 are not here: they are refused outright, above.)
+BINARY_EXT = (".png", ".jpg", ".jpeg", ".webp", ".bin", ".jar", ".apk", ".zip", ".pdf")
 
 
 def scan_bytes(data, label, out):
@@ -54,6 +69,12 @@ def scan_bytes(data, label, out):
             line = data[:m.start()].count(b"\n") + 1
             safe = hit[:24].decode("utf-8", "replace")
             out.append(f"{label}:{line}: {name}: {safe}…")
+
+
+def forbidden(all_files, out):
+    for p in all_files:
+        if p.lower().endswith(FORBIDDEN_EXT):
+            out.append(f"{p}: key or keystore file -- never committed")
 
 
 def scanned_paths(all_files):
@@ -76,7 +97,8 @@ def main():
     findings = []
 
     if args.all:
-        files = subprocess.run(["git", "ls-files"], capture_output=True, text=True).stdout.split()
+        files = [f.decode() for f in subprocess.run(["git", "ls-files", "-z"], capture_output=True).stdout.split(b"\0") if f]
+        forbidden(files, findings)
         for p in scanned_paths(files):
             try:
                 with open(p, "rb") as f:
@@ -89,6 +111,7 @@ def main():
         files = subprocess.run(["git", "diff", "--cached", "--name-only", "-z"],
                                capture_output=True).stdout.split(b"\0")
         files = [f.decode() for f in files if f]
+        forbidden(files, findings)
         for p in scanned_paths(files):
             blob = subprocess.run(["git", "show", f":{p}"], capture_output=True).stdout
             scan_bytes(blob, p, findings)

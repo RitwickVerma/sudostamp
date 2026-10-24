@@ -47,28 +47,36 @@ screenshots.</sub>
 ```
 sudo on the host
   -> PAM: pam_rssh (third-party) dials the phone over the LAN, as an ssh-agent
-  -> phone: "Approve sudo? From 192.168.1.10"              (notification)
+  -> phone: "Approve sudo on edith?"                      (notification)
   -> tap -> BiometricPrompt -> fingerprint
-  -> the phone's TEE signs pam_rssh's fresh 32-byte challenge
+  -> the phone's TEE signs pam_rssh's fresh 32-byte challenge, with the key it made for edith
   -> pam_rssh verifies against the pinned public key -> sudo proceeds
 ```
 
 ## Why it can be trusted
 
-- **The only custom code is the phone app, and it only signs.** PAM integration, signature
-  verification and fail-closed behaviour are [`pam_rssh`](https://github.com/z4yx/pam_rssh)'s,
-  an existing, maintained module. Nothing written here runs as root on the host at
-  authentication time.
+- **The phone app only signs; it never decides.** PAM integration, signature verification and
+  fail-closed behaviour are [`pam_rssh`](https://github.com/z4yx/pam_rssh)'s, an existing,
+  maintained module. The one helper of ours on the authentication path (a 4-second reachability
+  check) can only make sudo fall back to the password sooner, never grant anything.
 - **The biometric is a hardware gate.** The Android Keystore key is created with
   `setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG)`: a fresh strong biometric for
   *every* signature, enforced inside the TEE (or StrongBox). Malware on the phone cannot sign
   without your finger either, and the key cannot be exported.
+- **One key per computer.** The phone makes a separate key for every computer it pairs with, and
+  the approval names the computer that key belongs to. A device that never paired cannot even make
+  the phone ask.
 - **It signs nothing but sudo challenges.** The agent refuses any payload that is not exactly
-  pam_rssh's 32-byte challenge, so the key is useless as an SSH-login or git-signing oracle.
+  pam_rssh's 32-byte challenge, so the keys are useless as SSH-login or git-signing oracles.
 - **Zero third-party runtime dependencies** in the app: platform APIs only.
 
 [SECURITY.md](SECURITY.md) has the full threat model, including what it does *not* protect
 against. [docs/DESIGN.md](docs/DESIGN.md) has the design and the reasoning behind it.
+
+**Review status.** SudoStamp was written with an AI assistant and has been through an AI-run
+security audit, whose findings are fixed in 1.4.0 — but **no human security professional has
+reviewed it yet**. It sits in front of `sudo`: read [SECURITY.md](SECURITY.md#review-status--read-this-first)
+before you rely on it. Reviews are very welcome.
 
 ## Requirements
 
@@ -98,8 +106,8 @@ against. [docs/DESIGN.md](docs/DESIGN.md) has the design and the reasoning behin
 
 **1. Phone.** Install the app from the [Releases](https://gitlab.com/ritwick7/sudostamp/-/releases)
 page, or let [Obtainium](https://github.com/ImranR98/Obtainium) install it and keep it updated: add
-`https://gitlab.com/ritwick7/sudostamp` as an app. Open it and tap **Get started**: the key is created
-inside the phone's secure hardware and the phone waits for your computer.
+`https://gitlab.com/ritwick7/sudostamp` as an app. Open it and tap **Get started**: the phone waits
+for your computer, and makes a key for it, inside its secure hardware, when you pair.
 
 Every release APK is signed by the same key. To check a download before installing it:
 
@@ -109,19 +117,24 @@ apksigner verify --print-certs sudostamp-v*.apk | grep SHA-256
 # must be 7bcb0b51246197b9bb99779e09a3adcbbaeb2d59a0edecf8d2e8be67844d0657
 ```
 
-**2. Computer.** Two lines, no clone needed:
+**2. Computer.** No clone needed. Download the installer and its signature, check the signature,
+and only then run it (the app shows the same lines, with a Copy button):
 
 ```sh
 curl -fsSLO https://gitlab.com/ritwick7/sudostamp/-/releases/permalink/latest/downloads/sudostamp-setup.sh
-sudo bash sudostamp-setup.sh
+curl -fsSLO https://gitlab.com/ritwick7/sudostamp/-/releases/permalink/latest/downloads/sudostamp-setup.sh.sig
+echo 'sudostamp-release namespaces="sudostamp-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILytyVXX+Jze6AVLpKTLjHbktDqympGfBq9NPEAhwW4Y' > sudostamp.signers
+ssh-keygen -Y verify -f sudostamp.signers -I sudostamp-release -n sudostamp-release -s sudostamp-setup.sh.sig < sudostamp-setup.sh && sudo bash sudostamp-setup.sh
 ```
 
 On **Arch**: `yay -S sudostamp`, then `sudo sudostamp setup` (updates come with your system).
 
-`sudostamp-setup.sh` is one self-contained file: the installer and its helpers, nothing hidden.
-Read it before running it as root, and compare its SHA-256 with the one on the release page. It
-is built deterministically from the tagged source (`scripts/bundle-host.sh`), so you can also
-rebuild it yourself and compare byte for byte.
+Why the signature: files on a release page can be replaced after publishing, and this one runs as
+root. The signing key never touches CI; its public half is
+[`keys/allowed_signers`](keys/allowed_signers), the line above. `sudostamp-setup.sh` is one
+self-contained file, the installer and its helpers, nothing hidden: read it before running it as
+root. It is built deterministically from the tagged source (`scripts/bundle-host.sh`), so you can
+also rebuild it yourself and compare byte for byte.
 
 That is the whole setup. It finds the phone on your network, and the phone shows a 6-digit code:
 
@@ -151,22 +164,24 @@ What `setup` does, step by step:
 
 - **Pairs** using the code (below: why a code, and why it is safe). Nothing is installed or changed
   until the codes match, and a wrong code changes nothing at all.
-- **Installs pam_rssh**: from the AUR (Arch, with `yay`/`paru`), the ports tree (FreeBSD), or
-  built from a pinned, verified commit. If the distribution's Rust is too old to build it (Debian
-  13, Ubuntu 24.04) it offers a temporary toolchain from the official rustup, deleted afterwards.
+- **Installs pam_rssh**, built from a pinned, verified commit (the ports package on FreeBSD). If
+  the distribution's Rust is too old to build it (Debian 13, Ubuntu 24.04) it offers a temporary
+  toolchain from the official rustup, deleted afterwards.
 - **Tests** on a throwaway PAM service that only the phone can satisfy. sudo is not touched yet.
-- **Turns it on**: backs up sudo's PAM file and inserts one clearly marked block above its first
-  auth rule, atomically. Everything already there, including the password, stays as it was.
-  Re-running `setup` (a new phone, a reset key) replaces the block rather than adding a second.
-  An older SudoStamp install that replaced the whole file is migrated, after asking.
+- **Turns it on**: backs up sudo's PAM file (to `/var/lib/sudostamp/backups`) and inserts one
+  clearly marked block above its first auth rule, atomically. Everything already there, including
+  the password, stays as it was. Re-running `setup` (a new phone, pairing again) replaces the block
+  rather than adding a second. An older SudoStamp install that replaced the whole file is
+  migrated, after asking.
 
 `sudo bash sudostamp-setup.sh rollback` (or `sudo sudostamp rollback`) takes the block out again;
 `status` shows what is in place. From a checkout of the repository, `sudo tools/install.sh setup`
 does the same. The phone's address goes into sudo's config as a literal (pam_rssh takes an address, not a name),
 so it should not change when the router renews a lease. If your router hands out IPv6 prefixes
 of its own (most do), `setup` uses the phone's stable `fd…` address; otherwise it uses IPv4, and a
-DHCP reservation for the phone keeps that fixed. If sudo ever falls back to the password because
-the address moved, re-run `setup`.
+DHCP reservation for the phone keeps that fixed. If the phone does not answer at that address with
+your key within 4 seconds, sudo goes straight to the password; if that happens because the address
+moved, re-run `setup`.
 
 If discovery cannot find the phone (some networks block it), `setup` asks for the address
 the phone shows, or pass it: `setup --phone 192.168.1.50:7777`.
@@ -185,16 +200,16 @@ The computer has to learn the phone's key over the network, and anything that ca
 phone's address could offer its own key instead. Comparing a long fingerprint by eye stops that in
 theory and rarely in practice; a short code is easy to check, but a naive one can be forged.
 
-So pairing works like Bluetooth's: the phone **commits** to its key before it sees the computer's
-random number, and both then derive the code. Someone in the middle cannot steer either side's
-code, so their only chance is a one-in-a-million guess, and the phone allows **one** attempt per
-tap of *Pair a computer*: a second attempt during a pairing stops it, with a warning on screen.
-You *type* the code, so it really gets compared. The protocol is documented in
-[`Pairing.kt`](app/src/main/java/com/ritwick/sudostamp/Pairing.kt) and tested in CI with a
-simulated man in the middle on every supported distribution.
-
-For scripts: `stage --fingerprint SHA256:…` (the full fingerprint the app shows) or
-`stage --key "ecdsa-sha2-nistp256 AAAA…"` (pasted from **Copy public key**, no network at all).
+So pairing works like Bluetooth's: the phone makes a key for this computer and **commits** to it,
+and to the address it was reached at, before it sees the computer's random number; both then
+derive the code. Someone in the middle cannot steer either side's code, so their only chance is a
+one-in-a-million guess, and the phone allows **one** attempt per tap of *Pair a computer*: a second
+attempt while the pairing screen is open cancels the pairing, even one that already finished.
+Something that answers in the phone's place and passes everything through unchanged is caught too:
+the phone states the address it was reached at, and it is not the relay's. You *type* the code, so
+it really gets compared. The protocol is documented in
+[`Pairing.kt`](app/src/main/java/com/ritwick/sudostamp/Pairing.kt) and tested in CI, with a
+simulated man in the middle and a relay, on every supported distribution.
 
 ### By hand
 
@@ -203,9 +218,13 @@ pam_rssh does no ownership checks), then add one line **above** the first `auth`
 `/etc/pam.d/sudo` (macOS: `/etc/pam.d/sudo_local`, with the module's full path):
 
 ```
-# /etc/authorized_keys/<user>.keys  <- the line from the app's "Copy public key"
+# /etc/authorized_keys/<user>.keys  <- the line `python3 -I tools/pair.py pair --phone ADDR` prints
 auth  sufficient  pam_rssh.so ssh_agent_addr=192.168.1.50:7777 auth_key_file=/etc/authorized_keys/${user}.keys cue
 ```
+
+(`pair.py` runs the same code pairing as `setup` and prints the key the phone made for this
+computer; it needs no root. Without the installer you also do without its reachability check, so
+a phone that accepts the connection and never answers holds sudo until Ctrl-C.)
 
 Set `ssh_agent_addr` explicitly (unset, pam_rssh falls back to `$SSH_AUTH_SOCK`, which the user
 controls), and never put a space inside an argument (PAM splits on whitespace).
@@ -218,10 +237,12 @@ typed, before any authentication, and `${user}` goes straight into a file path: 
 
 ## Day to day
 
-A sudo posts an **Approve sudo** notification naming the requesting host. Tap it and touch the
-sensor; the app shows *Approved* and closes. **Deny** works from the notification without opening
-anything. A request from a host you have never approved before is flagged on the approval screen —
-if you did not just run sudo, deny it. Unanswered requests are denied after 60 seconds.
+A sudo posts an **Approve sudo on *computer*?** notification. Tap it and touch the sensor; the app
+shows *Approved* and closes. **Deny** works from the notification without opening anything. If the
+app is already open when a request arrives, it shows the request and waits for **Approve with
+fingerprint**. A computer's first request after pairing is flagged — if you did not just run sudo
+there, deny it. Unanswered requests are denied after 60 seconds. The app lists your paired
+computers; **Remove** deletes that computer's key, and its sudo falls back to the password.
 
 ## Development
 
@@ -246,10 +267,10 @@ job (secret scan, shellcheck). [CONTRIBUTING.md](CONTRIBUTING.md) has the conven
 ## Known limits
 
 - **The prompt cannot say which command is being authorised.** pam_rssh sends only an opaque
-  challenge; the host address and time are all that is knowable on the phone.
-- **Anyone on the LAN can make the phone ask.** They cannot approve; they can annoy, and they can
-  time a request to coincide with yours. The host shown and the first-host warning are there for
-  this. See [SECURITY.md](SECURITY.md).
+  challenge; the computer, its address and the time are all that is knowable on the phone.
+- **Only paired computers can make the phone ask**, and a program running as you on one of them
+  can start a sudo you did not type — read the computer's name on every request.
+  See [SECURITY.md](SECURITY.md).
 - Android may still kill the foreground service under extreme memory pressure; sudo then falls
   back to the password until the app is reopened.
 

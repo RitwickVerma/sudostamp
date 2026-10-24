@@ -19,9 +19,10 @@ android {
         versionName = "1.3.0"
     }
 
-    // Release signing comes from the environment, never from the repo: CI passes the keystore
-    // as protected, masked variables (docs/RELEASING.md). With none set, `assembleRelease`
-    // still builds, but UNSIGNED -- it cannot be installed, which is the safe failure.
+    // Release signing comes from the environment, never from the repo: scripts/release.sh, on the
+    // maintainer's machine, decrypts the keystore into tmpfs and passes it here (CI never signs;
+    // docs/RELEASING.md). With none set, `assembleRelease` still builds, but UNSIGNED -- it
+    // cannot be installed, which is the safe failure.
     val keystorePath = System.getenv("SUDOSTAMP_KEYSTORE")
     signingConfigs {
         if (keystorePath != null) {

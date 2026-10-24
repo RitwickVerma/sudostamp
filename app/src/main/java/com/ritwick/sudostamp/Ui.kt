@@ -48,6 +48,11 @@ object Ui {
     private val SANS = Typeface.create("sans-serif", Typeface.NORMAL)
     private val SANS_MEDIUM = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 
+    /** How a paired computer is named on screen: its own label, or, for the one shared key of
+     *  versions before 1.4, what that key stands for. */
+    fun hostName(ctx: Context, hostId: String, label: String): String =
+        if (hostId == Hosts.LEGACY_ID) ctx.getString(R.string.host_legacy) else label
+
     fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
     fun Context.dpf(v: Float): Float = v * resources.displayMetrics.density
 
