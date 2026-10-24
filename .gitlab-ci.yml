@@ -25,7 +25,15 @@ stages:
   - test
   - build
 
+# Static analysis: GitLab's own SAST template (free tier), which runs its Semgrep-based analyzer
+# over the Kotlin, Python and shell here. On the free tier its report is only an artifact and
+# never fails a pipeline, so `sast-gate` below does: any High or Critical finding stops it.
+include:
+  - template: Jobs/SAST.gitlab-ci.yml
+
+
 variables:
+  SAST_EXCLUDED_PATHS: "app/build, build, .gradle, android-sdk, docs, fastlane"
   ANDROID_HOME: "$CI_PROJECT_DIR/android-sdk"
   GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
   SDK_PLATFORM: "36"
@@ -180,3 +188,27 @@ release-check:
     - apk add --no-cache bash git >/dev/null
     - 'if [ -n "$CI_COMMIT_TAG" ]; then V="${CI_COMMIT_TAG#v}"; else V="${CI_COMMIT_BRANCH#release/}"; fi'
     - scripts/release-check.sh "$V"
+
+sast-gate:
+  stage: test
+  image: python:3.12-slim
+  cache: []
+  before_script: []
+  needs:
+    - job: semgrep-sast
+      artifacts: true
+  script:
+    - |
+      python3 - <<'PY'
+      import json, sys
+      try:
+          findings = json.load(open("gl-sast-report.json")).get("vulnerabilities", [])
+      except FileNotFoundError:
+          sys.exit("no gl-sast-report.json: the analyzer did not run")
+      for f in findings:
+          loc = f.get("location", {})
+          print("%-8s %s:%s  %s" % (f.get("severity"), loc.get("file"), loc.get("start_line"), f.get("name")))
+      bad = [f for f in findings if f.get("severity") in ("Critical", "High")]
+      print("%d finding(s), %d high or critical" % (len(findings), len(bad)))
+      sys.exit(1 if bad else 0)
+      PY
