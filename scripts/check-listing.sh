@@ -28,10 +28,17 @@ png_size() { # prints "W H" of a PNG, or nothing
   od -An -tu1 -j16 -N8 "$1" | awk '{print $1*16777216+$2*65536+$3*256+$4, $5*16777216+$6*65536+$7*256+$8}'
 }
 [ "$(png_size "$M/images/icon.png")" = "512 512" ] || bad "$M/images/icon.png must be a 512x512 PNG"
+[ "$(png_size "$M/images/featureGraphic.png")" = "1024 500" ] || bad "$M/images/featureGraphic.png must be a 1024x500 PNG (Play)"
 n=0
 for f in "$M"/images/phoneScreenshots/*; do
   [ -e "$f" ] || continue
   [ -n "$(png_size "$f")" ] || bad "$f is not a PNG"
+  # Google Play: the long side at most twice the short one, both 320-3840 px.
+  read -r w h <<< "$(png_size "$f")"
+  if [ -n "${w:-}" ]; then
+    lo=$(( w < h ? w : h )); hi=$(( w < h ? h : w ))
+    [ "$hi" -le $((2 * lo)) ] && [ "$lo" -ge 320 ] && [ "$hi" -le 3840 ] || bad "$f is ${w}x${h}: Play needs 320-3840 px and at most 2:1"
+  fi
   n=$((n + 1))
 done
 [ "$n" -ge 2 ] && [ "$n" -le 8 ] || bad "need 2-8 phone screenshots, found $n"
