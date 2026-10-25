@@ -117,6 +117,10 @@ apksigner verify --print-certs sudostamp-v*.apk | grep SHA-256
 # must be 7bcb0b51246197b9bb99779e09a3adcbbaeb2d59a0edecf8d2e8be67844d0657
 ```
 
+The APK is also **reproducible**: `scripts/verify-reproducible.sh X.Y.Z` rebuilds the tagged source
+without any key, copies the published APK's signature onto it, and checks the two are identical byte
+for byte (verified for 1.4.0).
+
 **2. Computer.** No clone needed. Download the installer and its signature, check the signature,
 and only then run it (the app shows the same lines, with a Copy button):
 
