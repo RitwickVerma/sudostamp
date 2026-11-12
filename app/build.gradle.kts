@@ -52,6 +52,17 @@ android {
         includeInBundle = false
     }
 
+    // The fuzz tests (*FuzzTest) size themselves from -Dsudostamp.fuzz.iterations / .seed. Gradle's
+    // -D reaches only the Gradle JVM, not the test worker, so they are handed on here; unset, the
+    // tests use their small CI default.
+    testOptions {
+        unitTests.all { test ->
+            listOf("sudostamp.fuzz.iterations", "sudostamp.fuzz.seed").forEach { key ->
+                System.getProperty(key)?.let { test.systemProperty(key, it) }
+            }
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

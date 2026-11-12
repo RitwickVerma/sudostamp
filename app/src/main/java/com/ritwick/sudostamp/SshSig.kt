@@ -26,6 +26,9 @@ object SshSig {
     const val KEY_TYPE = "ecdsa-sha2-nistp256"
     const val CURVE = "nistp256"
 
+    /** The order n of the P-256 group: a valid ECDSA r or s is in 1..n-1. */
+    private val P256_ORDER = BigInteger("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551", 16)
+
     // ---------------------------------------------------------------- encoding
 
     /** SSH "string": uint32 big-endian length, then the bytes. */
@@ -111,7 +114,9 @@ object SshSig {
      * Every read is bounds-checked and the lengths must account for every byte. The input
      * comes from the Keystore, so this is not an attack surface -- but a lenient parser
      * would turn a malformed signature into a plausible-looking wrong one, and that is
-     * exactly the failure that only shows up at the sudo prompt.
+     * exactly the failure that only shows up at the sudo prompt. Strict means canonical DER:
+     * shortest lengths, non-negative INTEGERs without a needless 0x00, and r and s in 1..n-1
+     * (the fuzz test found a 33-byte INTEGER over 2^256 and a "negative" one being accepted).
      */
     fun derToRs(der: ByteArray): Pair<BigInteger, BigInteger> {
         var i = 0
@@ -126,6 +131,7 @@ object SshSig {
             require(n in 1..2) { "bad DER length" }
             var len = 0
             repeat(n) { len = (len shl 8) or byte() }
+            require(len >= if (n == 1) 0x80 else 0x100) { "non-minimal DER length" }
             return len
         }
 
@@ -140,6 +146,8 @@ object SshSig {
             // A P-256 scalar is at most 32 bytes, plus one 0x00 sign pad.
             require(len in 1..33) { "bad INTEGER length $len" }
             require(i + len <= der.size) { "DER truncated" }
+            require(der[i].toInt() and 0x80 == 0) { "negative INTEGER" }
+            require(len == 1 || der[i].toInt() != 0 || der[i + 1].toInt() and 0x80 != 0) { "non-minimal INTEGER" }
             parts[k] = BigInteger(1, der.copyOfRange(i, i + len))
             i += len
         }
@@ -148,6 +156,7 @@ object SshSig {
         val r = parts[0]!!
         val s = parts[1]!!
         require(r.signum() > 0 && s.signum() > 0) { "non-positive ECDSA component" }
+        require(r < P256_ORDER && s < P256_ORDER) { "ECDSA component not below the group order" }
         return r to s
     }
 }

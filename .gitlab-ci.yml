@@ -28,6 +28,7 @@
 
 stages:
   - test
+  - verify
 
 # Branch, tag and schedule pipelines only. Jobs with explicit `rules` (below, and the SAST template)
 # would otherwise also start a merge-request pipeline for every push -- a second full run on the
@@ -93,6 +94,8 @@ android:
   stage: test
   extends: [.sdk_setup, .not_scheduled]
   script:
+    # Includes the *FuzzTest property tests of the JVM parsers (AgentProtocol, SshSig, Net, Pairing):
+    # seeded, a few seconds. -Dsudostamp.fuzz.iterations=N scales them for a long run.
     - ./gradlew --no-daemon --continue -Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8 testDebugUnitTest lintDebug assembleDebug
     # DEBIAN_FRONTEND=noninteractive keeps debconf from spraying noise into the job log.
     - export DEBIAN_FRONTEND=noninteractive
@@ -117,7 +120,7 @@ hygiene:
   cache: []
   script:
     - export DEBIAN_FRONTEND=noninteractive
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git python3 python3-cryptography openssl shellcheck >/dev/null
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates git python3 python3-cryptography openssl shellcheck >/dev/null
     - git config --global --add safe.directory "$CI_PROJECT_DIR"
     - python3 tools/check-secrets.py --all
     # Every script the docs tell people to run directly must be executable in git: a mode of
@@ -129,6 +132,13 @@ hygiene:
     - python3 -m py_compile tools/*.py tools/test/*.py && rm -rf tools/__pycache__ tools/test/__pycache__
     - python3 -I tools/test/test_pair.py && rm -rf tools/test/__pycache__ tools/__pycache__
     - python3 -I tools/test/test_attest.py && rm -rf tools/test/__pycache__ tools/__pycache__
+    # Fuzz and property tests of pair.py's parsers and of install.sh's --phone check: seeded, stdlib
+    # only, about 10 s. SUDOSTAMP_FUZZ_ITERATIONS=2000000 for a long local run.
+    - python3 -I tools/test/test_fuzz_pair.py && rm -rf tools/test/__pycache__ tools/__pycache__
+    # The SBOM generator (scripts/sbom.py): CycloneDX 1.5 shape, what the APK and installer SBOMs
+    # must say, and -- online, here only -- that pam_rssh's Cargo.lock at the commit tools/install.sh
+    # pins is still the file whose SHA-256 sbom.py pins.
+    - SUDOSTAMP_ONLINE=1 python3 -I tools/test/test_sbom.py && rm -rf tools/test/__pycache__ tools/__pycache__
 
 # The host side, end to end, on every supported Linux family: tools/install.sh installs
 # pam_rssh (packaged or built from the pinned commit), pins the key of a mock phone
@@ -199,6 +209,44 @@ release-check:
     - apk add --no-cache bash git >/dev/null
     - 'if [ -n "$CI_COMMIT_TAG" ]; then V="${CI_COMMIT_TAG#v}"; else V="${CI_COMMIT_BRANCH#release/}"; fi'
     - scripts/release-check.sh "$V"
+
+# The supply-chain proof: rebuild the published APK from its tag and compare bytes. No secret is
+# involved: the build is unsigned, the published signature is copied onto it (apksigcopier), and the
+# result must equal what everyone downloads (scripts/verify-reproducible.sh, docs/RELEASING.md).
+#
+# WHY MANUAL ON A TAG, and not an automatic job that waits for the Release: `release.sh ship` waits for
+# the tag pipeline to succeed BEFORE it publishes, and a pipeline with a job still waiting for the Release
+# is never "success" -- the two would wait on each other. A non-blocking manual job leaves the pipeline
+# green; `ship` plays it once the Release exists (scripts/run-ci-job.sh) and fails the release if the
+# rebuild differs. The wait loop (up to 60 minutes) is still there for whoever starts it from the page
+# straight after tagging. Also: on master (manual, for testing; REPRO_VERSION picks a version, else the
+# newest tag) and on a pipeline schedule that sets CHECK_REPRODUCIBLE=1, which re-proves the newest tag
+# periodically: a moved builder image or a changed dependency breaks reproducibility silently otherwise.
+reproducible:
+  stage: verify
+  extends: .sdk_setup
+  needs: []
+  timeout: 2h
+  variables:
+    GIT_DEPTH: 0
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $CHECK_REPRODUCIBLE == "1"'
+    - <<: *release_tag
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: manual
+      allow_failure: true
+  script:
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git openssh-client python3 python3-venv >/dev/null
+    # apksigcopier and its one dependency (click), each pinned by hash: the one tool of this check that is not ours.
+    - python3 -m venv /opt/verify-venv && /opt/verify-venv/bin/pip install -q --require-hashes -r scripts/requirements-reproducible.txt
+    - export PATH="/opt/verify-venv/bin:$PATH"
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - 'if [ -n "$CI_COMMIT_TAG" ]; then V="${CI_COMMIT_TAG#v}"; elif [ -n "$REPRO_VERSION" ]; then V="$REPRO_VERSION"; else V=$(git tag -l "v[0-9]*" --sort=-v:refname | head -1); V="${V#v}"; fi'
+    - 'echo "verifying v$V"'
+    - VERIFY_WAIT_MINUTES=60 VERIFY_RELEASE_FILES=1 scripts/verify-reproducible.sh "$V"
 
 sast-gate:
   stage: test

@@ -11,8 +11,9 @@
 #       The signed build, on the maintainer's machine only (CI never sees a signing key):
 #       release-check.sh, both keys from the SOPS vault into a private tmpfs directory wiped on
 #       exit, R8 release APK, certificate pinned to RELEASE_CERT below, not debuggable, the
-#       single-file host installer, mapping.txt and SHA256SUMS, and SSH signatures (.sig) over
-#       the installer and SHA256SUMS -> dist/. Publishes nothing.
+#       single-file host installer, the two CycloneDX SBOMs (scripts/sbom.py), mapping.txt and
+#       SHA256SUMS (APK, installer and SBOMs), and SSH signatures (.sig) over the installer and
+#       SHA256SUMS -> dist/. Publishes nothing.
 #
 #   scripts/release.sh publish X.Y.Z
 #       package, then upload dist/ to the GitLab package registry and create the Release (asks
@@ -22,8 +23,10 @@
 #       Everything after the release MR is merged, in one go, from any checkout: tags the merge
 #       commit, waits for the tag pipeline, runs publish in a temporary worktree (asks once
 #       before uploading), pushes the host package to the AUR (scripts/publish-aur.sh), uploads
-#       the bundle and listing to Google Play (tools/play_publish.py), and ends with
-#       scripts/check-channels.sh. Exit 0 only when every channel has X.Y.Z.
+#       the bundle and listing to Google Play (tools/play_publish.py), has CI rebuild the APK from
+#       the tag and compare bytes with the published one (scripts/run-ci-job.sh: the `reproducible`
+#       job), and ends with scripts/check-channels.sh. Exit 0 only when every channel has X.Y.Z
+#       and the rebuild matched.
 #
 # Signing material, read from the maintainer's infrastructure checkout (SUDOSTAMP_HOMELAB_INFRA,
 # default ../homelab-infra) at origin/master, so the checkout's own branch does not matter:
@@ -151,11 +154,20 @@ except Exception: print("unknown")')
   fi
   rm -rf "$SA"
 
+  # The supply-chain proof: CI (no secret) rebuilds the APK from the tag, copies the published
+  # signature onto it and compares bytes. It is a manual job that this plays, not an automatic one,
+  # because the tag pipeline must be green BEFORE publish (above) and a job waiting for the Release
+  # would hold that pipeline open for ever.
+  step "reproducible build (CI rebuilds $TAG and compares it with the published APK)"
+  ok_repro=0
+  scripts/run-ci-job.sh "$TAG" reproducible 90 && ok_repro=1
+
   step "every channel"
   scripts/check-channels.sh "$VERSION"; ok_all=$?
   [ "$ok_aur" = 1 ] || echo "AUR: NOT updated -- ssh-add ~/.ssh/aur, then scripts/publish-aur.sh $VERSION" >&2
   [ "$ok_play" = 1 ] || echo "Google Play: NOT updated" >&2
-  [ "$ok_all" = 0 ] && [ "$ok_aur" = 1 ] && [ "$ok_play" = 1 ] || exit 3
+  [ "$ok_repro" = 1 ] || echo "Reproducible build: NOT proven -- see the CI job above, or run scripts/verify-reproducible.sh $VERSION" >&2
+  [ "$ok_all" = 0 ] && [ "$ok_aur" = 1 ] && [ "$ok_play" = 1 ] && [ "$ok_repro" = 1 ] || exit 3
   echo "$TAG is out on every channel (Play after Google's review)"
   exit 0
 fi
@@ -260,7 +272,12 @@ AAB_CERT=$("$JAVA_HOME/bin/keytool" -printcert -jarfile "$AAB" | sed -n 's/^[[:s
 cp "$AAB" "dist/sudostamp-$TAG.aab"
 cp app/build/outputs/mapping/release/mapping.txt "dist/mapping-$TAG.txt"
 scripts/bundle-host.sh "$VERSION" >/dev/null
-(cd dist && sha256sum "sudostamp-$TAG.apk" sudostamp-setup.sh > SHA256SUMS && cat SHA256SUMS)
+# CycloneDX SBOMs, listed in SHA256SUMS below so that the signature over it covers them. sbom.py
+# validates what it writes and refuses a pam_rssh Cargo.lock other than the pinned one.
+python3 -I scripts/sbom.py apk "dist/sudostamp-$TAG.apk" --version "$VERSION" -o "dist/sudostamp-$TAG.apk.cdx.json" || die "no APK SBOM"
+python3 -I scripts/sbom.py host dist/sudostamp-setup.sh --version "$VERSION" -o dist/sudostamp-setup.cdx.json || die "no host SBOM"
+(cd dist && sha256sum "sudostamp-$TAG.apk" sudostamp-setup.sh "sudostamp-$TAG.apk.cdx.json" sudostamp-setup.cdx.json > SHA256SUMS && cat SHA256SUMS)
+scripts/release-check.sh "$VERSION" --dist || die "dist/ is not a complete release"
 
 step "installer signatures"
 # What protects the people who run the installer as root: the package registry accepts a
@@ -283,7 +300,7 @@ fi
 
 # ---------------------------------------------------------------- publish: registry + Release
 step "publish $TAG"
-FILES="sudostamp-$TAG.apk sudostamp-setup.sh sudostamp-setup.sh.sig SHA256SUMS SHA256SUMS.sig mapping-$TAG.txt"
+FILES="sudostamp-$TAG.apk sudostamp-setup.sh sudostamp-setup.sh.sig SHA256SUMS SHA256SUMS.sig mapping-$TAG.txt sudostamp-$TAG.apk.cdx.json sudostamp-setup.cdx.json"
 printf '  %s\n' $FILES
 if [ "${SUDOSTAMP_YES:-}" != 1 ]; then
   read -r -p "Upload these and create the public GitLab Release $TAG? [yes/no] " answer
@@ -316,6 +333,8 @@ ssh-keygen -Y verify -f sudostamp.signers -I sudostamp-release -n sudostamp-rele
 ```
 (SHA-256 `{host_sha}`; `SHA256SUMS` is signed the same way.)
 
+**Supply chain:** `sudostamp-{tag}.apk.cdx.json` and `sudostamp-setup.cdx.json` are CycloneDX SBOMs, listed in the signed `SHA256SUMS`. CI rebuilds the APK from the tag and compares bytes with this one (`reproducible` job).
+
 Changes: [CHANGELOG.md]({url}/-/blob/{tag}/CHANGELOG.md)."""
 def link(name, path=None, kind="package"):
     d = {"name": name, "url": f"{api}/{name}", "link_type": kind}
@@ -329,6 +348,8 @@ print(json.dumps({"tag_name": tag, "name": f"SudoStamp {tag}", "description": no
     link("SHA256SUMS", "/SHA256SUMS", "other"),
     link("SHA256SUMS.sig", "/SHA256SUMS.sig", "other"),
     link(f"mapping-{tag}.txt", None, "other"),
+    link(f"sudostamp-{tag}.apk.cdx.json", "/sudostamp.apk.cdx.json", "other"),
+    link("sudostamp-setup.cdx.json", "/sudostamp-setup.cdx.json", "other"),
 ]}}))
 PY
 glab api -X POST projects/:id/releases --input dist/release.json >/dev/null || die "creating the Release failed"

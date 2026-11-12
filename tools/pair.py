@@ -435,9 +435,12 @@ def parse(msg, ptrs, srvs, addrs, addrs6=None):
             port = struct.unpack(">H", rd[4:6])[0]
             host, _ = read_name(msg, o + 6)
             srvs[name] = (host, port)
-        elif rtype == 1 and rdlen == 4:                   # A
+        # rdlen is what the sender CLAIMS; rd is what arrived. A datagram cut short claimed 4 and
+        # carried 2, and inet_ntoa's OSError (which via_mdns does not catch) ended discovery for
+        # everyone: one packet from any host on the LAN was enough. Found by test_fuzz_pair.py.
+        elif rtype == 1 and rdlen == 4 and len(rd) == 4:                   # A
             addrs.setdefault(name.lower(), socket.inet_ntoa(rd))
-        elif rtype == 28 and rdlen == 16 and addrs6 is not None:   # AAAA
+        elif rtype == 28 and rdlen == 16 and len(rd) == 16 and addrs6 is not None:   # AAAA
             addrs6.setdefault(name.lower(), set()).add(socket.inet_ntop(socket.AF_INET6, rd))
         o += rdlen
 

@@ -31,12 +31,23 @@ tools/verify.sh                                           # four gates; needs JA
 ## Test
 
 ```sh
-./gradlew testDebugUnitTest                          # 51 JVM tests, no emulator, no mocks
+./gradlew testDebugUnitTest                          # 97 JVM tests (incl. fuzz), no emulator, no mocks
 python3 tools/verify_ssh_sig.py app/build/sshcheck   # AFTER the unit tests
 ./gradlew lintDebug
 python3 tools/check-secrets.py --all
-shellcheck -S warning tools/*.sh scripts/*.sh
+shellcheck -S warning tools/*.sh scripts/*.sh tools/test/*.sh
+python3 -I tools/test/test_pair.py && python3 -I tools/test/test_fuzz_pair.py   # CI hygiene
+SUDOSTAMP_ONLINE=1 python3 -I tools/test/test_sbom.py                          # online: pam_rssh Cargo.lock pin
 ```
+
+- Fuzz tests (`*FuzzTest`, `SshSigStrictDerTest` on the JVM; `test_fuzz_pair.py`) are seeded and run 20 000
+  cases per property in seconds. A long run: `./gradlew testDebugUnitTest --tests '*FuzzTest' --rerun-tasks
+  -Dsudostamp.fuzz.iterations=2000000` (app/build.gradle.kts forwards `-D...fuzz.iterations`/`.seed` to the test JVM;
+  Gradle's own `-D` does not reach it) and `SUDOSTAMP_FUZZ_ITERATIONS=2000000 python3 -I tools/test/test_fuzz_pair.py`.
+  A failure prints its seed: replay with `-Dsudostamp.fuzz.seed=N` / `SUDOSTAMP_FUZZ_SEED=N`. A new parser of
+  network bytes gets a property test beside it, against a reference written without its code.
+- `release.sh package` also writes the SBOMs (`scripts/sbom.py`); `scripts/release-check.sh X.Y.Z --dist` checks dist/.
+  Bumping pam_rssh's commit in `tools/install.sh` means updating `PAM_RSSH_CARGO_LOCK_SHA256` in `scripts/sbom.py`.
 
 - `SshSigTest` writes `test.pub`/`msg.bin`/`sig.bin` to `app/build/sshcheck`;
   `verify_ssh_sig.py` checks them with ssh-keygen and `cryptography`, i.e. with code that is not
@@ -72,6 +83,9 @@ shellcheck -S warning tools/*.sh scripts/*.sh
 
 UI text lives in `res/values/strings.xml`. Screenshots: the BiometricPrompt is a secure window, so
 `screencap` shows it black -- that is not a rendering bug.
+
+`scripts/` also holds `sbom.py` (CycloneDX SBOMs, stdlib), `verify-reproducible.sh` (rebuild a tag, compare with the
+published APK) and `run-ci-job.sh` (play a manual CI job and wait: `ship` uses it for `reproducible`).
 
 `tools/`: `install.sh` (host installer, every platform; `setup` is the one-command path), `pair.py` (pairing + mDNS discovery, used by install.sh), `pam_check.py` (authenticates one PAM
 service via libpam; replaces pamtester), `sudostamp-is-local.sh` (PAM gate: exit 1 under
