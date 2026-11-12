@@ -64,7 +64,7 @@ shellcheck -S warning tools/*.sh scripts/*.sh
 | `Limiter.kt` | When a paired computer's request is refused unprompted: 3 s after an approval, per-computer cooldown, global cap |
 | `SshSig.kt` | SSH key blob, authorized_keys line, DER -> SSH signature blob; no crypto |
 | `MainActivity.kt` | Setup screen + approval flow; `sync()` is the single place that reconciles UI and prompt with the service |
-| `Pairing.kt`, `PairingSession.kt` | Pairing protocol v2 (commitment over key, nonce and addresses + 6-digit code) and the phone's one-attempt-per-tap state machine; a second commit cancels, even after done |
+| `Pairing.kt`, `PairingSession.kt` | Pairing protocol v2 (commitment over key, nonce and addresses + 6-digit code) and the phone's one-attempt-per-tap state machine; a second commit cancels, even after done. Also `attest-v1@sudostamp` (the new key's attestation chain, only after done, only while open) and `attestChallenge` |
 | `StartReceiver.kt` | Restarts the listener on boot and app update |
 | `Ui.kt` | The design system: colours, type, cards, pills, buttons, checklist rows, the width-capped column |
 | `FingerprintView.kt`, `ResultMark.kt` | The animated mark (radar, or countdown ring on approval); the drawn check/cross result |
@@ -77,7 +77,7 @@ UI text lives in `res/values/strings.xml`. Screenshots: the BiometricPrompt is a
 service via libpam; replaces pamtester), `sudostamp-is-local.sh` (PAM gate: exit 1 under
 sshd/sshd-session/mosh-server), `sudostamp-probe.sh` (PAM check before pam_rssh: the phone must
 answer with this user's key within 4 s, else skip), device probes, `verify.sh`, `verify_ssh_sig.py`,
-`check-secrets.py`. `tools/test/`: `mock_agent.py` (software-key stand-in for the phone,
+`check-secrets.py`. `attest.py` (verifies the attestation chain pair.py gets from the phone: embedded Google roots pinned by SHA-256, signatures through the system `openssl`; stdlib only). `tools/test/`: `test_attest.py` + `attest/` (REAL hardware chains published by Google, with provenance) + `attest_fixture.py` (throwaway-root chains, tests only), `mock_agent.py` (software-key stand-in for the phone,
 loopback only, tests only) and `e2e.sh` (the host side end to end in a throwaway container).
 
 Host side, per distribution, without a phone:
@@ -178,3 +178,12 @@ a snapshot first if you need to keep working. Runtime state outside the repo: th
     pieces, and a single `recv(4)` can return fewer bytes (it once looked like "closed").
 23. `adb install -r`, never uninstall: uninstalling destroys the Keystore key, and the host's pinned
     key no longer matches.
+24. Attestation (Keys.kt, PairingSession.kt, tools/pair.py, tools/attest.py): the challenge is
+    `Pairing.attestChallenge` and pair.py must recompute it exactly (vector in both test suites).
+    Never serve `attest-v1` outside an open, finished pairing, or for any key but its own. Never
+    check the chain with `openssl verify` (CA:FALSE in real Pixel 2 chains) or trust the system
+    store; trust only the pinned roots, and refuse only on what a Google-rooted chain says, never
+    on a chain that merely failed to verify. `attest.py` must stay in `scripts/bundle-host.sh` and
+    the AUR PKGBUILD file lists, or pairing silently loses its attestation. Refresh the roots from
+    https://developer.android.com/privacy-and-security/security-key-attestation when Google
+    announces one (the pins and a test enforce each copy).

@@ -63,6 +63,10 @@ sudo on the host
   `setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG)`: a fresh strong biometric for
   *every* signature, enforced inside the TEE (or StrongBox). Malware on the phone cannot sign
   without your finger either, and the key cannot be exported.
+- **The computer checks that the key is in hardware.** When it pairs, the phone's secure hardware
+  signs a certificate chain saying where the new key lives; `setup` verifies it against Google's
+  attestation roots (kept in this repository) and prints `Key attested: StrongBox` or `TEE`. It
+  does not take the phone's word for it.
 - **One key per computer.** The phone makes a separate key for every computer it pairs with, and
   the approval names the computer that key belongs to. A device that never paired cannot even make
   the phone ask.
@@ -158,6 +162,7 @@ Type the code into the terminal, approve one test request with your finger, and 
 1/4  Pairing with the phone at 192.168.1.50:7777
   Your phone now shows a 6-digit code.
   Code on the phone: 833454
+  Key attested: StrongBox
   Codes match: paired.
 2/4  Installing pam_rssh
 3/4  Testing, without touching sudo yet
@@ -169,7 +174,8 @@ Type the code into the terminal, approve one test request with your finger, and 
 What `setup` does, step by step:
 
 - **Pairs** using the code (below: why a code, and why it is safe). Nothing is installed or changed
-  until the codes match, and a wrong code changes nothing at all.
+  until the codes match, and a wrong code changes nothing at all. Then it asks the phone to prove
+  where the key lives (below: *Key attestation*).
 - **Installs pam_rssh**, built from a pinned, verified commit (the ports package on FreeBSD). If
   the distribution's Rust is too old to build it (Debian 13, Ubuntu 24.04) it offers a temporary
   toolchain from the official rustup, deleted afterwards.
@@ -216,6 +222,27 @@ the phone states the address it was reached at, and it is not the relay's. You *
 it really gets compared. The protocol is documented in
 [`Pairing.kt`](app/src/main/java/com/ritwick/sudostamp/Pairing.kt) and tested in CI, with a
 simulated man in the middle and a relay, on every supported distribution.
+
+### Key attestation
+
+The phone asks its secure hardware (the TEE, or StrongBox where the phone has it) to sign a
+certificate chain for the key it just made, with a challenge tied to this one pairing. `setup`
+checks the chain against Google's published hardware attestation roots, with no packages beyond
+Python and the system `openssl`, and compares the attested key with the key it is about to pin.
+`status` shows the result later. One of three lines:
+
+- `Key attested: StrongBox` or `Key attested: TEE`: the hardware vouches for it.
+- `Key NOT hardware-attested (reason)`: it could not be checked: an emulator, a phone or custom ROM
+  without Google's attestation, a phone app older than 1.5, no `openssl` on this computer.
+  `setup` warns and goes on, because the key is still bound to a fingerprint by the phone's own
+  check. Add `--require-attestation` to refuse instead.
+- The chain is genuine but says the key is in software, is for another key or another pairing, or
+  Google lists a certificate as revoked: `setup` refuses and pins nothing. The phone still lists
+  the computer; remove it in the app.
+
+Nothing is fetched from the network, so an offline install works. `--check-revocation` also
+fetches Google's revocation list (`android.googleapis.com/attestation/status`). A computer paired
+before 1.5 shows `not attested (paired before 1.5)`: pair it again to attest it.
 
 ### By hand
 
