@@ -1191,6 +1191,9 @@ cmd_uninstall() {
       grep -vxE "$KEY_RE" "$f" | write_atomic "$f"
       ok "removed SudoStamp's key line(s) from $f (kept the $others other line(s))"
     fi
+    # The attestation record beside it is SudoStamp's alone and describes the key just removed.
+    a="${f%.keys}.attestation"
+    [ -e "$a" ] && rm -f "$a" && ok "removed $a"
   done
   # Only if empty: rmdir never takes anything that is not ours with it.
   rmdir "$KEYDIR" 2>/dev/null && ok "removed the empty $KEYDIR"

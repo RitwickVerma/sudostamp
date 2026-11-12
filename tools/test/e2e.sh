@@ -435,7 +435,8 @@ doc() {   # $1 = log name; sets rc, and fails the run if doctor changed anything
   bash "$I" doctor > "/tmp/doctor-$1.log" 2>&1; rc=$?
   sed 's/^/    | /' "/tmp/doctor-$1.log"     # what a person would see
   snap > "/tmp/doctor-$1.after"
-  if cmp -s "/tmp/doctor-$1.before" "/tmp/doctor-$1.after"; then pass "doctor ($1) changed nothing"
+  # cksum, not cmp: minimal images have no diffutils (pitfall 15).
+  if [ "$(cksum < "/tmp/doctor-$1.before")" = "$(cksum < "/tmp/doctor-$1.after")" ]; then pass "doctor ($1) changed nothing"
   else
     fail "doctor ($1) changed something"
     # Say WHAT, or the next person reruns blind: lines only in before (-) or only in after (+).
@@ -487,6 +488,8 @@ step "14. uninstall"
 # A foreign key in the user's file, and a second user's file that is only SudoStamp's.
 echo "$EVIL_PUB" >> "/etc/authorized_keys/$U.keys"
 grep -v evil "/etc/authorized_keys/$U.keys" > /etc/authorized_keys/other.keys
+# And the attestation records setup leaves beside each (pair.py --attest-out), so removal is tested.
+for u in "$U" other; do echo "Key NOT hardware-attested (e2e)" > "/etc/authorized_keys/$u.attestation"; done
 python3 "$W/tools/test/mock_agent.py" --port 7801 --mode-file /tmp/mode > /tmp/doc3.log 2>&1 &
 sleep 1
 inst_state() { cksum "$TARGET" /etc/authorized_keys/* /usr/local/sbin/sudostamp-probe "$MARK" "$MOD" 2>&1; }
@@ -519,6 +522,7 @@ check "a user's key file that was only SudoStamp's is gone" bash -c "[ ! -e /etc
 check "a key file with someone else's key keeps exactly that key" \
   bash -c "[ \"\$(cat /etc/authorized_keys/$U.keys)\" = '$EVIL_PUB' ]"
 check "nothing else under /etc/authorized_keys" bash -c "[ \"\$(ls /etc/authorized_keys)\" = '$U.keys' ]"
+check "no attestation record is left behind" bash -c "[ -z \"\$(ls /etc/authorized_keys/*.attestation 2>/dev/null)\" ]"
 check "it ended with the PAM sanity check" grep -q "only the password gets in now" /tmp/uninst.log
 check "sudo with the password still works" as_user_sudo "$PW"
 check "sudo without it fails: the phone is not consulted" \
