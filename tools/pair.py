@@ -2,7 +2,8 @@
 """Pair with a SudoStamp phone, or find one on the LAN. Run by tools/install.sh.
 
     pair.py discover                       print "address:port<TAB>name" for each phone found
-    pair.py pair --phone ADDR [--label L] [--addr-out FILE]
+    pair.py pair --phone ADDR [--label L] [--addr-out FILE] [--attest-out FILE]
+                 [--require-attestation] [--check-revocation]
                                            pair; print the verified key line on stdout, and
                                            write the address to keep for the phone to FILE
 
@@ -17,6 +18,14 @@ because the phone states the address it was reached at, a relay that answered in
 place -- even one passing every byte through unchanged -- is refused: its address is not the
 phone's.
 
+Afterwards the phone is asked for the key's hardware attestation (attest-v1, only while the
+pairing is open) and tools/attest.py checks it against Google's roots: "Key attested: StrongBox",
+"Key attested: TEE" or "Key NOT hardware-attested (why)". A chain that is Google's but says
+software, or is for another key or pairing, refuses the pairing; one that cannot be checked
+(emulator, old phone, no openssl) only warns, unless --require-attestation. --attest-out FILE
+receives "<key fingerprint> TAB <that line>" for `install.sh status`. Nothing is fetched from
+the network unless --check-revocation is given.
+
 Prompts go to stderr and the typed code is read from stdin, so `install.sh` can capture the
 key line from stdout. Python standard library only: this runs as root (with -I).
 """
@@ -24,6 +33,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import importlib.util
 import ipaddress
 import os
 import re
@@ -37,8 +47,10 @@ AGENT_SUCCESS, AGENT_FAILURE = 6, 5
 EXT_COMMIT = b"pair-commit-v2@sudostamp"
 EXT_REVEAL = b"pair-reveal-v2@sudostamp"
 EXT_DONE = b"pair-done-v2@sudostamp"
+EXT_ATTEST = b"attest-v1@sudostamp"
 COMMIT_TAG = b"sudostamp-pair-commit-v2\x00"
 CODE_TAG = b"sudostamp-pair-code-v2\x00"
+ATTEST_TAG = b"sudostamp-attest-challenge-v1\x00"
 NONCE = 32
 ENDPOINT = 18                     # 16 address bytes (IPv4 as ::ffff:a.b.c.d) + 2 port bytes
 SERVICE = "_sudostamp._tcp.local."
@@ -68,6 +80,11 @@ def commitment(key, np_, dialled, stable):
 def code(key, np_, nh, dialled, stable):
     v = int.from_bytes(hashlib.sha256(CODE_TAG + s(key) + s(np_) + s(nh) + s(dialled) + s(stable)).digest()[:8], "big")
     return "%06d" % (v % 1000000)
+
+
+def attest_challenge(np_, dialled, stable):
+    """What the Keystore was told to sign into the key's attestation (Pairing.attestChallenge)."""
+    return hashlib.sha256(ATTEST_TAG + s(np_) + s(dialled) + s(stable)).digest()
 
 
 def endpoint(sockaddr):
@@ -154,11 +171,11 @@ class Agent:
             b += c
         return b
 
-    def ext(self, name, payload):
+    def ext(self, name, payload, limit=4096):
         msg = bytes([AGENTC_EXTENSION]) + s(name) + payload
         self.sock.sendall(struct.pack(">I", len(msg)) + msg)
         n = struct.unpack(">I", self.rx(4))[0]
-        if not 1 <= n <= 4096:
+        if not 1 <= n <= limit:
             raise ConnectionError("implausible answer from the phone")
         body = self.rx(n)
         if body[0] != AGENT_SUCCESS:
@@ -178,6 +195,59 @@ def read_line():
         if not c or c == b"\n":
             return out.decode("ascii", "replace")
         out += c
+
+
+def load_attest():
+    """tools/attest.py next to this file, or None. Loaded by path: `python3 -I` has no script
+    directory on sys.path. No bytecode: root must not write into a user's checkout."""
+    sys.dont_write_bytecode = True
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "sudostamp_attest", os.path.join(os.path.dirname(os.path.abspath(__file__)), "attest.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except (OSError, ImportError, SyntaxError):
+        return None
+
+
+def request_chain(ag, expected):
+    """attest-v1 on an open connection: the certificates (DER, leaf first), or a reason string."""
+    try:
+        r = ag.ext(EXT_ATTEST, b"", limit=32768)
+    except (OSError, ConnectionError) as e:
+        return "the phone did not answer the attestation request (%s)" % e
+    if r is None:
+        return "the phone sent no attestation: the app is older than 1.5, or this phone cannot attest"
+    try:
+        said, o = take(r, 0)
+        chain = []
+        while o < len(r):
+            der, o = take(r, o)
+            chain.append(der)
+    except ValueError:
+        return "the phone's attestation answer was malformed"
+    if said != expected:
+        return "the phone's attestation answer is for another pairing"
+    return chain
+
+
+def attestation(a, chain, key, np_, dialled, stable):
+    """The verdict (attest.Result) for what the phone sent, with a.require_attestation unapplied."""
+    mod = load_attest()
+    if mod is None:
+        return type("R", (), {"verdict": "unverified", "level": None,
+                              "line": lambda self: "Key NOT hardware-attested (attestation not checked: tools/attest.py missing)"})()
+    if isinstance(chain, str):
+        return mod.unverified(chain)
+    tmp = os.path.dirname(os.path.abspath(a.attest_out)) if a.attest_out else "/tmp"
+    return mod.check(chain, attest_challenge(np_, dialled, stable), key, tmp=tmp,
+                     check_revocation=a.check_revocation)
+
+
+def fingerprint(blob):
+    """The way `ssh-keygen -l` writes it: SHA256:<unpadded base64>."""
+    return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
 
 
 def cmd_pair(a):
@@ -239,15 +309,36 @@ def cmd_pair(a):
         say("  Start again from the phone ('Pair a computer').")
         sys.exit(1)
 
-    # Tells the phone to keep the key (as a new computer, until its first approval).
+    # Tells the phone to keep the key (as a new computer, until its first approval). Then, on the
+    # same connection and while the phone's pairing screen is still open, its attestation.
+    chain = "the phone did not answer the attestation request"
     try:
         ag = Agent(a.phone)
         ok = ag.ext(EXT_DONE, s(nh)) is not None
+        if ok:
+            chain = request_chain(ag, attest_challenge(np_, dialled, stable))
         ag.close()
     except (OSError, ConnectionError):
         ok = False
     if not ok:
         sys.exit("the phone did not confirm the pairing (it may have been cancelled on the phone) -- NOT pinned.")
+
+    # Where does the key live? Decided before anything is pinned. A phone that cannot prove it
+    # (emulator, old phone, no openssl) is allowed through with a warning unless the person said
+    # --require-attestation; a genuine hardware statement that does not fit this pairing, or says
+    # "software", is not. Nothing is deleted on the phone from here: the person can remove the
+    # computer in the app.
+    res = attestation(a, chain, key, np_, dialled, stable)
+    say("  " + res.line())
+    if res.verdict == "refused" or (a.require_attestation and res.verdict != "attested"):
+        say("")
+        say("  NOT pinned%s. Nothing on this computer was changed." %
+            (" (--require-attestation)" if res.verdict != "refused" else ""))
+        say("  The phone still lists this computer; remove it in the app (Computers) if you do not want it.")
+        sys.exit(1)
+    if a.attest_out:
+        with open(a.attest_out, "w") as f:
+            f.write("%s\t%s\n" % (fingerprint(key), res.line()))
 
     # The address to keep: the phone's stable one (it survives DHCP changes), if it is a LAN
     # address this computer can actually reach and the phone answers there with this key.
@@ -489,6 +580,9 @@ def main():
     p.add_argument("--phone", required=True)
     p.add_argument("--label")
     p.add_argument("--addr-out")
+    p.add_argument("--attest-out")
+    p.add_argument("--require-attestation", action="store_true")
+    p.add_argument("--check-revocation", action="store_true")
     d = sub.add_parser("discover")
     d.add_argument("--timeout", type=float, default=3.0)
     d.add_argument("--verbose", action="store_true")

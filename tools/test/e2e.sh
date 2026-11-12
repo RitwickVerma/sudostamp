@@ -189,6 +189,11 @@ check "setup succeeds" grep -q "Done. Every sudo now asks your phone first" /tmp
 check "the paired phone's key is the one pinned" \
   bash -c "[ \"\$(awk '{print \$2}' /etc/authorized_keys/$U.keys)\" = \"\$(awk '{print \$2}' /tmp/p7781.pub)\" ]"
 check "sudo succeeds with NO password via the paired phone" as_user_sudo ""
+# The mock sends what an emulator would: a software chain under a root that is nobody's.
+check "setup says the key is not hardware-attested, and goes on" grep -q "Key NOT hardware-attested (the chain does not end at a Google" /tmp/setup1.log
+check "status shows it" bash -c "bash '$I' status 2>&1 | grep -q 'key attestation : Key NOT hardware-attested'"
+check "the record sits beside the key, root-owned, and the key file is still one line" \
+  bash -c "[ \"\$(stat -c '%u %a' /etc/authorized_keys/$U.attestation)\" = '0 644' ] && [ \"\$(wc -l < /etc/authorized_keys/$U.keys)\" = 1 ]"
 check "exactly one SudoStamp block" bash -c "[ \"\$(grep -c '^# >>> SudoStamp >>>' '$TARGET')\" = 1 ]"
 
 step "7. setup again (a new phone), from the single-file download: still one block"
@@ -254,6 +259,29 @@ check "setup refuses: something answered in the phone's place" \
   bash -c "! grep -q 'Done.' /tmp/setup-relay.log && grep -q 'answered in the phone' /tmp/setup-relay.log"
 check "the PAM stack is unchanged and never names the relay" \
   bash -c "[ '$state0' = \"\$($(declare -f stack_state); TARGET='$TARGET'; stack_state)\" ] && ! grep -qs 7786 '$TARGET'"
+
+step "8c. --require-attestation refuses a phone that cannot prove its key is in hardware"
+pairing_phone 7788
+cp /etc/authorized_keys/$U.keys /tmp/keys.before
+cp /etc/authorized_keys/$U.attestation /tmp/attest.before
+state0="$(stack_state)"
+type_code_from /tmp/p7788.code | bash "$I" setup --phone 127.0.0.1:7788 --require-attestation > /tmp/setup-req.log 2>&1
+check "setup refuses" bash -c "! grep -q 'Done.' /tmp/setup-req.log && grep -q 'NOT pinned (--require-attestation)' /tmp/setup-req.log"
+check "the key, its attestation record and the PAM stack are unchanged" \
+  bash -c "[ \"\$(cksum < /tmp/keys.before)\" = \"\$(cksum < /etc/authorized_keys/$U.keys)\" ] && [ \"\$(cksum < /tmp/attest.before)\" = \"\$(cksum < /etc/authorized_keys/$U.attestation)\" ] && [ '$state0' = \"\$($(declare -f stack_state); TARGET='$TARGET'; stack_state)\" ]"
+check "the refused phone's key is nowhere" bash -c "! grep -qF \"\$(awk '{print \$2}' /tmp/p7788.pub)\" /etc/authorized_keys/$U.keys"
+check "the phone was asked for its attestation only after pair-done" \
+  bash -c "[ \"\$(grep -n 'pairing: done' /tmp/p7788.log | cut -d: -f1)\" -lt \"\$(grep -n 'attest: software chain sent' /tmp/p7788.log | cut -d: -f1)\" ]"
+
+step "8d. a phone of the app before 1.5 (no attestation extension) still pairs"
+pairing_phone 7789 --attest none
+type_code_from /tmp/p7789.code | bash "$I" setup --phone 127.0.0.1:7789 > /tmp/setup-old.log 2>&1
+check "setup goes on, saying why there is no attestation" \
+  bash -c "grep -q 'Done. Every sudo now asks your phone first' /tmp/setup-old.log && grep -q 'app is older than 1.5' /tmp/setup-old.log"
+check "status shows that, for the key pinned now (not the previous one)" \
+  bash -c "bash '$I' status 2>&1 | grep -q 'key attestation : Key NOT hardware-attested (the phone sent no attestation'"
+check "a key pinned without pairing drops the record" \
+  bash -c "bash '$I' stage --phone 127.0.0.1:7789 --key \"\$(cat /tmp/p7789.pub)\" >/dev/null 2>&1; [ ! -e /etc/authorized_keys/$U.attestation ] && bash '$I' status 2>&1 | grep -q 'key attestation : not attested (paired before 1.5'"
 
 step "9. an older whole-file SudoStamp is migrated"
 bash "$I" rollback > /dev/null 2>&1
