@@ -15,15 +15,19 @@
 # What CI proves, and why these jobs and not others: the whole security claim of
 # this project rests on the two SSH wire blobs (public key blob, signature blob)
 # being byte-correct, because a wrong encoding produces signatures that look fine
-# and simply fail to verify at the sudo prompt. So the unit-test job is followed
+# and simply fail to verify at the sudo prompt. So the unit tests (job `android`) are followed
 # in the same job by tools/verify_ssh_sig.py, which checks those blobs with tools
 # that are NOT this project's code (OpenSSH + the independent `cryptography`
 # library). Unit tests alone can assert structure and still pass on bytes no SSH
 # implementation accepts -- see tools/verify_ssh_sig.py.
+#
+# Runner cost: the unit tests, lint and the debug build are ONE Gradle invocation (job `android`), so
+# the project is configured and compiled once instead of three times in three JVMs, and the Gradle +
+# SDK cache is shared by every branch (keyed by the wrapper, the dependency lock and the SDK pins)
+# instead of starting cold on each new branch.
 
 stages:
   - test
-  - build
 
 # Branch, tag and schedule pipelines only. Jobs with explicit `rules` (below, and the SAST template)
 # would otherwise also start a merge-request pipeline for every push -- a second full run on the
@@ -56,9 +60,14 @@ image: eclipse-temurin:17-jdk
 # be enabled for this project (Settings > CI/CD > Runners) or jobs wait forever.
 default:
   tags: [local]
+  interruptible: true
 
 cache:
-  key: "$CI_COMMIT_REF_SLUG"
+  key:
+    files:
+      - gradle/wrapper/gradle-wrapper.properties
+      - gradle/verification-metadata.xml
+    prefix: "sdk$SDK_PLATFORM-$SDK_BUILD_TOOLS"
   paths:
     - .gradle/wrapper/
     - .gradle/caches/modules-2/
@@ -75,15 +84,16 @@ cache:
       when: never
     - when: on_success
 
-unit-test:
+# Unit tests, lint and the debug APK in one Gradle run (--continue: a lint failure still reports
+# the test results and vice versa). The unit test `emit artifacts for external verification`
+# leaves app/build/sshcheck/ behind (test.pub, msg.bin, sig.bin); those bytes are then checked
+# with independent tools: OpenSSH must parse the public key blob, and `cryptography` must verify
+# the ECDSA signature (plus the two negative controls). This is gate 2 of tools/verify.sh.
+android:
   stage: test
   extends: [.sdk_setup, .not_scheduled]
   script:
-    - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 testDebugUnitTest
-    # The unit test `emit artifacts for external verification` leaves app/build/sshcheck/
-    # behind (test.pub, msg.bin, sig.bin). Check those bytes with independent tools:
-    # OpenSSH must parse the public key blob, and `cryptography` must verify the ECDSA
-    # signature (plus the two negative controls). This is gate 2 of tools/verify.sh.
+    - ./gradlew --no-daemon --continue -Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8 testDebugUnitTest lintDebug assembleDebug
     # DEBIAN_FRONTEND=noninteractive keeps debconf from spraying noise into the job log.
     - export DEBIAN_FRONTEND=noninteractive
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-client python3 python3-cryptography >/dev/null
@@ -93,7 +103,8 @@ unit-test:
     reports:
       junit: app/build/test-results/testDebugUnitTest/*.xml
     paths:
-      - app/build/reports/tests/
+      - app/build/reports/
+      - app/build/outputs/apk/debug/app-debug.apk
     expire_in: 1 week
 
 # Repo hygiene that needs no SDK: no credential-shaped content in any tracked file (GitLab's
@@ -155,27 +166,6 @@ gitleaks:
     GIT_DEPTH: 0
   script:
     - gitleaks git . --redact --no-banner
-
-lint:
-  stage: test
-  extends: [.sdk_setup, .not_scheduled]
-  script:
-    - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 lintDebug
-  artifacts:
-    when: always
-    paths:
-      - app/build/reports/
-    expire_in: 1 week
-
-assemble-debug:
-  stage: build
-  extends: [.sdk_setup, .not_scheduled]
-  script:
-    - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 assembleDebug
-  artifacts:
-    paths:
-      - app/build/outputs/apk/debug/app-debug.apk
-    expire_in: 1 week
 
 # ---------------------------------------------------------------- releases
 # docs/RELEASING.md. CI never signs and never publishes: the release key, the installer key and the

@@ -67,7 +67,7 @@ again.
 | Gate | Where |
 |---|---|
 | secret scan (tree), gitleaks (full history), shellcheck, Python tests | CI `hygiene`, `gitleaks` |
-| unit tests + independent signature check, lint, debug build | CI `unit-test`, `lint`, `assemble-debug` |
+| unit tests + independent signature check, lint, debug build | CI `android` (one Gradle run) |
 | host installer end to end on 7 distributions, including what must fail | CI `host-e2e` |
 | versions, store notes, dated changelog, store listing, signer line in app + README | CI `release-check` (tags and `release/*`) |
 | signed build, certificate == pinned release key, not debuggable, installer signature verifies | `release.sh package` |
