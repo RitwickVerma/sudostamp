@@ -1,0 +1,161 @@
+diff --git a/src/ssh_agent_auth.rs b/src/ssh_agent_auth.rs
+index e9465e0..d882d21 100644
+--- a/src/ssh_agent_auth.rs
++++ b/src/ssh_agent_auth.rs
+@@ -6,9 +6,10 @@ use ssh_agent::proto::public_key::PublicKey;
+ use ssh_agent::proto::signature;
+ use ssh_agent::proto::{from_bytes, to_bytes, Message};
+ 
+-use std::io::{Read, Write};
++use std::io::{self, Read, Write};
+ // use std::mem::size_of;
+-use std::net::Shutdown;
++use std::net::{Shutdown, TcpStream};
++use std::time::{Duration, Instant};
+ 
+ use super::error::RsshErr;
+ 
+@@ -21,12 +22,69 @@ pub struct AgentClient<'a> {
+ 
+ static NET_RETRY_CNT: u32 = 3;
+ 
++// SudoStamp: time limits. Upstream sets none, so a peer that accepts the connection and then
++// goes quiet holds the caller (sudo) for as long as it likes, and the password prompt never
++// comes. All three fail the exchange, which falls through to the next PAM module.
++// CONNECT: a LAN peer that is there answers in milliseconds.
++const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
++// IDENTITIES: a phone answers REQUEST_IDENTITIES at once.
++const IDENTITIES_TIMEOUT: Duration = Duration::from_secs(10);
++// SIGN: must EXCEED the phone's approval window (AgentService.APPROVAL_TIMEOUT_MS = 60 s in
++// the SudoStamp app, after which it answers FAILURE itself), or a slow but honest approval
++// is cut off here first. 15 s of slack for the answer to cross the network.
++const SIGN_TIMEOUT: Duration = Duration::from_secs(75);
++
++// One deadline for a whole exchange. A per-read timeout bounds a single syscall, so a peer
++// sending one byte every 70 s would hold the connection for a day; this re-arms the timeout
++// with what is left before every read and write.
++struct Bounded<'s> {
++    stream: &'s mut Stream,
++    deadline: Instant,
++}
++
++impl Bounded<'_> {
++    fn left(&self) -> io::Result<Duration> {
++        let left = self.deadline.saturating_duration_since(Instant::now());
++        if left.is_zero() {
++            Err(io::ErrorKind::TimedOut.into())
++        } else {
++            Ok(left)
++        }
++    }
++}
++
++impl Read for Bounded<'_> {
++    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
++        self.stream.set_read_timeout(Some(self.left()?))?;
++        self.stream.read(buf)
++    }
++}
++
++impl Write for Bounded<'_> {
++    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
++        self.stream.set_write_timeout(Some(self.left()?))?;
++        self.stream.write(buf)
++    }
++
++    fn flush(&mut self) -> io::Result<()> {
++        self.stream.flush()
++    }
++}
++
++// A timeout is final: retrying a silent peer would multiply the wait.
++fn is_timeout(e: &(dyn std::error::Error + 'static)) -> bool {
++    e.downcast_ref::<io::Error>().map_or(false, |e| {
++        matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)
++    })
++}
++
+ impl<'a> AgentClient<'a> {
+     pub fn new(addr: &str) -> AgentClient<'_> {
+         AgentClient { addr, stream: None }
+     }
+ 
+-    fn read_message(stream: &mut Stream) -> Result<Message, ErrType> {
++    fn read_message(stream: &mut Stream, deadline: Instant) -> Result<Message, ErrType> {
++        let mut stream = Bounded { stream, deadline };
+         let length = stream.read_u32::<BigEndian>()? as usize;
+         debug!("read_message len={}", length);
+         let mut buffer: Vec<u8> = vec![0; length as usize];
+@@ -36,7 +94,8 @@ impl<'a> AgentClient<'a> {
+         Ok(msg)
+     }
+ 
+-    fn write_message(stream: &mut Stream, msg: &Message) -> Result<(), ErrType> {
++    fn write_message(stream: &mut Stream, msg: &Message, deadline: Instant) -> Result<(), ErrType> {
++        let mut stream = Bounded { stream, deadline };
+         let mut bytes = to_bytes(&to_bytes(msg)?)?;
+         stream.write_all(&mut bytes)?;
+         trace!("Written {} bytes: {:02X?}", bytes.len(), bytes);
+@@ -54,33 +113,44 @@ impl<'a> AgentClient<'a> {
+             let _ = s.shutdown(Shutdown::Both);
+             self.stream = None;
+         }
+-        self.stream = Some(Stream::connect(&sockaddr)?);
++        self.stream = Some(match sockaddr {
++            SocketAddr::Inet(ref a) => Stream::from(TcpStream::connect_timeout(a, CONNECT_TIMEOUT)?),
++            _ => Stream::connect(&sockaddr)?,
++        });
+         info!("Connected to {:?}", sockaddr);
+         Ok(())
+     }
+ 
+-    fn call_agent_once(&mut self, cmd: &Message) -> Result<Message, ErrType> {
++    fn call_agent_once(&mut self, cmd: &Message, deadline: Instant) -> Result<Message, ErrType> {
+         if self.stream.is_none() {
+             self.connect()?;
+         }
+         let sock = self.stream.as_mut().unwrap();
+-        Self::write_message(sock, cmd)?;
+-        Self::read_message(sock)
++        Self::write_message(sock, cmd, deadline)?;
++        Self::read_message(sock, deadline)
+     }
+ 
+-    fn call_agent(&mut self, cmd: &Message, retry: u32) -> Result<Message, ErrType> {
++    fn call_agent(&mut self, cmd: &Message, retry: u32, within: Duration) -> Result<Message, ErrType> {
++        // One deadline for all attempts, so retries cannot add up to more than `within`.
++        let deadline = Instant::now() + within;
+         let mut ret: Result<Message, ErrType> = Err(RsshErr::RetryLT1Err.into_ptr());
+         for _i in 0..retry {
+-            ret = self.call_agent_once(cmd);
+-            if let Ok(val) = ret {
+-                return Ok(val);
++            match self.call_agent_once(cmd, deadline) {
++                Ok(val) => return Ok(val),
++                Err(e) => {
++                    let stop = is_timeout(&*e) || Instant::now() >= deadline;
++                    ret = Err(e);
++                    if stop {
++                        break;
++                    }
++                }
+             }
+         }
+         ret
+     }
+ 
+     pub fn list_identities(&mut self) -> Result<Vec<PublicKey>, ErrType> {
+-        let msg = self.call_agent(&Message::RequestIdentities, NET_RETRY_CNT)?;
++        let msg = self.call_agent(&Message::RequestIdentities, NET_RETRY_CNT, IDENTITIES_TIMEOUT)?;
+         if let Message::IdentitiesAnswer(keys) = msg {
+             if keys.len() == 0 {
+                 info!("Please add keys to ssh-agent")
+@@ -116,7 +186,7 @@ impl<'a> AgentClient<'a> {
+             data: data.to_vec(),
+             flags,
+         };
+-        let msg = self.call_agent(&Message::SignRequest(args), NET_RETRY_CNT)?;
++        let msg = self.call_agent(&Message::SignRequest(args), NET_RETRY_CNT, SIGN_TIMEOUT)?;
+         if let Message::Failure = msg {
+             return Err(RsshErr::AgentFailureErr.into_ptr());
+         }

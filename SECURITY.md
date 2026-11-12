@@ -103,13 +103,20 @@ flagged on every request; pair those computers again and remove it.
 - **The prompt cannot name the command.** pam_rssh sends an opaque challenge. A process running as
   you on a paired computer can start a sudo and you will see a request from that computer — the same
   position as a password prompt that process could have shown you.
-- **A stalling peer after the reachability check.** pam_rssh sets no timeout on its socket. The
-  installer puts a check in front of it (`sudostamp-probe`: the phone must answer with this user's
-  key within 4 s, or pam_rssh is skipped), which covers a dead phone, a different device on the
-  phone's old address, and anything that accepts and never answers. Something that answers that
-  check and then stalls pam_rssh — a man in the middle on your LAN — can still hold sudo until you
-  press Ctrl-C. Fixing that needs a timeout in pam_rssh itself. On macOS and FreeBSD (OpenPAM, no
-  way to skip a line) there is no check at all.
+- **A stalling peer after the reachability check.** Upstream pam_rssh sets no timeout on its
+  socket. Two layers now bound it. The installer puts a check in front of pam_rssh
+  (`sudostamp-probe`: the phone must answer with this user's key within 4 s, or pam_rssh is
+  skipped), which covers a dead phone, a different device on the phone's old address, and anything
+  that accepts and never answers. And the pam_rssh the installer builds carries a small patch
+  (`tools/patches/pam_rssh-timeouts.patch`, pinned by SHA-256): connect 5 s, listing keys 10 s, and
+  a signature 75 s, deliberately longer than the phone's own 60 s approval window. The limit covers
+  the whole exchange, so a peer sending one byte at a time gains nothing, and a timeout is never
+  retried. A man in the middle that answers the probe and then stalls therefore holds sudo for at
+  most 75 s, after which the password prompt comes. What is still open: a pam_rssh that SudoStamp
+  did not build has no timeouts (FreeBSD installs the port as is; a distribution package of
+  pam_rssh is left alone, and the patched build is installed beside it). `doctor` says which you
+  have (`pam_rssh: patched (timeouts)`). macOS builds the same patched module (experimental,
+  untested) but, like FreeBSD (OpenPAM, no way to skip a line), has no probe in front of it.
 - **Pairing proves the key, not the person.** Whoever completes pairing while the pairing screen is
   open gets a key. The defences are the cancellation and *new* flag above; read the name on the
   first request from a newly paired computer.
@@ -215,7 +222,13 @@ documented command does), read `tools/install.sh` first, as with any installer.
 - On the host, `install.sh` builds pam_rssh tag `v1.2.1` and refuses unless the checkout is exactly
   commit `e8dd046c…` (a tag can be moved, a commit cannot), with `cargo --locked`, as the invoking
   user, never as root — on every distribution. (1.3 installed it from the AUR with an AUR helper
-  when one was present: no pin, no review. Removed.) FreeBSD uses the ports package.
+  when one was present: no pin, no review. Removed.) FreeBSD uses the ports package. Before the
+  build, `tools/patches/pam_rssh-timeouts.patch` is applied to that checkout: the installer reads it
+  into a root-private file, refuses unless its SHA-256 is the one pinned in `install.sh` and it
+  applies cleanly, and records the build (path, SHA-256 of the module, patch hash) in
+  `/var/lib/sudostamp/pam_rssh.built`.
+- `doctor` only reads. `uninstall` removes the pam_rssh module only when that record says
+  SudoStamp built it and the file still has the recorded hash, never a package's.
 - If the distribution's Rust is too old, it can fetch the official `rustup-init` over HTTPS and
   check it against the SHA-256 rust-lang publishes (same origin, so this guards against corruption
   rather than a compromised server), and use it in the build directory only. It asks first.

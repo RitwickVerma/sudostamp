@@ -176,7 +176,9 @@ What `setup` does, step by step:
 - **Pairs** using the code (below: why a code, and why it is safe). Nothing is installed or changed
   until the codes match, and a wrong code changes nothing at all. Then it asks the phone to prove
   where the key lives (below: *Key attestation*).
-- **Installs pam_rssh**, built from a pinned, verified commit (the ports package on FreeBSD). If
+- **Installs pam_rssh**, built from a pinned, verified commit with a small reviewed patch that adds
+  network timeouts, so a stalled phone cannot hold `sudo` for more than 75 seconds (the ports
+  package on FreeBSD, which has none). An install from 1.4 or earlier is rebuilt with it. If
   the distribution's Rust is too old to build it (Debian 13, Ubuntu 24.04) it offers a temporary
   toolchain from the official rustup, deleted afterwards.
 - **Tests** on a throwaway PAM service that only the phone can satisfy. sudo is not touched yet.
@@ -187,8 +189,15 @@ What `setup` does, step by step:
   migrated, after asking.
 
 `sudo bash sudostamp-setup.sh rollback` (or `sudo sudostamp rollback`) takes the block out again;
-`status` shows what is in place. From a checkout of the repository, `sudo tools/install.sh setup`
-does the same. The phone's address goes into sudo's config as a literal (pam_rssh takes an address, not a name),
+`status` shows what is in place. `sudo sudostamp doctor` checks that everything still works and
+changes nothing: one line per check (OK, WARN or FAIL), the command that fixes each problem, and
+an exit code of 0 when all is well, 1 on any FAIL and 2 on warnings only. It also notices when the
+phone has moved to another address (it never rewrites anything for you: re-run `setup`).
+`sudo sudostamp uninstall` removes everything SudoStamp installed and nothing else (the PAM block,
+its helper scripts, its lines in the key files, the backups, and the pam_rssh module only if
+SudoStamp built it), asks first unless given `--yes`, and ends by checking that sudo still asks
+for your password. From a checkout of the repository, `sudo tools/install.sh setup` (or `doctor`,
+`uninstall`) does the same. The phone's address goes into sudo's config as a literal (pam_rssh takes an address, not a name),
 so it should not change when the router renews a lease. If your router hands out IPv6 prefixes
 of its own (most do), `setup` uses the phone's stable `fd…` address; otherwise it uses IPv4, and a
 DHCP reservation for the phone keeps that fixed. If the phone does not answer at that address with

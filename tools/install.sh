@@ -8,6 +8,8 @@
 #   sudo tools/install.sh apply --phone $P   # add the block to sudo's PAM file
 #   sudo tools/install.sh rollback           # take the block out again
 #   tools/install.sh status                  # what is in place
+#   sudo tools/install.sh doctor             # is it healthy? read-only; exit 0 OK, 1 FAIL, 2 WARN
+#   sudo tools/install.sh uninstall [--yes]  # remove everything SudoStamp installed, nothing else
 #
 # Options: --fingerprint SHA256:... skips the interactive fingerprint check (the app's "Copy
 # setup command" fills it in); --allow-rustup pre-approves a throwaway Rust toolchain when
@@ -46,6 +48,13 @@
 #                       bare words hit the unknown-option arm -> PAM_SYSTEM_ERR.
 #   password fallback   DELIBERATE. `sufficient` + everything below untouched, so a dead
 #                       sensor or phone cannot lock you out.
+#   timeouts            pam_rssh v1.2.1 opens the agent socket with NO timeout (ssh_agent_auth.rs,
+#                       Stream::connect), so a peer that passes the probe and then goes quiet
+#                       would hold sudo for good. The build therefore applies
+#                       tools/patches/pam_rssh-timeouts.patch (pinned by SHA-256 below; refused
+#                       if it differs or does not apply) and records the result in a root-owned
+#                       marker next to the backups. `doctor` reports it; `uninstall` removes the
+#                       module only when that marker says this installer built it.
 #
 # Portable bash: macOS still ships bash 3.2, so no associative arrays, no ${x,,}, no mapfile,
 # and no GNU-only flags (stat -c, sed -i, install -o root).
@@ -65,6 +74,9 @@ KEYFILE="${KEYDIR}/${TARGET_USER}.keys"
 # What the phone's hardware attestation said about the pinned key (tools/pair.py --attest-out).
 # Beside the key file, not in it: pam_rssh reads every line of the key file.
 ATTESTFILE="${KEYDIR}/${TARGET_USER}.attestation"
+# The one shape a pinned-key line has: exactly what acquire_key accepts, and what uninstall
+# treats as "ours".
+KEY_RE='ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABB[A-Za-z0-9+/]{87}= sudostamp'
 GATE="/usr/local/sbin/sudostamp-is-local"
 PROBE="/usr/local/sbin/sudostamp-probe"
 # The gate's control flags. NOT `[success=ok default=1]`: in Linux-PAM `ok` makes a
@@ -86,6 +98,11 @@ PROG="${SUDOSTAMP_PROG:-$0}"
 RSSH_REPO="https://github.com/z4yx/pam_rssh.git"
 RSSH_TAG="v1.2.1"
 RSSH_COMMIT="e8dd046c423f85df266c23bcc3d7033bfee81255"
+# The one change made to that checkout before building: connect, read and write timeouts (see
+# the patch's own comments for the numbers). Pinned like the commit; the patch is looked up
+# beside this script (tools/patches/ in a checkout, patches/ in the bundle and the AUR package).
+PATCH_NAME="pam_rssh-timeouts.patch"
+PATCH_SHA256="35a6bc40580b18bf76ea65064b3cd14a245d7d128e0a823cf2bce5bcdf754893"
 # The oldest Rust its Cargo.lock builds with: time-core 0.1.8 needs 1.88. (Debian 13 has
 # 1.85, Ubuntu 24.04 1.75: found by building, not by reading.)
 CARGO_MIN_MINOR=88
@@ -191,11 +208,49 @@ module_dir() {
   return 1
 }
 
+# The record of the module THIS installer built: where it put it, that file's SHA-256 and the
+# patch's. Root-owned, in the state directory. It is what lets `uninstall` remove only our own
+# module (never a distribution's pam_rssh) and `doctor` say whether the timeouts are in.
+# A module that no longer hashes to the recorded value is not ours any more (a package
+# upgrade overwrote it, say) and is treated as such.
+rssh_marker() { echo "$(state_dir)/pam_rssh.built"; }
+sha256_file() { sha256_stdin < "$1"; }
+marker_get() { [ -f "$(rssh_marker)" ] && sed -n "s/^$1=//p" "$(rssh_marker)" | head -1; }
+# The module file we built, if it is still exactly what we installed.
+ours_module() {
+  local m h
+  m="$(marker_get module)"; h="$(marker_get module_sha256)"
+  [ -n "$m" ] && [ -n "$h" ] && [ -f "$m" ] && [ "$(sha256_file "$m")" = "$h" ] && echo "$m"
+}
+write_marker() {
+  local d; d="$(state_dir)"
+  mkdir -p "$d" && chown 0:0 "$d" && chmod 0755 "$d" || return 1
+  printf 'module=%s\nmodule_sha256=%s\npatch_sha256=%s\ncommit=%s\n' \
+    "$1" "$(sha256_file "$1")" "$PATCH_SHA256" "$RSSH_COMMIT" | write_atomic "$(rssh_marker)"
+}
+# patched | stale (built with a different patch than this installer carries) | unpatched
+rssh_state() {
+  ours_module >/dev/null || { echo unpatched; return; }
+  [ "$(marker_get patch_sha256)" = "$PATCH_SHA256" ] && echo patched || echo stale
+}
+# Does the package manager own this file? Then it is not ours to replace or delete.
+pkg_owns() {
+  local r; r="$(readlink -f "$1" 2>/dev/null || echo "$1")"
+  case "$FAMILY" in
+    arch)         pacman -Qo "$1" >/dev/null 2>&1 ;;
+    debian)       dpkg -S "$1" >/dev/null 2>&1 || dpkg -S "$r" >/dev/null 2>&1 ;;
+    fedora|suse)  rpm -qf "$1" >/dev/null 2>&1 ;;
+    freebsd)      pkg which "$1" >/dev/null 2>&1 ;;
+    *)            return 1 ;;
+  esac
+}
+
 # Find an installed pam_rssh WITHOUT assuming its filename: Arch's package installs
 # pam_rssh.so, a bare cargo build produces libpam_rssh.so. Checking only one once made a
-# successful install read as a failure.
+# successful install read as a failure. The one we built wins: it may sit beside a packaged one.
 find_pam_rssh() {
   local d c
+  ours_module && return 0
   case "$FAMILY" in
     macos)   [ -f "$MACOS_MODULE_DIR/pam_rssh.so" ] && { echo "$MACOS_MODULE_DIR/pam_rssh.so"; return 0; }; return 1 ;;
     freebsd) for c in /usr/local/lib/pam_rssh.so /usr/local/lib/security/pam_rssh.so; do
@@ -219,7 +274,9 @@ module_ref() {
 }
 
 need_root() {
-  [ "$(id -u)" -eq 0 ] || { echo "This needs root. Run: sudo $PROG $1 --phone <phone-ip>:7777" >&2; exit 1; }
+  local more=" --phone <phone-ip>:7777"
+  case "$1" in rollback|uninstall|doctor) more="" ;; esac
+  [ "$(id -u)" -eq 0 ] || { echo "This needs root. Run: sudo $PROG $1$more" >&2; exit 1; }
 }
 need_platform() {
   [ -n "$FAMILY" ] || die "unsupported platform ($OS, /etc/os-release: ${ids:-none}). See README.md for the lines to add by hand."
@@ -229,14 +286,12 @@ need_platform() {
 # character by character FIRST: a test that matches one line (grep -x) passed a value whose
 # second line was a whole PAM rule. No host names either: pam_rssh parses only literal
 # addresses, so a name could never work at sudo time anyway.
-need_phone() {
-  if [ -z "$PHONE_ADDR" ]; then
-    echo "Which phone? Pass --phone <phone-ip>:7777 (the address on the app's pairing screen)" >&2; exit 2
-  fi
+# Is $1 an address fit to go into a PAM line? (need_phone's check, for callers that must not exit.)
+phone_valid() {
   local ok=0
-  case "$PHONE_ADDR" in
+  case "$1" in
     *[!0-9A-Fa-f.:\[\]]*) ok=0 ;;                       # any other character, newline included
-    *) python3 -I - "$PHONE_ADDR" <<'PY' && ok=1 ;;
+    *) python3 -I - "$1" <<'PY' && ok=1 ;;
 import ipaddress, sys
 v = sys.argv[1]
 host, _, port = v.rpartition(":")
@@ -251,9 +306,15 @@ except ValueError:
     sys.exit(1)
 PY
   esac
-  if [ "$ok" != 1 ]; then
-    echo "--phone must be an address and port, e.g. 192.168.1.50:7777 or [fd00::1]:7777" >&2; exit 2
+  [ "$ok" = 1 ]
+}
+need_phone() {
+  if [ -z "$PHONE_ADDR" ]; then
+    echo "Which phone? Pass --phone <phone-ip>:7777 (the address on the app's pairing screen)" >&2; exit 2
   fi
+  phone_valid "$PHONE_ADDR" || {
+    echo "--phone must be an address and port, e.g. 192.168.1.50:7777 or [fd00::1]:7777" >&2; exit 2
+  }
 }
 need_user() {
   if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = root ] || ! id "$TARGET_USER" >/dev/null 2>&1; then
@@ -267,12 +328,13 @@ own_root() { chown 0:0 "$@" && chmod 0644 "$@"; }
 
 # Backups of sudo's PAM file. NOT next to it: every file in /etc/pam.d is a PAM service that
 # any program may name, and 1.3 left a sudo.bak-<time> there on every apply.
-backup_dir() {
+state_dir() {
   case "$FAMILY" in
-    macos) echo /var/db/sudostamp/backups ;;
-    *)     echo /var/lib/sudostamp/backups ;;
+    macos) echo /var/db/sudostamp ;;
+    *)     echo /var/lib/sudostamp ;;
   esac
 }
+backup_dir() { echo "$(state_dir)/backups"; }
 # Copy $1 into the backup directory; prints the copy's path.
 backup_of() {
   local d; d="$(backup_dir)"
@@ -441,6 +503,15 @@ build_pam_rssh() {
   local work="$BUILD_DIR"
   # EXIT, not RETURN: die() exits, and the checkout (and any rustup) must not outlive it.
   trap cleanup EXIT
+  say "  building pam_rssh $RSSH_TAG (a few minutes)"
+  sudo -u "$TARGET_USER" git -c advice.detachedHead=false clone -q --depth 1 --branch "$RSSH_TAG" \
+      --recurse-submodules --shallow-submodules "$RSSH_REPO" "$work/pam_rssh" || die "git clone failed"
+  # As the user: root reading a user-owned checkout trips git's safe.directory check.
+  [ "$(sudo -u "$TARGET_USER" git -C "$work/pam_rssh" rev-parse HEAD)" = "$RSSH_COMMIT" ] || \
+    die "pam_rssh $RSSH_TAG is not commit $RSSH_COMMIT -- refusing to build a moved tag"
+  ok "source is commit $RSSH_COMMIT"
+  apply_timeout_patch "$work/pam_rssh"
+
   cargo="$(find_cargo)" || { newer_cargo >/dev/null 2>&1; cargo="$(find_cargo)"; } || \
     cargo="$(rustup_cargo "$work")" || \
     die "no Rust >= 1.$CARGO_MIN_MINOR. Install a current toolchain (https://rustup.rs) and re-run."
@@ -454,14 +525,6 @@ build_pam_rssh() {
   [ -x "$rustc" ] || rustc="$(dirname "$cargo")/rustc"
   [ -x "$rustc" ] || die "no rustc beside $cargo"
 
-  say "  building pam_rssh $RSSH_TAG (a few minutes)"
-  sudo -u "$TARGET_USER" git -c advice.detachedHead=false clone -q --depth 1 --branch "$RSSH_TAG" \
-      --recurse-submodules --shallow-submodules "$RSSH_REPO" "$work/pam_rssh" || die "git clone failed"
-  # As the user: root reading a user-owned checkout trips git's safe.directory check.
-  [ "$(sudo -u "$TARGET_USER" git -C "$work/pam_rssh" rev-parse HEAD)" = "$RSSH_COMMIT" ] || \
-    die "pam_rssh $RSSH_TAG is not commit $RSSH_COMMIT -- refusing to build a moved tag"
-  ok "source is commit $RSSH_COMMIT"
-
   local env=(env "${RUSTUP_ENV[@]}" "RUSTC=$rustc")
   [ "$FAMILY" = macos ] && env+=("OPENSSL_DIR=$(sudo -u "$TARGET_USER" brew --prefix openssl@3)")
   (cd "$work/pam_rssh" && sudo -u "$TARGET_USER" "${env[@]}" "$cargo" build --release --locked -q) || \
@@ -469,7 +532,11 @@ build_pam_rssh() {
 
   case "$FAMILY" in
     macos) dest="$MACOS_MODULE_DIR/pam_rssh.so"; root_owned_dir "$MACOS_MODULE_DIR" ;;
-    *)     dest="$(module_dir)/pam_rssh.so" || die "no PAM module directory found" ;;
+    *)     dest="$(module_dir)/pam_rssh.so" || die "no PAM module directory found"
+           # A package owns this name: put ours beside it rather than over it, or the next
+           # upgrade of that package silently takes the timeouts out again (and uninstall
+           # could never tell which file is whose). find_pam_rssh prefers ours.
+           if pkg_owns "$dest"; then dest="$(module_dir)/pam_rssh_sudostamp.so"; fi ;;
   esac
   local built="$work/pam_rssh/target/release/libpam_rssh.so"
   [ -f "$built" ] || built="$work/pam_rssh/target/release/libpam_rssh.dylib"
@@ -486,17 +553,49 @@ build_pam_rssh() {
   # SELinux (Fedora/RHEL): a file copied from a build dir keeps the wrong label, and PAM
   # then fails to load it with a misleading "cannot open shared object".
   command -v restorecon >/dev/null 2>&1 && restorecon "$dest"
-  ok "installed $dest"
+  write_marker "$dest" || die "could not record the build in $(state_dir)"
+  ok "installed $dest (patched: connect/read/write timeouts)"
+}
+
+# Apply the pinned timeouts patch to the checkout $1 (user-owned). The patch is read AS THE
+# USER like every other file from this directory, but into a root-private copy that is hashed
+# and then applied from: what is checked is what is used. Refuses on any mismatch; a build
+# without the timeouts is not "the same, but slower", it is the stall the patch exists to close.
+apply_timeout_patch() {
+  local src="$HERE/patches/$PATCH_NAME" copy
+  root_tmp >/dev/null            # set ROOT_TMP in THIS shell, not in the $(...) below
+  copy="$ROOT_TMP/$PATCH_NAME"
+  # shellcheck disable=SC2024  # intended: read as the user, write (the redirect) as root
+  sudo -u "$TARGET_USER" cat "$src" > "$copy" 2>/dev/null || die "cannot read $src"
+  [ "$(sha256_file "$copy")" = "$PATCH_SHA256" ] || \
+    die "$src does not match its pinned SHA-256 -- refusing to build pam_rssh with it"
+  sudo -u "$TARGET_USER" git -C "$1" apply --check - < "$copy" 2>/dev/null || \
+    die "$PATCH_NAME does not apply to pam_rssh $RSSH_COMMIT -- refusing to build without it"
+  sudo -u "$TARGET_USER" git -C "$1" apply - < "$copy" || die "could not apply $PATCH_NAME"
+  ok "timeouts patch applied ($PATCH_NAME, sha256 $(printf '%.12s' "$PATCH_SHA256")...)"
 }
 
 install_pam_rssh() {
   local mod
-  if mod="$(find_pam_rssh)"; then ok "pam_rssh already installed: $mod"; return 0; fi
+  if mod="$(find_pam_rssh)"; then
+    case "$(rssh_state)" in
+      patched) ok "pam_rssh already installed, with timeouts: $mod"; return 0 ;;
+      stale)   say "  $mod was built with an older timeouts patch: rebuilding" ;;
+      *)
+        # FreeBSD installs the package and cannot patch it: say so, once, and carry on.
+        if [ "$FAMILY" = freebsd ]; then
+          warn "pam_rssh already installed: $mod -- its build has NO timeouts (FreeBSD uses the package)"
+          return 0
+        fi
+        say "  $mod has no timeouts (installed by 1.4 or earlier, or by a package): building the patched one" ;;
+    esac
+  fi
   case "$FAMILY" in
     # Arch too: an AUR helper would install whatever the AUR package says today, with no
     # version or commit pin and no review. The pinned build below is the same everywhere.
     freebsd)
-      pkg_install pam_rssh || die "pkg install pam_rssh failed" ;;
+      pkg_install pam_rssh || die "pkg install pam_rssh failed"
+      warn "pam_rssh from the FreeBSD package has NO timeouts: a peer that stalls after the probe can hold sudo" ;;
     *)
       build_pam_rssh ;;
   esac
@@ -712,7 +811,7 @@ acquire_key() {
   fi
   # Exactly one line of exactly this shape, whatever produced it: this is the content of a
   # root-owned file that decides who may approve sudo.
-  printf '%s\n' "$key" | grep -qxE 'ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABB[A-Za-z0-9+/]{87}= sudostamp' && \
+  printf '%s\n' "$key" | grep -qxE "$KEY_RE" && \
     [ "$(printf '%s\n' "$key" | wc -l | tr -d ' ')" = 1 ] || { bad "not a single SudoStamp key" >&2; return 1; }
   printf '%s\n' "$key"
 }
@@ -934,6 +1033,12 @@ cmd_apply() {
   need_root apply; need_platform; need_phone; need_user
   [ -f "$KEYFILE" ] || die "no pinned key -- run 'stage' first"
   find_pam_rssh >/dev/null || die "pam_rssh is not installed -- run 'stage' first"
+  # An install from 1.4 or earlier has no timeouts: build the patched module now, without pairing again.
+  if [ "$(rssh_state)" != patched ] && [ "$FAMILY" != freebsd ]; then
+    base_deps || die "could not install base dependencies (python3, ssh-keygen, git)"
+    root_tmp >/dev/null
+    install_pam_rssh
+  fi
   install_helpers
   say "=== apply: add the SudoStamp block to $(pam_target) ==="
   do_apply
@@ -947,49 +1052,194 @@ cmd_apply() {
 
 # ------------------------------------------------------------------- rollback
 
+# Take our block out of $1. Dies, having changed nothing, on damaged markers or when nothing
+# that authenticates would be left. Shared by rollback and uninstall: both refuse alike.
+strip_block() {
+  local target="$1" new
+  if grep -qF "$VENDOR_MARK" "$target"; then
+    # We created this override from the vendor file; removing it restores the vendor
+    # stack exactly.
+    rm -f "$target" && ok "removed $target (the vendor file applies again)"
+  else
+    root_tmp >/dev/null
+    new="$ROOT_TMP/rollback"
+    without_block "$target" > "$new" || \
+      die "$target has damaged SudoStamp markers (a BEGIN without its END, or two blocks). Nothing changed; fix it by hand."
+    # The result must still authenticate somehow, or the password would be locked out too.
+    # (macOS sudo_local holds additions only, and may legitimately end up empty.)
+    if [ "$FAMILY" != macos ] && ! grep -qE '^[[:space:]]*-?auth[[:space:]]|^@include[[:space:]]+common-auth' "$new"; then
+      die "removing the block would leave $target with no auth rule at all. Nothing changed."
+    fi
+    write_atomic "$target" < "$new"
+    ok "removed the SudoStamp block from $target"
+  fi
+}
+# An older SudoStamp replaced the whole file. Put back the newest backup WITHOUT pam_rssh:
+# re-applying that old version made a backup of its own previous output each time, so "the
+# latest backup" is usually just another SudoStamp stack.
+restore_legacy() {
+  local target="$1" bak
+  bak="$(clean_backups "$target" | tail -1)"
+  [ -n "$bak" ] || die "no SudoStamp block in $target and no backup without pam_rssh to restore"
+  cp -p "$bak" "$target.sudostamp-new" && mv -f "$target.sudostamp-new" "$target"
+  ok "restored $target from $bak"
+}
+
 cmd_rollback() {
   need_root rollback; need_platform
-  local target bak
+  local target
   target="$(pam_target)"
-  if has_block "$target"; then
-    if grep -qF "$VENDOR_MARK" "$target"; then
-      # We created this override from the vendor file; removing it restores the vendor
-      # stack exactly.
-      rm -f "$target" && ok "removed $target (the vendor file applies again)"
-    else
-      local new; new="$(root_tmp)/rollback"
-      without_block "$target" > "$new" || \
-        die "$target has damaged SudoStamp markers (a BEGIN without its END, or two blocks). Nothing changed; fix it by hand."
-      # The result must still authenticate somehow, or the password would be locked out too.
-      # (macOS sudo_local holds additions only, and may legitimately end up empty.)
-      if [ "$FAMILY" != macos ] && ! grep -qE '^[[:space:]]*-?auth[[:space:]]|^@include[[:space:]]+common-auth' "$new"; then
-        die "removing the block would leave $target with no auth rule at all. Nothing changed."
-      fi
-      write_atomic "$target" < "$new"
-      ok "removed the SudoStamp block from $target"
-    fi
-  else
-    # An older SudoStamp replaced the whole file. Put back the newest backup WITHOUT
-    # pam_rssh: re-applying that old version made a backup of its own previous output each
-    # time, so "the latest backup" is usually just another SudoStamp stack.
-    bak="$(clean_backups "$target" | tail -1)"
-    [ -n "$bak" ] || die "no SudoStamp block in $target and no backup without pam_rssh to restore"
-    cp -p "$bak" "$target.sudostamp-new" && mv -f "$target.sudostamp-new" "$target"
-    ok "restored $target from $bak"
-  fi
+  if has_block "$target"; then strip_block "$target"; else restore_legacy "$target"; fi
   rm -f "$PAM_TEST" "$GATE" "$PROBE"
   tidy_old_backups "$target"
   say "Check the password works:   sudo -k && sudo true"
 }
 
+# ------------------------------------------------------------------ uninstall
+
+# The key files that hold at least one SudoStamp line (any user's: setup may have run for several).
+our_key_files() {
+  local f
+  for f in "$KEYDIR"/*.keys; do
+    [ -f "$f" ] && grep -qxE "$KEY_RE" "$f" && echo "$f"
+  done
+}
+
+# The file that defines sudo's PAM stack, for the sanity check below.
+sudo_stack_file() {
+  local f
+  for f in "$(pam_dir)/sudo" /etc/pam.d/sudo; do [ -f "$f" ] && { echo "$f"; return 0; }; done
+  vendor_pam_file
+}
+
+# After removal, sudo must still have a way in and the way must be the password: the stack has
+# an auth rule, and PAM run on the real `sudo` service refuses an empty password (pam_check.py
+# answers every prompt with an empty string, so only a module that needs no input -- the
+# phone -- could say yes). Anything else means uninstall left sudo in a state to look at before
+# the next `sudo`. (On Fedora/RHEL this counts as one failed login for pam_faillock.)
+pam_sanity() {
+  local f out rc=0
+  f="$(sudo_stack_file)" || { bad "sudo has no PAM stack file at all"; return 1; }
+  if ! grep -qE '^[[:space:]]*-?auth[[:space:]]|^@include[[:space:]]+common-auth|^auth[[:space:]]+include' "$f"; then
+    bad "$f has no auth rule: sudo cannot authenticate anyone"; return 1
+  fi
+  # (A variable, not `grep | grep -q`: under pipefail the early exit of the second can fail the pipe.)
+  out="$(cat "$f" "$(pam_target)" 2>/dev/null | grep -v '^[[:space:]]*#' | grep 'pam_rssh\|sudostamp')" || out=""
+  if [ -n "$out" ]; then
+    bad "SudoStamp lines are still in $f"; return 1
+  fi
+  if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = root ] || ! id "$TARGET_USER" >/dev/null 2>&1; then
+    warn "no user to check sudo's stack against (run via sudo from your account, or set SUDOSTAMP_USER); the file itself looks right"
+    return 0
+  fi
+  out="$(python3 -I "$HERE/pam_check.py" sudo "$TARGET_USER" 2>&1)" || rc=$?
+  case "$rc:$out" in
+    1:*"(7)"|1:*"(11)")
+      ok "sudo's PAM stack runs and refuses an empty password: only the password gets in now" ;;
+    0:*)
+      bad "sudo's stack let an EMPTY password through -- that is not SudoStamp's doing, but look at $f now"; return 1 ;;
+    *)
+      bad "sudo's PAM stack misbehaves: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; return 1 ;;
+  esac
+}
+
+cmd_uninstall() {
+  need_root uninstall; need_platform
+  local target f m mod keyfiles have_block=0 have_foreign=0 any=0 ans others
+  target="$(pam_target)"
+  has_block "$target" && have_block=1
+  has_foreign_rssh "$target" && have_foreign=1
+  keyfiles="$(our_key_files)"
+  m="$(ours_module)" || m=""
+  [ "$have_block" = 1 ] || [ "$have_foreign" = 1 ] || [ -n "$keyfiles" ] || [ -n "$m" ] || \
+    [ -e "$GATE" ] || [ -e "$PROBE" ] || [ -e "$PAM_TEST" ] || [ -d "$(state_dir)" ] && any=1
+  if [ "$any" = 0 ]; then
+    say "=== uninstall ==="
+    ok "SudoStamp is not installed here: nothing to remove, nothing changed"
+    return 0
+  fi
+
+  say "=== uninstall: what SudoStamp installed, and nothing else ==="
+  [ "$have_block" = 1 ] && say "  - the SudoStamp block in $target"
+  [ "$have_foreign" = 1 ] && [ "$have_block" = 0 ] && say "  - the pam_rssh stack an older SudoStamp wrote to $target (its backup is put back)"
+  for f in "$GATE" "$PROBE" "$PAM_TEST"; do [ -e "$f" ] && say "  - $f"; done
+  for f in $keyfiles; do say "  - SudoStamp's key line(s) in $f"; done
+  [ -n "$m" ] && say "  - the pam_rssh module SudoStamp built: $m"
+  [ -d "$(state_dir)" ] && say "  - $(state_dir) (backups of sudo's PAM file, the build record)"
+  if [ -z "$m" ] && mod="$(find_pam_rssh)"; then
+    say "  (kept: $mod -- not built by this installer: a package's, or SudoStamp 1.4's or earlier)"
+  fi
+  if [ "${SUDOSTAMP_YES:-}" != 1 ]; then
+    read -r -p "  Remove these? [yes/no] " ans || ans=""
+    [ "$ans" = yes ] || die "stopped; nothing changed"
+  fi
+
+  # The PAM file FIRST: it is the step that can refuse (damaged markers), and when it does
+  # nothing else has been touched.
+  if [ "$have_block" = 1 ]; then strip_block "$target"
+  elif [ "$have_foreign" = 1 ]; then restore_legacy "$target"; fi
+  for f in "$PAM_TEST" "$GATE" "$PROBE"; do
+    [ -e "$f" ] && rm -f "$f" && ok "removed $f"
+  done
+
+  # A key file that is only ours goes; one that holds other keys loses just our lines.
+  for f in $keyfiles; do
+    others="$(grep -vxE "$KEY_RE" "$f" | grep -c '[^[:space:]]')" || others=0
+    if [ "$others" = 0 ]; then
+      rm -f "$f" && ok "removed $f"
+    else
+      grep -vxE "$KEY_RE" "$f" | write_atomic "$f"
+      ok "removed SudoStamp's key line(s) from $f (kept the $others other line(s))"
+    fi
+    # The attestation record beside it is SudoStamp's alone and describes the key just removed.
+    a="${f%.keys}.attestation"
+    [ -e "$a" ] && rm -f "$a" && ok "removed $a"
+  done
+  # Only if empty: rmdir never takes anything that is not ours with it.
+  rmdir "$KEYDIR" 2>/dev/null && ok "removed the empty $KEYDIR"
+
+  # The module only if the marker says we built it AND it is still what we built. The name and
+  # place are checked too: the marker is root's, but a path read from a file is not removed blind.
+  if [ -n "$m" ]; then
+    case "$(basename "$m"):$(dirname "$m")" in
+      pam_rssh.so:"$MACOS_MODULE_DIR"|pam_rssh.so:"$(module_dir 2>/dev/null)"|pam_rssh_sudostamp.so:"$(module_dir 2>/dev/null)")
+        rm -f "$m" && ok "removed $m (built by SudoStamp)" ;;
+      *) warn "the build record names $m, which is not where this installer puts it: left alone" ;;
+    esac
+  elif [ -f "$(rssh_marker)" ]; then
+    say "  the pam_rssh module named in the build record is gone or was replaced since: not touching it"
+  fi
+  rm -f "$(rssh_marker)"
+  [ "$FAMILY" = macos ] && rmdir "$MACOS_MODULE_DIR" /opt/sudostamp 2>/dev/null
+
+  say
+  if ! pam_sanity; then
+    say "     The backups in $(backup_dir) were kept. Do not log out of your root shell."
+    exit 1
+  fi
+  # Last, and only once the stack is proven: the backups are what would repair it.
+  rm -f "$(backup_dir)"/*.bak-* 2>/dev/null
+  rmdir "$(backup_dir)" "$(state_dir)" 2>/dev/null
+  [ -d "$(state_dir)" ] && warn "$(state_dir) holds files that are not SudoStamp's backups: left in place"
+  ok "SudoStamp is removed. Check:   sudo -k && sudo true   (it asks for your password)"
+}
+
 # --------------------------------------------------------------------- status
+
+rssh_label() {
+  case "$(rssh_state)" in
+    patched) echo "patched (timeouts)" ;;
+    stale)   echo "built by SudoStamp with an older timeouts patch" ;;
+    *)       echo "NOT patched: no timeouts" ;;
+  esac
+}
 
 cmd_status() {
   local target mod
   target="$(pam_target)"
   say "=== status ==="
   say "platform        : $OS ${FAMILY:-unsupported}"
-  if mod="$(find_pam_rssh)"; then say "pam_rssh        : $mod"; else say "pam_rssh        : MISSING"; fi
+  if mod="$(find_pam_rssh)"; then say "pam_rssh        : $mod -- $(rssh_label)"; else say "pam_rssh        : MISSING"; fi
   if [ -f "$KEYFILE" ]; then say "pinned key      : $KEYFILE ($(ls -l "$KEYFILE" | awk '{print $1, $3":"$4}'))"
   else say "pinned key      : absent ($KEYFILE)"; fi
   [ -f "$KEYFILE" ] && say "key attestation : $(attest_line)"
@@ -1007,6 +1257,211 @@ cmd_status() {
   [ -f "$target" ] && { say "--- $target ---"; sed 's/^/  /' "$target"; }
 }
 
+# --------------------------------------------------------------------- doctor
+#
+# READ ONLY, by construction: nothing below writes a file, takes a lock or calls a function that
+# does (no root_tmp, no write_atomic, no package manager). One line per check; every line that
+# is not OK is followed by the command that fixes it. Exit 0 all OK, 1 any FAIL, 2 only WARN.
+
+DOC_FAIL=0
+DOC_WARN=0
+d_ok()   { ok "$*"; }
+d_warn() { warn "$1"; DOC_WARN=$((DOC_WARN + 1)); [ -z "${2:-}" ] || say "       fix: $2"; }
+d_bad()  { bad "$1"; DOC_FAIL=$((DOC_FAIL + 1)); [ -z "${2:-}" ] || say "       fix: $2"; }
+
+# "<uid> <mode>" of $1.
+file_facts() { ls -ldn "$1" 2>/dev/null | awk '{print $3, $1}'; }
+# Owned by root and not writable by group or others: what may be loaded or trusted by root.
+root_safe() {
+  local facts p="$1"
+  [ -d "$p" ] && p="$p/"          # a symlinked directory is judged by what it points at
+  facts="$(file_facts "$p")"
+  [ "${facts%% *}" = 0 ] || return 1
+  case "${facts#* }" in ?????w????*|????????w?*) return 1 ;; esac
+  return 0
+}
+doctor_end() {
+  say
+  if [ "$DOC_FAIL" -gt 0 ]; then
+    say "$DOC_FAIL problem(s), $DOC_WARN warning(s). Nothing was changed: run the fix commands above."
+    exit 1
+  elif [ "$DOC_WARN" -gt 0 ]; then
+    say "$DOC_WARN warning(s), no problems. Nothing was changed."
+    exit 2
+  fi
+  say "All checks passed. Nothing was changed."
+  exit 0
+}
+# Does something answer on $1 (host:port) within 4 seconds?
+phone_reachable() {
+  python3 -I - "$1" <<'PY'
+import socket, sys
+host, port = sys.argv[1].rsplit(":", 1)
+try:
+    socket.create_connection((host.strip("[]"), int(port)), timeout=4).close()
+except Exception:
+    sys.exit(1)
+PY
+}
+# A helper script: present, root-owned, identical to this installer's copy ($2 = its name in tools/).
+doctor_helper() {
+  local path="$1" src="$HERE/$2" fix="$3"
+  if [ ! -f "$path" ]; then
+    d_bad "helper $path is missing: the PAM block calls it" "$fix"
+  elif ! root_safe "$path"; then
+    d_bad "helper $path is not root-owned or is writable by others: root runs it on every sudo" "sudo chown 0:0 $path && sudo chmod 0755 $path"
+  elif [ -f "$src" ] && [ "$(sha256_file "$path")" != "$(sha256_file "$src")" ]; then
+    d_warn "helper $path differs from this installer's copy" "$fix"
+  else
+    d_ok "helper $path: present, root-owned, matches this installer"
+  fi
+}
+
+cmd_doctor() {
+  local target block expected mod st addr="" found newaddr facts user_ok=1 gate_expected=0
+  target="$(pam_target)"
+  say "=== doctor: read-only, changes nothing ==="
+
+  # 1. platform
+  if [ -z "$FAMILY" ]; then
+    d_bad "platform: $OS is not supported (/etc/os-release: ${ids:-none})" "see README.md for the lines to add by hand"
+    doctor_end
+  fi
+  d_ok "platform: $FAMILY"
+  if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = root ] || ! id "$TARGET_USER" >/dev/null 2>&1; then
+    user_ok=0
+    d_warn "user: cannot tell whose key to check" "sudo $PROG doctor   (from your own account), or SUDOSTAMP_USER=<user> $PROG doctor"
+  fi
+
+  # 2. the PAM block
+  if has_block "$target"; then
+    if ! without_block "$target" >/dev/null; then
+      d_bad "PAM block: damaged markers in $target (a BEGIN without its END, or two blocks)" \
+        "edit $target: keep exactly one '# >>> SudoStamp >>>' ... '# <<< SudoStamp <<<' pair, or delete both; backups are in $(backup_dir). Then: sudo $PROG setup"
+    else
+      block="$(awk -v b="$BEGIN_MARK" -v e="$END_MARK" '$0==b{i=1} i{print} $0==e{i=0}' "$target")"
+      addr="$(printf '%s\n' "$block" | sed -n 's/.*ssh_agent_addr=\([^ ]*\).*/\1/p' | head -1)"
+      if [ -z "$addr" ] || ! phone_valid "$addr"; then
+        d_bad "PAM block: no usable phone address in the pam_rssh line" "sudo $PROG apply --phone <phone-ip>:7777"
+        addr=""
+      fi
+      # What THIS installer would write for that phone on this machine.
+      expected="$( (PHONE_ADDR="$addr"; block) 2>/dev/null )" || expected=""
+      if printf '%s\n' "$block" | grep -qF "$OLD_GATE_CONTROL"; then
+        d_warn "PAM block: written by an older version (its gate counts as success)" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+      elif [ -z "$expected" ]; then
+        d_bad "PAM block: present, but pam_rssh is not installed to compare it with" "sudo $PROG stage --phone ${addr:-<phone-ip>:7777}"
+      elif [ "$block" != "$expected" ]; then
+        d_warn "PAM block: differs from what this installer writes (flags, helper paths, module name or local reader changed)" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+      else
+        d_ok "PAM block: present in $target, current, intact"
+      fi
+      if has_foreign_rssh "$target"; then
+        d_warn "PAM: $target also has pam_rssh lines SudoStamp did not write (the phone would be asked twice)" "remove those lines by hand: sudoedit $target"
+      fi
+    fi
+  elif has_foreign_rssh "$target"; then
+    d_bad "PAM block: $target has pam_rssh lines SudoStamp did not write, and no block" "sudo $PROG setup   (migrates an older SudoStamp)"
+  else
+    d_bad "PAM block: not applied: sudo does not ask the phone ($target)" "sudo $PROG setup   (or, if paired already: sudo $PROG apply --phone <phone-ip>:7777)"
+  fi
+  [ -n "$addr" ] || { phone_valid "${PHONE_ADDR:-}" && addr="$PHONE_ADDR"; }
+
+  # 3. the module: present, safe to load, loads, has the timeouts
+  if mod="$(find_pam_rssh)"; then
+    if ! root_safe "$mod" || ! root_safe "$(dirname "$mod")"; then
+      d_bad "pam_rssh: $mod or its directory is not root-owned or is writable by others: root would load whatever is put there (not loaded by doctor)" \
+        "sudo chown 0:0 $mod && sudo chmod 0644 $mod"
+    elif ! st="$(python3 -I -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1]).pam_sm_authenticate' "$mod" 2>&1)"; then
+      d_bad "pam_rssh: $mod does not load or lacks pam_sm_authenticate: $(printf '%s' "$st" | tail -1)" \
+        "sudo rm -f $mod && sudo $PROG stage --phone ${addr:-<phone-ip>:7777}   (rebuilds it)"
+    else
+      case "$(rssh_state)" in
+        patched) d_ok "pam_rssh: patched (timeouts): $mod, loads, exports pam_sm_authenticate" ;;
+        stale)   d_warn "pam_rssh: $mod was built with an older timeouts patch" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}   (rebuilds it)" ;;
+        *)
+          if [ "$FAMILY" = freebsd ]; then
+            d_warn "pam_rssh: $mod loads, but is NOT patched: the FreeBSD package has no timeouts, so a peer that answers the probe and stalls can hold sudo" \
+              "no fix on FreeBSD yet: keep a second root shell open"
+          else
+            d_warn "pam_rssh: $mod loads, but is NOT patched: no timeouts, so a peer that answers the probe and then stalls can hold sudo" \
+              "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}   (builds the patched module; setup and stage do too)"
+          fi ;;
+      esac
+    fi
+  else
+    d_bad "pam_rssh: not installed" "sudo $PROG stage --phone ${addr:-<phone-ip>:7777}"
+  fi
+
+  # 4. helper scripts (Linux-PAM only: OpenPAM cannot skip a line, so it has none)
+  if linux_pam; then
+    doctor_helper "$PROBE" sudostamp-probe.sh "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+    if [ -f "$target" ] && grep -qF "$GATE" "$target"; then gate_expected=1; fi
+    if [ "$gate_expected" = 1 ]; then
+      doctor_helper "$GATE" sudostamp-is-local.sh "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+      d_ok "local fingerprint reader: pam_fprintd is tried first at the desk (not over SSH)"
+    elif has_fprintd; then
+      d_ok "local fingerprint reader: pam_fprintd is installed; the block does not use it (re-run apply to include it)"
+    else
+      d_ok "local fingerprint reader: none (the phone is asked directly)"
+    fi
+  else
+    d_ok "helper scripts: not used on OpenPAM ($FAMILY)"
+  fi
+
+  # 5. the pinned key
+  if [ "$user_ok" = 1 ]; then
+    if [ ! -f "$KEYFILE" ]; then
+      d_bad "pinned key: $KEYFILE does not exist: pam_rssh has nothing to check the phone against" "sudo $PROG setup"
+    elif ! root_safe "$KEYDIR" || ! root_safe "$KEYFILE"; then
+      d_bad "pinned key: $KEYFILE or $KEYDIR is not root-owned or is writable by others: anything running as a user could pin its own key" \
+        "sudo chown 0:0 $KEYDIR $KEYFILE && sudo chmod 0755 $KEYDIR && sudo chmod 0644 $KEYFILE"
+    elif ! grep -qxE "$KEY_RE" "$KEYFILE"; then
+      d_bad "pinned key: $KEYFILE holds no valid ecdsa-sha2-nistp256 SudoStamp key line" "sudo $PROG setup   (pairs again and rewrites it)"
+    else
+      d_ok "pinned key: $KEYFILE: root-owned, mode $(file_facts "$KEYFILE" | cut -d' ' -f2), valid ecdsa-sha2-nistp256 key"
+      if [ "$(grep -cv '^[[:space:]]*$' "$KEYFILE")" != "$(grep -cxE "$KEY_RE" "$KEYFILE")" ]; then
+        d_warn "pinned key: $KEYFILE also holds keys that are not SudoStamp's: each can approve sudo for $TARGET_USER" "review it: sudoedit $KEYFILE"
+      fi
+    fi
+  fi
+
+  # 6. the phone: reachable, and offering THIS user's pinned key (the probe's own logic)
+  if [ "$user_ok" = 0 ]; then
+    :
+  elif [ -z "$addr" ]; then
+    d_warn "phone: no address to check (none in the PAM block, none given)" "sudo $PROG doctor --phone <phone-ip>:7777"
+  elif ! phone_reachable "$addr"; then
+    found="$(python3 -I "$HERE/pair.py" discover --timeout 6 2>/dev/null)" || found=""
+    newaddr="$(printf '%s\n' "$found" | cut -f1 | grep -vxF "$addr" | grep . | head -1)" || newaddr=""
+    if [ -n "$newaddr" ]; then
+      d_bad "phone: nothing answers at $addr within 4 s, but a SudoStamp phone is now at $newaddr (its address changed). Nothing was rewritten." \
+        "sudo $PROG setup --phone $newaddr"
+    elif printf '%s\n' "$found" | cut -f1 | grep -qxF "$addr"; then
+      d_bad "phone: $addr is advertising on the network but does not answer on its port within 4 s" \
+        "open the SudoStamp app once so it restarts its listener, then: sudo $PROG doctor"
+    else
+      d_bad "phone: nothing answers at $addr within 4 s, and none shows up on the network (discovery only sees it while its 'Pair a computer' screen is open)" \
+        "open the app, tap 'Pair a computer', then: sudo $PROG setup"
+    fi
+  elif [ ! -f "$HERE/sudostamp-probe.sh" ]; then
+    d_warn "phone: answers at $addr, but this installer has no probe to check the key with" "re-download the installer"
+  elif PAM_USER="$TARGET_USER" sh "$HERE/sudostamp-probe.sh" "phone=$addr" "keys=$KEYDIR"; then
+    d_ok "phone: $addr answers within 4 s and offers $TARGET_USER's pinned key"
+  else
+    d_bad "phone: $addr answers but does not offer the key pinned for $TARGET_USER (paired with another computer, or the app was reinstalled)" \
+      "sudo $PROG setup --phone $addr"
+  fi
+
+  # 7. things that make sudo skip the phone altogether
+  if sudo_auths_as_root; then
+    d_warn "sudoers: sudo authenticates as ROOT here (targetpw/rootpw): the phone is never asked" \
+      "echo 'Defaults:$TARGET_USER !targetpw, !rootpw, !runaspw' | sudo tee /etc/sudoers.d/50-sudostamp && sudo chmod 0440 /etc/sudoers.d/50-sudostamp && sudo visudo -cf /etc/sudoers.d/50-sudostamp"
+  fi
+  [ -f "$PAM_TEST" ] && d_warn "a scratch PAM service was left behind: $PAM_TEST" "sudo rm -f $PAM_TEST"
+  doctor_end
+}
+
 # Arguments. Preferred over the environment: passing settings via `sudo -E` hands the
 # caller's ENTIRE environment to a root process (APT_CONFIG, for one, survives sudo's
 # filter), and a sudoers env_reset policy may drop them anyway. The SUDOSTAMP_* variables
@@ -1021,7 +1476,7 @@ while [ $# -gt 0 ]; do
     --fingerprint=*) SUDOSTAMP_FINGERPRINT="${1#*=}"; shift ;;
     --allow-rustup) SUDOSTAMP_ALLOW_RUSTUP=1; shift ;;
     --key)          SUDOSTAMP_KEY="${2:-}"; shift 2 ;;
-    --yes)          SUDOSTAMP_YES=1; shift ;;
+    --yes|-y)       SUDOSTAMP_YES=1; shift ;;
     --require-attestation) SUDOSTAMP_REQUIRE_ATTESTATION=1; shift ;;
     --check-revocation)    SUDOSTAMP_CHECK_REVOCATION=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -1035,5 +1490,7 @@ case "$CMD" in
   apply)    cmd_apply ;;
   rollback) cmd_rollback ;;
   status)   cmd_status ;;
-  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes] [--require-attestation] [--check-revocation]"; exit 2 ;;
+  doctor)   cmd_doctor ;;
+  uninstall) cmd_uninstall ;;
+  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status|doctor|uninstall} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes] [--require-attestation] [--check-revocation]"; exit 2 ;;
 esac
