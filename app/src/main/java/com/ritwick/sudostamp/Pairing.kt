@@ -33,6 +33,12 @@ import java.security.MessageDigest
  * sudo's configuration -- a permanent man in the middle. Now the computer refuses unless the
  * address the phone saw itself being dialled on is the address the computer dialled.
  *
+ * After pair-done, while the pairing screen is still open, the computer may ask once more, for
+ * attest-v1: the Keystore's attestation chain for the key just made. This is how the computer
+ * learns the key lives in the phone's secure hardware rather than taking the phone's word for
+ * it (see [attestChallenge] for what ties the chain to THIS pairing). The chain is public data
+ * and nothing is signed; it is served for that one key only, and only then.
+ *
  * One key per computer: a signature made for one computer is useless on another, and the
  * approval screen names the computer that owns the key, so a request relayed from elsewhere
  * cannot borrow a familiar name. Nothing secret is exchanged: K is public and the nonces are
@@ -47,6 +53,10 @@ object Pairing {
     const val EXT_COMMIT = "pair-commit-v2@sudostamp"
     const val EXT_REVEAL = "pair-reveal-v2@sudostamp"
     const val EXT_DONE = "pair-done-v2@sudostamp"
+
+    /** After DONE, while the pairing is still open: the attestation chain of the key just made
+     *  (leaf first), for the computer to check against Google's roots. Not in the sudo path. */
+    const val EXT_ATTEST = "attest-v1@sudostamp"
 
     /** Version 1's first message: recognised only to tell the person their installer is old. */
     const val EXT_COMMIT_V1 = "pair-commit@sudostamp"
@@ -63,9 +73,22 @@ object Pairing {
 
     private val COMMIT_TAG = "sudostamp-pair-commit-v2\u0000".toByteArray(Charsets.US_ASCII)
     private val CODE_TAG = "sudostamp-pair-code-v2\u0000".toByteArray(Charsets.US_ASCII)
+    private val ATTEST_TAG = "sudostamp-attest-challenge-v1\u0000".toByteArray(Charsets.US_ASCII)
 
     fun commitment(keyBlob: ByteArray, phoneNonce: ByteArray, dialled: ByteArray, stable: ByteArray): ByteArray =
         sha256(COMMIT_TAG, keyBlob, phoneNonce, dialled, stable)
+
+    /**
+     * The attestation challenge of one pairing: H(tag || Np || D || S). The Keystore signs the
+     * challenge into the key's attestation certificate, so a chain made for another pairing (a
+     * real phone's, replayed by someone claiming to be it) carries a different challenge and the
+     * computer refuses it. It cannot include the key or the computer's nonce: the key does not
+     * exist yet when the challenge must be given, and Nh arrives after the key is made. Np is
+     * fresh per pairing, which is what makes it single-use; D and S pin it to this phone's
+     * addresses. The computer recomputes it from what the reveal handed over.
+     */
+    fun attestChallenge(phoneNonce: ByteArray, dialled: ByteArray, stable: ByteArray): ByteArray =
+        sha256(ATTEST_TAG, phoneNonce, dialled, stable)
 
     /** The 6-digit code, zero-padded. The first 8 hash bytes as an unsigned number mod 10^6:
      *  the bias from 2^64 not being a multiple of 10^6 is below 10^-13. */

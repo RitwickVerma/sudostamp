@@ -414,14 +414,17 @@ class AgentService : Service() {
                 val label = r.blob()
                 val dialled = Net.endpoint(conn.local, conn.localPort)
                 val stable = Net.endpoint(Net.stable() ?: conn.local, PORT)
-                val c = pairing.commit(client, conn.id, label, dialled, stable) {
+                val c = pairing.commit(client, conn.id, label, dialled, stable) { challenge ->
                     // A new key for this computer alone. Made here, before the commitment,
                     // because the commitment covers it.
                     val id = Keys.newId()
                     try {
-                        val where = Keys.create(Keys.aliasFor(id), allowSoftware = debuggable(this))
+                        val where = Keys.create(Keys.aliasFor(id), allowSoftware = debuggable(this), challenge)
                         Log.i(TAG, "pairing: key $id created in $where")
-                        PairingSession.NewKey(id, Keys.blob(Keys.aliasFor(id))!!)
+                        PairingSession.NewKey(
+                            id, Keys.blob(Keys.aliasFor(id))!!,
+                            PairingSession.Attestation(challenge, Keys.attestationChain(Keys.aliasFor(id))),
+                        )
                     } catch (e: Exception) {
                         Log.w(TAG, "pairing: cannot create a key: ${e.message}")
                         runCatching { Keys.delete(Keys.aliasFor(id)) }
@@ -446,6 +449,12 @@ class AgentService : Service() {
                     Log.i(TAG, "pairing: $client paired as $id (pending its first approval)")
                 }
                 if (id != null) AgentProtocol.success() else AgentProtocol.failure()
+            }
+            Pairing.EXT_ATTEST -> {
+                // Only the key this open pairing just made, to the computer that paired.
+                val a = pairing.attestation(client)
+                Log.i(TAG, if (a != null) "pairing: attestation sent to $client" else "pairing: attestation request from $client refused")
+                if (a != null) AgentProtocol.attestAnswer(a.challenge, a.chain) else AgentProtocol.failure()
             }
             Pairing.EXT_COMMIT_V1 -> {
                 Log.w(TAG, "pairing: $client speaks the pairing protocol of 1.3 or older; refused")

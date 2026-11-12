@@ -92,6 +92,17 @@ object AgentProtocol {
         return o.toByteArray()
     }
 
+    /** An attestation chain is a few KB (3 to 5 certificates). Anything bigger than this is
+     *  refused rather than sent: the answer to a LAN client stays small whatever the Keystore says. */
+    private const val MAX_ATTEST_BYTES = 16 * 1024
+    private const val MAX_ATTEST_CERTS = 8
+
+    /** SUCCESS, the challenge, then each DER certificate, leaf first, as SSH strings (the answer
+     *  to attest-v1); FAILURE for a chain that is empty or too big. */
+    fun attestAnswer(challenge: ByteArray, chain: List<ByteArray>): ByteArray =
+        if (chain.isEmpty() || chain.size > MAX_ATTEST_CERTS || chain.sumOf { it.size } > MAX_ATTEST_BYTES) failure()
+        else success(challenge, *chain.toTypedArray())
+
     /**
      * Why a sign request must be refused without asking the user, or null if it may be put to
      * them. [knownKey]: the key it names belongs to a paired computer. An unknown key is
