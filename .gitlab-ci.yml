@@ -25,6 +25,15 @@ stages:
   - test
   - build
 
+# Branch, tag and schedule pipelines only. Jobs with explicit `rules` (below, and the SAST template)
+# would otherwise also start a merge-request pipeline for every push -- a second full run on the
+# one shared runner, without CI_COMMIT_BRANCH, so `release-check` skipped itself there.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    - when: always
+
 # Static analysis: GitLab's own SAST template (free tier), which runs its Semgrep-based analyzer
 # over the Kotlin, Python and shell here. On the free tier its report is only an artifact and
 # never fails a pipeline, so `sast-gate` below does: any High or Critical finding stops it.
