@@ -1,5 +1,6 @@
 package com.ritwick.sudostamp
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -49,5 +50,19 @@ class LimiterTest {
         l.unapproved("gone", trusted = false)
         l.forget("gone")
         assertNull(l.refusal("gone"))
+    }
+
+    @Test
+    fun `the typed reason says which rule refused`() {
+        l.approved()
+        assertEquals(Refusal.AFTER_APPROVAL, l.check("a"))
+        t += Limiter.QUIET_AFTER_APPROVAL_MS
+        l.unapproved("a", trusted = true)
+        assertEquals(Refusal.COOLDOWN, l.check("a"))
+        assertNull(l.check("b"))
+        repeat(Limiter.GLOBAL_LIMIT) { l.unapproved("h$it", trusted = true) }
+        assertEquals(Refusal.RATE_LIMITED, l.check("b"))
+        // and the text form agrees with the typed one
+        assertEquals(l.check("b") != null, l.refusal("b") != null)
     }
 }

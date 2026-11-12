@@ -2,6 +2,64 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
+## 1.5.0 — unreleased
+
+Includes 1.4.1, which was prepared but never published on its own.
+
+### Phone
+- **Approve from the lock screen.** Tap a request's notification on a locked phone and the
+  approval opens over the lock screen with the fingerprint prompt already up. Only that request:
+  every other screen of the app still needs the phone unlocked, and a launch while locked draws
+  nothing. Every signature still needs your finger.
+- **Request history.** The last 100 requests the phone decided, newest first: approved, denied
+  (in the app or from the notification), timed out, and refused without asking you, with the
+  reason (unknown device, not a sudo challenge, outside your network, too many requests, right
+  after an approval, cooling down). A request you did not make is how you would notice a computer
+  misusing its pairing. Kept only on the phone, never backed up, and clearable.
+- **Away mode and a Quick Settings tile.** Stop listening for an hour, eight hours or until you
+  resume; sudo goes straight to the password meanwhile. Away lasts through a restart of the phone,
+  and the ongoing notification has **Resume**. The tile shows Listening or Away.
+- **Keys can prove where they live.** A key made while pairing carries a hardware attestation for
+  that one pairing, and the phone hands its certificate chain to the computer that just paired,
+  while the pairing screen is still open and to nobody else.
+- Accessibility: the fingerprint mark, the countdown and the result are spoken by TalkBack, the
+  layouts hold at the largest font size, and nothing depends on animation.
+- The signature reader accepts only canonical signatures (hardening; the Keystore never produced
+  anything else).
+- From 1.4.1: a computer that still runs an installer from 1.3 or older gets **Update the computer
+  first** on the phone instead of only "refused".
+
+### Computer
+- **sudo can no longer hang on a phone that goes quiet.** The pam_rssh that setup builds carries a
+  small reviewed patch with network timeouts (connect 5 s, key list 10 s, signature 75 s, above the
+  phone's 60 s window), so after at most 75 s the password prompt comes. The patch is pinned by
+  SHA-256. setup, stage and apply rebuild an older unpatched module; a distribution's own pam_rssh
+  is never overwritten. macOS and FreeBSD are not covered (see SECURITY.md).
+- **Setup checks that the phone's key is in secure hardware**: it verifies the attestation chain
+  against Google's roots (kept in the repository) with Python and `openssl` only, and prints
+  `Key attested: StrongBox`, `Key attested: TEE` or `Key NOT hardware-attested (reason)`. A chain
+  that says software, or belongs to another key or pairing, refuses the pairing. One that cannot be
+  checked only warns, unless `--require-attestation`. `status` shows the result.
+- **`sudostamp doctor`**: read-only, one OK, WARN or FAIL line per check (platform, PAM block,
+  module, helpers, pinned key, phone, address drift) with the exact command that fixes each problem.
+- **`sudostamp uninstall`**: removes everything SudoStamp installed and nothing else, asks first
+  unless `--yes`, and ends by checking that sudo still asks for your password.
+- Discovery no longer stops on one malformed answer from another device on the network.
+
+### Releases
+- Each release carries CycloneDX SBOMs for the APK and the installer, listed in the signed
+  `SHA256SUMS`; `release.sh ship` has CI rebuild the published APK from the tag and fails if the
+  bytes differ.
+
+### Tests
+- Fuzz and property tests for every parser of untrusted bytes (agent frames, signatures,
+  addresses, pairing, mDNS, `--phone`), seeded and replayable; 35 million cases in a long run.
+- Host end to end on every distribution: a phone that stalls the signature (with a control run
+  proving the test fails without the patch), doctor in six states and never writing, uninstall to
+  a byte-identical stack, attestation warnings and `--require-attestation`.
+- Attestation checked against real chains from five phones published by Google, and on an
+  emulator's Keystore end to end.
+
 ## 1.4.1 — 2026-11-12
 
 Keeps every channel in step, after the AUR stayed at 1.3.0 while the app was 1.4.0 and pairing

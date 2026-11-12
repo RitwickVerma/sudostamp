@@ -30,16 +30,27 @@ class Approval(
     /** When the request arrived (epoch ms). */
     val arrivedAt: Long,
 ) {
-    private val outcome = CompletableFuture<ByteArray?>()
+    /** How a request ended, for the history. Resolving is still once: only the first counts. */
+    enum class How { APPROVED, DENIED_IN_APP, DENIED_FROM_NOTIFICATION, TIMED_OUT, CANCELLED }
+
+    private class Result(val signature: ByteArray?, val how: How)
+
+    private val outcome = CompletableFuture<Result>()
 
     /** Delivers [signatureDer]. False if the request was already resolved: the signature
      *  then goes nowhere, and the caller must not claim success. */
-    fun approve(signatureDer: ByteArray): Boolean = outcome.complete(signatureDer)
+    fun approve(signatureDer: ByteArray): Boolean = outcome.complete(Result(signatureDer, How.APPROVED))
 
-    /** Denies. False if the request was already resolved. */
-    fun deny(): Boolean = outcome.complete(null)
+    /** Denies. False if the request was already resolved. [how] says who, for the history. */
+    fun deny(how: How = How.DENIED_IN_APP): Boolean {
+        require(how != How.APPROVED)
+        return outcome.complete(Result(null, how))
+    }
 
     val isResolved: Boolean get() = outcome.isDone
+
+    /** How it ended, or null while it is still waiting. */
+    val resolution: How? get() = outcome.getNow(null)?.how
 
     /**
      * Blocks up to [timeoutMs] for the user. Returns the DER signature, or null for a
@@ -48,14 +59,16 @@ class Approval(
      * race just before is honoured, because its signature is what getNow returns.
      */
     fun await(timeoutMs: Long): ByteArray? {
+        var how = How.TIMED_OUT
         try {
-            return outcome.get(timeoutMs, TimeUnit.MILLISECONDS)
+            return outcome.get(timeoutMs, TimeUnit.MILLISECONDS).signature
         } catch (e: TimeoutException) {
             // fall through: deny, unless the user beat us to it
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
+            how = How.CANCELLED
         }
-        deny()
-        return outcome.getNow(null)
+        deny(how)
+        return outcome.getNow(null)?.signature
     }
 }

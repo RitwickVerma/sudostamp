@@ -3,6 +3,7 @@ package com.ritwick.sudostamp
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.content.ClipData
 import android.content.ClipDescription
@@ -39,6 +40,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.ritwick.sudostamp.Ui.Kind
 import com.ritwick.sudostamp.Ui.Type
+import com.ritwick.sudostamp.HistoryScreen.build as historyBuild
 import com.ritwick.sudostamp.Ui.button
 import com.ritwick.sudostamp.Ui.card
 import com.ritwick.sudostamp.Ui.checkRow
@@ -101,7 +103,7 @@ class MainActivity : Activity() {
         private const val REFUSAL_FLASH_MS = 1_400L
     }
 
-    private enum class Screen { SETUP, APPROVAL, RESULT, PAIRING }
+    private enum class Screen { SETUP, APPROVAL, RESULT, PAIRING, HISTORY, LOCKED }
 
     /** The request the approval screen is showing, so it is drawn once, not on every sync. */
     private var shownRequest = -1L
@@ -118,11 +120,26 @@ class MainActivity : Activity() {
      *  onDestroy disarms. */
     private var backCallback: OnBackInvokedCallback? = null
 
+    /** Back from a screen that has somewhere to go: pairing is cancelled, history closes. */
+    private fun onBackFromSubScreen() {
+        if (screen == Screen.HISTORY) render() else cancelPairing()
+    }
+
+    // Lint wants OnBackPressedDispatcher, which is AndroidX. With enableOnBackInvokedCallback the
+    // platform never calls this on API 33+ (interceptBack's callback does that job); on 30-32,
+    // which have no OnBackInvokedCallback, this IS the back path.
+    @android.annotation.SuppressLint("GestureBackNavigation")
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
+    override fun onBackPressed() {
+        // Below API 33 there is no OnBackInvokedCallback: the platform calls this instead.
+        if (screen == Screen.HISTORY || screen == Screen.PAIRING) onBackFromSubScreen() else super.onBackPressed()
+    }
+
     private fun interceptBack(on: Boolean) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
         val cb = backCallback
         if (on && cb == null) {
-            backCallback = OnBackInvokedCallback { cancelPairing() }.also {
+            backCallback = OnBackInvokedCallback { onBackFromSubScreen() }.also {
                 onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, it)
             }
         } else if (!on && cb != null) {
@@ -142,9 +159,14 @@ class MainActivity : Activity() {
         val address: String,
         val dnd: Dnd,
         val biometric: Int,
+        /** Away mode: when it ends ([Away.NEVER] until resumed), or [Away.OFF] when not away. */
+        val away: Long,
     )
 
     private var screen = Screen.SETUP
+
+    /** The history last drawn, so the list redraws only when an entry arrives. */
+    private var shownHistory: List<HistoryEntry>? = null
 
     /** The setup state last drawn. A toggle in system Settings while we were away (the
      *  notification grant, the battery exemption) or the listener coming up is picked up
@@ -187,21 +209,45 @@ class MainActivity : Activity() {
      *  sync: each check opens a Keystore operation (see [Keys.state]). */
     private var invalidated: Set<String> = emptySet()
 
+    /** The request this activity was opened for from its notification, kept until it resolves
+     *  (unlike [tappedRequest], which is spent when its prompt opens). It is the only thing
+     *  that lets the approval screen show over a lock screen: see [LockScreen]. */
+    private var notifiedRequest = -1L
+
     private fun takeRequest(i: Intent?) {
         val id = i?.getLongExtra(AgentService.EXTRA_REQUEST, -1L) ?: -1L
-        if (id >= 0) tappedRequest = id
+        if (id >= 0) {
+            tappedRequest = id
+            notifiedRequest = id
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         takeRequest(intent)
+        // The request this tap is for, drawn NOW: an instance that was stopped behind the lock
+        // screen still holds whatever it showed last (setup, say), and must never be what the
+        // lock screen reveals when this launch is allowed over it.
+        AgentService.currentRequest()?.takeIf { !it.isResolved && it.id == notifiedRequest }?.let { renderApproval(it) }
+        // A tap on a second request's notification while the app is already up: without a
+        // sync, nothing would notice the new tapped id until some other event arrived.
+        if (resumed) sync()
     }
+
+    private fun deviceLocked(): Boolean = getSystemService(KeyguardManager::class.java).isDeviceLocked
+
+    /** True while this activity is allowed to be drawn over the lock screen (see [show]). */
+    private var overKeyguard = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        AgentService.ensureChannels(this)
-
         takeRequest(intent)
+        // FIRST, before anything can fail: the manifest lets the system start this activity over
+        // the lock screen, so withdraw that unless this launch is a notification tap for a
+        // request that is still waiting. (show() decides again for every screen it draws.)
+        val pending = AgentService.currentRequest()?.takeIf { !it.isResolved && it.id == notifiedRequest }
+        setOverKeyguard(LockScreen.overKeyguard(true, pending?.id ?: -1L, notifiedRequest, pending != null))
+        AgentService.ensureChannels(this)
         // Start the listener as soon as the app opens. A phone-side agent that is not
         // listening is indistinguishable from a broken setup, so never make this a tap.
         Hosts.reconcile(this)
@@ -220,7 +266,10 @@ class MainActivity : Activity() {
         // biometric prompt itself is system UI; this protects what surrounds it. On Android 11,
         // which has no such switch, touches through an overlay are dropped instead (frame()).
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) window.setHideOverlayWindows(true)
-        render()
+        // Opened from a request's notification: draw THAT request now, not setup first. Setup
+        // would clear the over-the-lock-screen permission an instant before the approval needed
+        // it. (The fingerprint prompt itself still waits for onResume, via sync().)
+        if (pending != null) renderApproval(pending) else render()
     }
 
     override fun onStart() {
@@ -234,6 +283,14 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         if (AgentService.onChange === onServiceChange) AgentService.onChange = null
+        // Leaving the screen (Home, Back, screen off) ends any permission to sit over the lock
+        // screen. A showWhenLocked activity that stays on top is shown again over the keyguard
+        // the next time the screen wakes, so also end the task: nothing of ours may be waiting
+        // there, least of all setup.
+        if (overKeyguard && !isChangingConfigurations) {
+            setOverKeyguard(false)
+            if (deviceLocked()) finishAndRemoveTask()
+        }
         // Leaving the pairing screen ends the pairing: an armed pairing nobody is watching is an
         // open door (and the screen stays on while it is up, so this is a real departure).
         if (screen == Screen.PAIRING && !isChangingConfigurations) {
@@ -248,6 +305,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        AwayControl.tick(this)   // a timer that ran out while the app was closed
         invalidated = Hosts.all(this).filter { Keys.state(Keys.aliasFor(it.id)) == Keys.State.INVALIDATED }
             .map { it.id }.toSet()
         // Covers the notification-tap path (the request is already parked in the service)
@@ -309,6 +367,7 @@ class MainActivity : Activity() {
         address = address(),
         dnd = dnd(),
         biometric = biometricStatus(),
+        away = AwayControl.view(this).let { if (it.away) it.until else Away.OFF },
     )
 
     /** BiometricManager's verdict for a strong biometric: enrolled, none enrolled, or no
@@ -402,11 +461,18 @@ class MainActivity : Activity() {
                 ui.removeCallbacksAndMessages(null)
                 renderApproval(p)
             }
+            // The request ended (timed out, denied elsewhere) while the approval was over the
+            // lock screen: there is nothing else to show there, so leave rather than draw setup.
+            p == null && screen == Screen.APPROVAL && overKeyguard -> finishAndRemoveTask()
             p == null && screen == Screen.APPROVAL ->
                 if (AgentService.pairing.armed()) renderPairing() else render()
+            // Unlocked since the blank screen was drawn: draw the real one.
+            screen == Screen.LOCKED && !deviceLocked() -> render()
             screen == Screen.SETUP && shownSetup != setupState() -> render()
             screen == Screen.PAIRING && shownPairing != AgentService.pairing.view() -> renderPairing()
         }
+        // A new history entry arrives while the list is open: redraw it (cheap: at most 100).
+        if (screen == Screen.HISTORY && shownHistory != HistoryStore.get(this).entries()) renderHistory()
     }
 
     override fun onRequestPermissionsResult(
@@ -446,6 +512,10 @@ class MainActivity : Activity() {
                 Gravity.CENTER_HORIZONTAL
             ))
         }
+        // The listener below only runs where the app draws edge to edge (Android 15+); on older
+        // versions the system pads for the bars itself and never calls it, which left the
+        // content flush against the screen edges. These are the margins without any bars.
+        scroll.setPadding(dp(24), dp(20), dp(24), dp(24))
         scroll.setOnApplyWindowInsetsListener { v, insets ->
             val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             v.setPadding(bars.left + dp(24), bars.top + dp(20), bars.right + dp(24), bars.bottom + dp(24))
@@ -454,20 +524,62 @@ class MainActivity : Activity() {
         return scroll
     }
 
-    private fun show(view: View) {
+    private fun setOverKeyguard(on: Boolean) {
+        overKeyguard = on
+        setShowWhenLocked(on)
+        setTurnScreenOn(on)
+    }
+
+    /**
+     * Every screen goes through here, so this is the one place that decides what may be drawn on
+     * a locked phone. [request] is set only by the approval screen.
+     *
+     * WHY the lock screen is no part of the gate: the Keystore key needs a fresh strong
+     * biometric for each signature (setUserAuthenticationParameters(0, STRONG), enforced by
+     * the TEE), so showing the fingerprint prompt over the keyguard lets a finger approve, and
+     * nobody else, exactly as when unlocked. What it must not do is show anything else, so
+     * the flag is on only while a request opened from its own notification is waiting, and
+     * is cleared here before any other screen (setup, computers, history, the result) is
+     * drawn; a locked phone that is not allowed over the keyguard gets a blank screen even if
+     * the flag were somehow still set.
+     */
+    private fun show(view: View, request: Approval? = null) {
+        val over = LockScreen.overKeyguard(
+            request != null, request?.id ?: -1L, notifiedRequest, request?.isResolved == false
+        )
+        // Order matters at the keyguard: withdraw the permission BEFORE the new content is
+        // attached (no frame of it may reach the lock screen), but grant it only AFTER (a
+        // stale screen must never be what an allowed launch reveals).
+        if (!over) setOverKeyguard(false)
+        if (!LockScreen.mayDraw(deviceLocked(), over)) {
+            // Redrawn for real by sync() once the phone is unlocked.
+            shownSetup = null
+            shownPairing = null
+            shownRequest = -1L
+            screen = Screen.LOCKED
+            // Blank, but not silent: TalkBack says why there is nothing here.
+            setContentView(android.view.View(this).apply {
+                setBackgroundColor(Ui.BG)
+                contentDescription = getString(R.string.locked_blank)
+            })
+            return
+        }
         setContentView(view)
         view.requestApplyInsets()
+        if (over) setOverKeyguard(true)
     }
 
     /** The mark, sized for the screen it is on. */
-    private fun mark(sizeDp: Int, top: Int = 0, bottom: Int = 0) =
+    private fun mark(sizeDp: Int, top: Int = 0, bottom: Int = 0, describe: String? = null) =
         FingerprintView(this, Ui.ACCENT).apply {
             layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp)).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
                 topMargin = top
                 bottomMargin = bottom
             }
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            // Decorative on setup and pairing; on the approval screen it carries the countdown.
+            if (describe != null) contentDescription = describe
+            else importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
 
     /** App name and tagline, the small header on setup screens. The system no longer
@@ -483,6 +595,7 @@ class MainActivity : Activity() {
     }
 
     private fun LinearLayout.entrance() {
+        if (!Ui.animationsOn()) return   // already in place: no fade for someone who removed motion
         alpha = 0f
         translationY = dpf(12f)
         animate().alpha(1f).translationY(0f).setDuration(260)
@@ -560,7 +673,9 @@ class MainActivity : Activity() {
 
         // One status, the worst one. "Ready" only when the listener is bound AND a request
         // can actually surface.
+        val away = s.away != Away.OFF
         val st = when {
+            away -> Status(getString(R.string.status_away), Ui.WARN, Ui.WARN_DIM, R.drawable.ic_pause)
             !s.canNotify -> Status(getString(R.string.status_notifications_off), Ui.WARN, Ui.WARN_DIM, R.drawable.ic_warning)
             !s.listening -> Status(getString(R.string.status_starting), Ui.WARN, Ui.WARN_DIM, R.drawable.ic_schedule)
             s.dnd != Dnd.CLEAR -> Status(getString(R.string.status_silenced), Ui.WARN, Ui.WARN_DIM, R.drawable.ic_do_not_disturb_on)
@@ -572,9 +687,26 @@ class MainActivity : Activity() {
         addView(text(getString(R.string.section_phone), Type.OVERLINE, Ui.FAINT), matchWrap(bottom = dp(8)))
         addView(card().apply {
             addView(checkRow(
-                R.drawable.ic_computer, s.listening, getString(R.string.check_listener),
-                if (s.listening) getString(R.string.check_listener_ok, AgentService.PORT)
-                else getString(R.string.check_listener_starting, AgentService.PORT)
+                R.drawable.ic_computer, s.listening && !away, getString(R.string.check_listener),
+                when {
+                    away -> getString(R.string.check_listener_away)
+                    s.listening -> getString(R.string.check_listener_ok, AgentService.PORT)
+                    else -> getString(R.string.check_listener_starting, AgentService.PORT)
+                }
+            ))
+            addView(divider())
+            // Away mode: the one switch that makes sudo ask for the password on purpose.
+            addView(checkRow(
+                R.drawable.ic_pause, !away, getString(R.string.away_title),
+                when {
+                    !away -> getString(R.string.away_detail_off)
+                    s.away == Away.NEVER -> getString(R.string.away_detail_never)
+                    else -> getString(R.string.away_detail_until,
+                        android.text.format.DateFormat.getTimeFormat(this@MainActivity).format(s.away))
+                },
+                if (away) getString(R.string.resume) to { AwayControl.resume(this@MainActivity) }
+                else getString(R.string.action_go_away) to ::chooseAway,
+                actionDescription = getString(if (away) R.string.a11y_resume else R.string.a11y_go_away)
             ))
             addView(divider())
             addView(checkRow(
@@ -618,7 +750,8 @@ class MainActivity : Activity() {
                     else -> getString(R.string.host_pending, date.format(h.pairedAt))
                 }
                 addView(checkRow(R.drawable.ic_computer, !broken && h.confirmed && h.id != Hosts.LEGACY_ID, name, detail,
-                    getString(R.string.action_remove) to { confirmRemove(h) }))
+                    getString(R.string.action_remove) to { confirmRemove(h) },
+                    actionDescription = getString(R.string.a11y_remove, name)))
             }
             addView(divider())
             addView(text(getString(R.string.computers_body), Type.BODY, Ui.MUTED))
@@ -626,7 +759,53 @@ class MainActivity : Activity() {
                 matchWrap(top = dp(16)))
         }, matchWrap())
 
-        addView(button(getString(R.string.reset_key), Kind.GHOST) { confirmReset() }, wrap(top = dp(20)))
+        addView(button(getString(R.string.history_open), Kind.SECONDARY, R.drawable.ic_history) { renderHistory() },
+            matchWrap(top = dp(20)))
+        addView(button(getString(R.string.reset_key), Kind.GHOST) { confirmReset() }, wrap(top = dp(12)))
+    }
+
+    // ---------------------------------------------------------------- history
+
+    private fun renderHistory() {
+        interceptBack(true)
+        screen = Screen.HISTORY
+        shownHistory = HistoryStore.get(this).entries()
+        tick.removeCallbacksAndMessages(null)
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        show(frame(centered = false) {
+            historyBuild(HistoryStore.get(this@MainActivity).entries(), { render() }, ::confirmClearHistory)
+            entrance()
+        })
+    }
+
+    private fun confirmClearHistory() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.history_clear_title)
+            .setMessage(R.string.history_clear_message)
+            .setPositiveButton(R.string.history_clear) { _, _ ->
+                HistoryStore.get(this).clear()
+                renderHistory()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    /** "Go away": ask when to resume. The last choice is pre-selected, and is what the tile
+     *  will use. */
+    private fun chooseAway() {
+        val choices = Away.Choice.entries
+        val labels = arrayOf(
+            getString(R.string.away_choice_1h), getString(R.string.away_choice_8h), getString(R.string.away_choice_never)
+        )
+        AlertDialog.Builder(this)
+            .setTitle(R.string.away_choice_title)
+            .setSingleChoiceItems(labels, choices.indexOf(AwayControl.choice(this))) { d, which ->
+                d.dismiss()
+                AwayControl.enter(this, choices[which])
+                sync()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     // ---------------------------------------------------------------- pairing
@@ -657,7 +836,9 @@ class MainActivity : Activity() {
                 runCatching { Keys.delete(probe) }
             }
         }
-        runCatching { startForegroundService(Intent(this, AgentService::class.java)) }
+        // Pairing needs the port: tapping Pair a computer is a deliberate resume.
+        if (AwayControl.view(this).away) AwayControl.resume(this)
+        else runCatching { startForegroundService(Intent(this, AgentService::class.java)) }
         AgentService.pairing.arm()
         startAdvertising()
         renderPairing()
@@ -816,13 +997,18 @@ class MainActivity : Activity() {
         tick.removeCallbacksAndMessages(null)
         val name = Ui.hostName(this, p.hostId, p.label)
         val left = text("", Type.CODE_SMALL, Ui.MUTED, center = true)
+        val ring = mark(200, top = dp(16), bottom = dp(8), describe = getString(R.string.a11y_approval_mark))
 
         show(frame(centered = true) {
             addView(text(getString(R.string.approval_overline), Type.OVERLINE, Ui.ACCENT, center = true), matchWrap())
-            addView(mark(200, top = dp(16), bottom = dp(8)).apply {
+            addView(ring.apply {
                 countDown(p.arrivedAt, AgentService.APPROVAL_TIMEOUT_MS)
             })
-            addView(text(getString(R.string.approval_title, name), Type.DISPLAY, center = true), matchWrap())
+            // Polite live region: a request arriving is announced once, without cutting off
+            // whatever the screen reader was saying.
+            addView(text(getString(R.string.approval_title, name), Type.DISPLAY, center = true).apply {
+                accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            }, matchWrap())
             addView(left, matchWrap(top = dp(6)))
 
             addView(card().apply {
@@ -857,14 +1043,17 @@ class MainActivity : Activity() {
             }, matchWrap(top = dp(20)))
             addView(button(getString(R.string.deny), Kind.DANGER) { deny(p) }, matchWrap(top = dp(12)))
             entrance()
-        })
+        }, request = p)
 
         // "N s left", once a second, for as long as this request is the one on screen.
         val update = object : Runnable {
             override fun run() {
                 if (screen != Screen.APPROVAL || p.isResolved) return
                 val ms = p.arrivedAt + AgentService.APPROVAL_TIMEOUT_MS - System.currentTimeMillis()
-                left.text = getString(R.string.approval_left, (ms / 1000).coerceAtLeast(0))
+                val secs = (ms / 1000).coerceAtLeast(0)
+                left.text = getString(R.string.approval_left, secs)
+                // The ring's state for a screen reader, in steps: every second would be chatter.
+                if (secs % 10 == 0L || secs <= 5) ring.stateDescription = resources.getQuantityString(R.plurals.a11y_seconds_left, secs.toInt(), secs.toInt())
                 left.setTextColor(if (ms < AgentService.APPROVAL_TIMEOUT_MS / 4) Ui.WARN else Ui.MUTED)
                 tick.postDelayed(this, ms.mod(1000L) + 10)
             }
@@ -906,13 +1095,22 @@ class MainActivity : Activity() {
                     gravity = Gravity.CENTER_HORIZONTAL
                 }
             })
-            addView(text(title, Type.DISPLAY, color, center = true), matchWrap(top = dp(24)))
+            // The mark already says the outcome to a screen reader: do not read it twice.
+            addView(text(title, Type.DISPLAY, color, center = true).apply {
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, matchWrap(top = dp(24)))
             addView(text(detail, Type.BODY, Ui.MUTED, center = true), matchWrap(top = dp(8)))
         })
         window.decorView.performHapticFeedback(
             if (outcome == Outcome.APPROVED) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.REJECT
         )
-        if (outcome == Outcome.APPROVED) {
+        // Said aloud, because a result that only flashes by is gone before a screen reader
+        // has focused anything. (Deprecated in API 36, but still the call that works on every
+        // version we support.)
+        @Suppress("DEPRECATION")
+        window.decorView.announceForAccessibility("$title. $detail")
+        // On a locked phone nothing of ours may stay up (show() drew a blank): leave.
+        if (outcome == Outcome.APPROVED || deviceLocked()) {
             ui.postDelayed({
                 // Nothing pending => this approval is genuinely over, so close. (The check is
                 // belt-and-braces: a new request also cancels this callback outright.)

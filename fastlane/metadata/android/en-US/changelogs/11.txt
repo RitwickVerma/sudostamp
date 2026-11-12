@@ -1,0 +1,1 @@
+Approve from the lock screen: tap the request and touch the sensor. New request history shows every request, including the ones refused without asking you. Away mode and a Quick Settings tile pause listening. Keys now carry hardware attestation, checked by the computer at setup. Better TalkBack support. Old computer installers get a clear update hint.

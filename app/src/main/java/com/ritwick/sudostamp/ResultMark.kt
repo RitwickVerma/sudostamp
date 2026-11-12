@@ -105,8 +105,15 @@ class ResultMark(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        animator.start()
-        pop.start()
+        if (Ui.animationsOn()) {
+            animator.start()
+            pop.start()
+        } else {
+            // Animations removed: show the finished mark, not a blank ring.
+            ringT = 1f
+            markT = 1f
+            scale = 1f
+        }
     }
 
     override fun onDetachedFromWindow() {

@@ -5,7 +5,6 @@ import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
-import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -52,6 +51,22 @@ object Ui {
      *  versions before 1.4, what that key stands for. */
     fun hostName(ctx: Context, hostId: String, label: String): String =
         if (hostId == Hosts.LEGACY_ID) ctx.getString(R.string.host_legacy) else label
+
+    /** False when the user turned animations off (Settings > Accessibility > Remove animations,
+     *  or the animator duration scale at 0). Nothing may then depend on motion to say what is
+     *  happening: the countdown redraws on a timer and the mark is drawn finished. */
+    fun animationsOn(): Boolean = android.animation.ValueAnimator.areAnimatorsEnabled()
+
+    /** TalkBack says "button" for a view whose class says so. A clickable TextView would be
+     *  announced as plain text otherwise. */
+    fun View.asButton() {
+        accessibilityDelegate = object : View.AccessibilityDelegate() {
+            override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                info.className = Button::class.java.name
+            }
+        }
+    }
 
     fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
     fun Context.dpf(v: Float): Float = v * resources.displayMetrics.density
@@ -149,6 +164,18 @@ object Ui {
         contentDescription = label
     }
 
+    /** A small coloured label (no live region: a list of them must not all announce). */
+    fun Context.tag(label: String, color: Int, dim: Int, iconRes: Int): LinearLayout = row().apply {
+        background = rounded(dim, dpf(100f))
+        setPadding(dp(8), dp(4), dp(12), dp(4))
+        addView(icon(iconRes, color, 14))
+        addView(text(label, Type.LABEL, color).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(dp(6), 0, 0, 0)
+        })
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+
     enum class Kind { PRIMARY, SECONDARY, DANGER, GHOST }
 
     /** A real Button (so it is announced as one), restyled: rounded, ripple, 52dp tall. */
@@ -203,6 +230,9 @@ object Ui {
         title: String,
         detail: String,
         action: Pair<String, () -> Unit>? = null,
+        /** What a screen reader says for the action when its visible word alone is ambiguous
+         *  (several rows each with "Remove"). Should start with the visible word. */
+        actionDescription: String? = null,
     ): LinearLayout = row().apply {
         gravity = Gravity.CENTER_VERTICAL
         val tint = if (ok) ACCENT else WARN
@@ -210,15 +240,19 @@ object Ui {
         addView(column(Gravity.START).apply {
             setPadding(dp(14), 0, dp(8), 0)
             addView(text(title, Type.LABEL))
-            addView(text(detail, Type.CAPTION, MUTED).apply {
-                maxLines = 3
-                ellipsize = TextUtils.TruncateAt.END
-            })
+            // Not truncated: at a large font scale a cut-off sentence is a lost sentence.
+            addView(text(detail, Type.CAPTION, MUTED))
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         if (action != null) {
             addView(text(action.first, Type.LABEL, ACCENT).apply {
                 setPadding(dp(12), dp(12), dp(4), dp(12))
+                // The platform's minimum touch target, whatever the font size.
                 minWidth = dp(48)
+                minHeight = dp(48)
+                // Right-aligned in its box, so "Fix" and "Remove" share one right edge.
+                gravity = Gravity.CENTER_VERTICAL or Gravity.END
+                contentDescription = actionDescription ?: action.first
+                asButton()
                 background = RippleDrawable(
                     ColorStateList.valueOf(ACCENT_DIM), null, rounded(-0x1, dpf(12f))
                 )

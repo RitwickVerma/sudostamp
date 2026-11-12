@@ -115,6 +115,14 @@ object AgentProtocol {
         else -> null
     }
 
+    /** The same decision as [refusal], as the typed reason the history records. Kept beside it
+     *  so the two cannot drift (AgentProtocolTest checks they agree). */
+    fun refusalKind(knownKey: Boolean, data: ByteArray): Refusal? = when {
+        !knownKey -> Refusal.UNKNOWN_KEY
+        data.size != CHALLENGE_BYTES -> Refusal.NOT_A_CHALLENGE
+        else -> null
+    }
+
     /** IDENTITIES_ANSWER listing [keyBlobs]: one key per paired computer. pam_rssh uses the
      *  one its computer pinned. */
     fun identitiesAnswer(keyBlobs: List<ByteArray>, comment: String): ByteArray {
