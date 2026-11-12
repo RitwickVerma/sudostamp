@@ -428,7 +428,11 @@ check "setup for doctor" grep -q "Done. Every sudo now asks your phone first" /t
 # Everything doctor must leave alone: contents and metadata.
 snap() {
   cksum "$TARGET" "/etc/authorized_keys/$U.keys" /usr/local/sbin/sudostamp-probe "$MARK" "$MOD" 2>&1
-  ls -la --time-style=full-iso /etc/pam.d /etc/authorized_keys /usr/local/sbin /var/lib/sudostamp "$(dirname "$MOD")" 2>&1
+  # Not the "total" lines: they count allocated blocks, which a filesystem may still change for a
+  # file written before doctor ran (CI's ZFS commits every ~5 s; doctor's no-phone path takes ~10 s).
+  # Every entry's name, owner, mode, size and timestamp still must not move, and a file created and
+  # deleted would show in its directory's timestamp.
+  ls -la --time-style=full-iso /etc/pam.d /etc/authorized_keys /usr/local/sbin /var/lib/sudostamp "$(dirname "$MOD")" 2>&1 | grep -v '^total '
 }
 doc() {   # $1 = log name; sets rc, and fails the run if doctor changed anything
   snap > "/tmp/doctor-$1.before"
