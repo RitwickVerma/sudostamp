@@ -107,13 +107,18 @@ only a request the app makes.
   kill it under extreme memory pressure. If that happens, `sudo` falls back to the
   password — degraded, never unsafe. It restarts on boot and on app update.
 - While a request is pending (at most 60 s) the app holds a partial wake lock, so the
-  timeout is real time on a dozing phone; pam_rssh sets no timeout of its own and would
-  otherwise wait as long as the phone slept. Idle, it holds none.
+  timeout is real time on a dozing phone (the pam_rssh we build also times out, at 75 s, but a
+  suspended phone would otherwise stall it that long). Idle, it holds none.
 - The notification cannot say *which* command is being authorised: pam_rssh sends
   only opaque signing data. We show the computer (by its key) + address + time, which is all
   that is knowable.
-- pam_rssh has no socket timeout. The probe bounds a dead or silent phone at 4 s; something
-  that answers the probe and then stalls pam_rssh can still hold sudo (SECURITY.md).
+- Upstream pam_rssh has no socket timeout. The probe bounds a dead or silent phone at 4 s, and
+  the pam_rssh the installer builds has the timeouts of `tools/patches/pam_rssh-timeouts.patch`
+  (connect 5 s, list 10 s, sign 75 s: it must exceed the app's 60 s `APPROVAL_TIMEOUT_MS`), so a
+  peer that answers the probe and then stalls holds sudo for at most 75 s. That does not hold
+  for a pam_rssh SudoStamp did not build (FreeBSD's port), and macOS and FreeBSD have no probe
+  at all (OpenPAM cannot skip a line). The number is a coupling: change the app's approval window and
+  the patch (and its pinned hash in `install.sh`) together.
 
 ## Pairing, version 2
 

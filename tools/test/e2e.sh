@@ -43,7 +43,8 @@ rm -rf "$W"; cp -a "${SUDOSTAMP_SRC:-/src}" "$W"
 . /etc/os-release
 case " ${ID:-} ${ID_LIKE:-} " in
   *" arch "*)
-    pacman -Sy --noconfirm --needed sudo python python-cryptography procps-ng >/dev/null ;;
+    # -Syu, not -Sy: a synced database over a stale image is a partial upgrade (openssl moves).
+    pacman -Syu --noconfirm --needed sudo python python-cryptography procps-ng >/dev/null ;;
   *" debian "*|*" ubuntu "*)
     apt-get update -q >/dev/null
     DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends sudo python3 python3-cryptography procps passwd >/dev/null ;;
@@ -363,6 +364,173 @@ else
     bash -c "grep -q 'damaged SudoStamp markers' /tmp/rollback-broken.log && [ \"\$(cksum < /tmp/pam.broken)\" = \"\$(cksum < '$TARGET')\" ]"
 fi
 cp /tmp/pam.good "$TARGET"
+
+# ------------------------------------------------- the timeouts patch, doctor, uninstall
+MARK=/var/lib/sudostamp/pam_rssh.built
+PATCH="$W/tools/patches/pam_rssh-timeouts.patch"
+PINNED="$(sed -n 's/^PATCH_SHA256="\(.*\)"$/\1/p' "$I")"
+
+step "12. pam_rssh's timeouts: pinned, recorded, and rebuilt on old installs"
+check "the pinned patch hash is the patch file's" \
+  bash -c "[ \"\$(sha256sum < '$PATCH' | awk '{print \$1}')\" = '$PINNED' ]"
+check "the build is recorded and status says patched" \
+  bash -c "[ -s $MARK ] && bash '$I' status | grep -q 'patched (timeouts)'"
+check "the single-file installer carries the same patch, byte for byte" \
+  bash -c "[ \"\$(sed -n '/^cat > .*patches\\/pam_rssh-timeouts.patch/,/^SUDOSTAMP_BUNDLE_EOF\$/p' '$W/dist/sudostamp-setup.sh' | sed '1d;\$d' | sha256sum | awk '{print \$1}')\" = '$PINNED' ]"
+MOD="$(sed -n 's/^module=//p' $MARK)"
+rm -f "$MARK"                          # what a 1.4 install looks like: a module and no record
+check "status calls an unrecorded module unpatched" bash -c "bash '$I' status | grep -q 'NOT patched'"
+mod_sum="$(cksum < "$MOD")"
+KEYLINE="$(cat "/etc/authorized_keys/$U.keys")"
+
+# A patch that differs from the pinned hash must stop the build before anything is installed.
+rm -rf /w2; cp -a "$W" /w2
+echo "# tampered" >> /w2/tools/patches/pam_rssh-timeouts.patch
+bash /w2/tools/install.sh stage --phone 127.0.0.1:7777 --key "$KEYLINE" > /tmp/stage-tamper.log 2>&1
+check "a patch that does not match its pinned hash is refused" grep -q "does not match its pinned SHA-256" /tmp/stage-tamper.log
+check "and the module and the record are untouched" bash -c "[ ! -e $MARK ] && [ \"\$(cksum < '$MOD')\" = '$mod_sum' ]"
+# A patch with the right hash that does not apply (its context is wrong): same.
+rm -rf /w3; cp -a "$W" /w3
+sed -i 's/^ static NET_RETRY_CNT: u32 = 3;/ static NET_RETRY_CNT: u32 = 9;/' /w3/tools/patches/pam_rssh-timeouts.patch
+BAD_SHA="$(sha256sum < /w3/tools/patches/pam_rssh-timeouts.patch | awk '{print $1}')"
+sed -i "s/^PATCH_SHA256=.*/PATCH_SHA256=\"$BAD_SHA\"/" /w3/tools/install.sh
+bash /w3/tools/install.sh stage --phone 127.0.0.1:7777 --key "$KEYLINE" > /tmp/stage-noapply.log 2>&1
+check "a pinned patch that does not apply is refused" grep -q "does not apply to pam_rssh" /tmp/stage-noapply.log
+check "(and the test patch really differs from the real one)" bash -c "[ '$BAD_SHA' != '$PINNED' ]"
+rm -rf /w2 /w3
+
+# The real one: stage rebuilds the unrecorded module with the timeouts.
+bash "$I" stage --phone 127.0.0.1:7777 --key "$KEYLINE" > /tmp/stage-rebuild.log 2>&1
+check "stage rebuilds a module that has no timeouts record" \
+  bash -c "[ -s $MARK ] && bash '$I' status | grep -q 'patched (timeouts)' && grep -q 'timeouts patch applied' /tmp/stage-rebuild.log"
+
+# The reason for all of it: a phone that answers the probe (so it passes the 4 s check) and
+# then never answers the SIGN_REQUEST. Without a timeout in pam_rssh, sudo waits forever. The
+# module's limit is 75 s (the phone's own approval window is 60 s), so the password must come
+# up after about that long: not at once (the probe did not skip the phone) and not much later.
+pairing_phone 7795
+type_code_from /tmp/p7795.code | bash "$I" setup --phone 127.0.0.1:7795 > /tmp/setup-sstall.log 2>&1
+check "setup for the stall test" grep -q "Done. Every sudo now asks your phone first" /tmp/setup-sstall.log
+echo signstall > /tmp/mode
+t0=$(date +%s)
+check "a phone that stalls the signature: sudo falls back to the password" \
+  timeout 150 bash -c "$(declare -f as_user_sudo); U=$U; as_user_sudo '$PW'"
+el=$(( $(date +%s) - t0 ))
+check "that phone really was asked to sign, and never answered" grep -q "^sign: stalled" /tmp/p7795.log
+check "pam_rssh gave up after its timeout (${el}s: at least 70, under 90)" bash -c "[ $el -ge 70 ] && [ $el -lt 90 ]"
+echo approve > /tmp/mode
+pkill -f -- "--port 7795 " 2>/dev/null; sleep 0.5
+
+step "13. doctor"
+pairing_phone 7801
+type_code_from /tmp/p7801.code | bash "$I" setup --phone 127.0.0.1:7801 > /tmp/setup-doc.log 2>&1
+check "setup for doctor" grep -q "Done. Every sudo now asks your phone first" /tmp/setup-doc.log
+# Everything doctor must leave alone: contents and metadata.
+snap() {
+  cksum "$TARGET" "/etc/authorized_keys/$U.keys" /usr/local/sbin/sudostamp-probe "$MARK" "$MOD" 2>&1
+  ls -la --time-style=full-iso /etc/pam.d /etc/authorized_keys /usr/local/sbin /var/lib/sudostamp "$(dirname "$MOD")" 2>&1
+}
+doc() {   # $1 = log name; sets rc, and fails the run if doctor changed anything
+  local s0; s0="$(snap | cksum)"
+  bash "$I" doctor > "/tmp/doctor-$1.log" 2>&1; rc=$?
+  sed 's/^/    | /' "/tmp/doctor-$1.log"     # what a person would see
+  if [ "$s0" = "$(snap | cksum)" ]; then pass "doctor ($1) changed nothing"; else fail "doctor ($1) changed something"; fi
+}
+doc healthy
+check "doctor on a healthy install exits 0" test "$rc" = 0
+check "and prints no FAIL or WARN" bash -c "! grep -qE 'FAIL|WARN' /tmp/doctor-healthy.log"
+check "and says pam_rssh is patched" grep -q "pam_rssh: patched (timeouts)" /tmp/doctor-healthy.log
+check "and that the phone offers the pinned key" grep -q "offers $U's pinned key" /tmp/doctor-healthy.log
+
+# Something answers at the phone's address, but it is not the paired phone.
+pkill -f -- "--port 7801 " 2>/dev/null; sleep 0.5
+python3 "$W/tools/test/mock_agent.py" --port 7801 --pubkey-out /tmp/doc2.pub --mode-file /tmp/mode > /tmp/doc2.log 2>&1 &
+for _ in $(seq 1 50); do [ -s /tmp/doc2.pub ] && break; sleep 0.1; done
+doc wrongkey
+check "a phone that does not offer the pinned key: exit 1, FAIL, a fix command" \
+  bash -c "[ $rc = 1 ] && grep -q 'FAIL.*does not offer the key pinned' /tmp/doctor-wrongkey.log && grep -q 'fix: sudo .* setup' /tmp/doctor-wrongkey.log"
+
+pkill -f -- "--port 7801 " 2>/dev/null; sleep 0.5
+doc nophone
+check "with the phone stopped: exit 1, FAIL on the phone, a fix command" \
+  bash -c "[ $rc = 1 ] && grep -q 'FAIL.*phone: nothing answers at 127.0.0.1:7801' /tmp/doctor-nophone.log && grep -q 'fix: ' /tmp/doctor-nophone.log"
+
+chmod 0666 "/etc/authorized_keys/$U.keys"
+doc keyperms
+check "a key file anyone can write: exit 1 and FAIL on the pinned key" \
+  bash -c "[ $rc = 1 ] && grep -q 'FAIL.*pinned key' /tmp/doctor-keyperms.log && grep -q 'fix: sudo chown' /tmp/doctor-keyperms.log"
+chmod 0644 "/etc/authorized_keys/$U.keys"
+
+cp "$TARGET" /tmp/pam.doc
+{ head -1 /tmp/pam.doc; echo "$BEGIN_LINE"; tail -n +2 /tmp/pam.doc | grep -vF '# >>> SudoStamp >>>' | grep -vF '# <<< SudoStamp <<<'; } > "$TARGET"
+doc damaged
+check "a damaged block: exit 1 and FAIL on the PAM block" \
+  bash -c "[ $rc = 1 ] && grep -q 'FAIL.*PAM block: damaged markers' /tmp/doctor-damaged.log"
+cp /tmp/pam.doc "$TARGET"
+
+# No record of a timeouts build: a WARN (only), with the command that builds it.
+mv "$MARK" /tmp/marker.hold
+doc unpatched
+mv /tmp/marker.hold "$MARK"
+check "an unpatched module: WARN with a fix" \
+  bash -c "grep -q 'WARN.*NOT patched' /tmp/doctor-unpatched.log && grep -q 'fix: sudo .* apply' /tmp/doctor-unpatched.log"
+check "the single-file installer has doctor too" bash -c "bash '$W/dist/sudostamp-setup.sh' doctor 2>&1 | grep -q '=== doctor'"
+
+step "14. uninstall"
+# A foreign key in the user's file, and a second user's file that is only SudoStamp's.
+echo "$EVIL_PUB" >> "/etc/authorized_keys/$U.keys"
+grep -v evil "/etc/authorized_keys/$U.keys" > /etc/authorized_keys/other.keys
+python3 "$W/tools/test/mock_agent.py" --port 7801 --mode-file /tmp/mode > /tmp/doc3.log 2>&1 &
+sleep 1
+inst_state() { cksum "$TARGET" /etc/authorized_keys/* /usr/local/sbin/sudostamp-probe "$MARK" "$MOD" 2>&1; }
+i0="$(inst_state | cksum)"
+echo no | bash "$I" uninstall > /tmp/uninst-no.log 2>&1; rc=$?
+if [ "$rc" != 0 ] && [ "$i0" = "$(inst_state | cksum)" ]; then pass "uninstall asks first, and 'no' changes nothing"; else fail "uninstall asks first, and 'no' changes nothing"; fi
+# Damaged markers: it must refuse exactly like rollback, before removing anything else.
+cp "$TARGET" /tmp/pam.good
+{ head -1 /tmp/pam.good; echo "$BEGIN_LINE"; tail -n +2 /tmp/pam.good | grep -vF '# >>> SudoStamp >>>' | grep -vF '# <<< SudoStamp <<<'; } > "$TARGET"
+cp "$TARGET" /tmp/pam.broken
+if grep -qF "SudoStamp: copied from the vendor file" /tmp/pam.good; then
+  echo "  (openSUSE: our vendor copy is removed whole, whatever its markers: refusal not applicable)"
+else
+  bash "$I" uninstall --yes > /tmp/uninst-damaged.log 2>&1; rc=$?
+  check "damaged markers: uninstall refuses and removes nothing" \
+    bash -c "[ $rc != 0 ] && grep -q 'damaged SudoStamp markers' /tmp/uninst-damaged.log && [ \"\$(cksum < /tmp/pam.broken)\" = \"\$(cksum < '$TARGET')\" ] && [ -f '$MOD' ] && [ -f /usr/local/sbin/sudostamp-probe ] && [ -f '$MARK' ]"
+fi
+cp /tmp/pam.good "$TARGET"
+calls_before="$(grep -c '^identities:' /tmp/doc3.log)"
+
+bash "$I" uninstall --yes > /tmp/uninst.log 2>&1; rc=$?
+sed 's/^/    | /' /tmp/uninst.log
+check "uninstall --yes succeeds" test "$rc" = 0
+check "the stack is byte for byte what it was before SudoStamp" \
+  bash -c "if [ $had_target = 1 ]; then [ \"\$(cksum < '$before')\" = \"\$(cksum < '$TARGET')\" ]; else [ ! -f '$TARGET' ]; fi"
+check "the helper scripts, the build record and the backups are gone" \
+  bash -c "[ -z \"\$(ls -d /usr/local/sbin/sudostamp-* /var/lib/sudostamp /etc/pam.d/sudostamp-test 2>/dev/null)\" ]"
+check "the module SudoStamp built is gone" bash -c "[ ! -e '$MOD' ]"
+check "a user's key file that was only SudoStamp's is gone" bash -c "[ ! -e /etc/authorized_keys/other.keys ]"
+check "a key file with someone else's key keeps exactly that key" \
+  bash -c "[ \"\$(cat /etc/authorized_keys/$U.keys)\" = '$EVIL_PUB' ]"
+check "nothing else under /etc/authorized_keys" bash -c "[ \"\$(ls /etc/authorized_keys)\" = '$U.keys' ]"
+check "it ended with the PAM sanity check" grep -q "only the password gets in now" /tmp/uninst.log
+check "sudo with the password still works" as_user_sudo "$PW"
+check "sudo without it fails: the phone is not consulted" \
+  bash -c "! su $U -c \"sudo -k; sudo -S -p '' true </dev/null\" >/dev/null 2>&1"
+check "and nothing connected to the phone's address" bash -c "[ \"\$(grep -c '^identities:' /tmp/doc3.log)\" = '$calls_before' ]"
+pkill -f -- "--port 7801 " 2>/dev/null
+rm -f "/etc/authorized_keys/$U.keys"; rmdir /etc/authorized_keys 2>/dev/null
+
+step "14b. uninstall where nothing was installed"
+i0="$( { cksum < /etc/passwd; stack_state; } | cksum)"
+bash "$I" uninstall > /tmp/uninst-none.log 2>&1; rc=$?
+if [ "$rc" = 0 ] && grep -q 'not installed here' /tmp/uninst-none.log && [ "$i0" = "$( { cksum < /etc/passwd; stack_state; } | cksum)" ]; then
+  pass "a clean no-op: exit 0, says so, changes nothing"; else fail "a clean no-op: exit 0, says so, changes nothing"; fi
+# A pam_rssh this installer did not build (a package's) is never removed.
+FAKE="$(dirname "$MOD")/pam_rssh.so"
+cp "$(dirname "$MOD")/pam_unix.so" "$FAKE"
+bash "$I" uninstall --yes > /tmp/uninst-pkg.log 2>&1; rc=$?
+check "a pam_rssh with no SudoStamp build record is left alone" bash -c "[ $rc = 0 ] && [ -f '$FAKE' ]"
+rm -f "$FAKE"
 
 # On failure, the installer's own output: a CI log shows only PASS/FAIL otherwise.
 if [ "$FAIL" -gt 0 ]; then

@@ -12,6 +12,8 @@ the phone exists to avoid, so this never belongs anywhere near a real host:
         approve   sign every request for one of its keys
         deny      refuse to sign
         stall     accept connections and never answer (a device squatting on the address)
+        signstall list the keys as usual, then never answer a SIGN_REQUEST (a peer that passes
+                  the reachability probe and goes quiet: what pam_rssh's timeouts are for)
         foreign   list only a key nobody pinned
 
 After pairing it also answers attest-v1 like the app does (only after pair-done, only for the
@@ -197,13 +199,7 @@ def main():
             return bytes([SUCCESS]) + P.s(challenge) + b"".join(P.s(c) for c in chain)
         return bytes([FAILURE])
 
-    while True:
-        c, _ = srv.accept()
-        if mode() == "stall":
-            # Accept, never answer: the connection is simply left hanging.
-            print("stall: holding a connection", flush=True)
-            threading.Thread(target=lambda x: (time.sleep(600), x.close()), args=(c,), daemon=True).start()
-            continue
+    def serve(c):
         c.settimeout(30)
         try:
             while True:
@@ -221,6 +217,11 @@ def main():
                     dl = struct.unpack(">I", body[o:o + 4])[0]; o += 4
                     data = body[o:o + dl]
                     m = mode()
+                    if m == "signstall":
+                        # Never answer, never close: held until the client gives up.
+                        print("sign: stalled", flush=True)
+                        time.sleep(600)
+                        return
                     # Same policy as the app: one of our keys, a 32-byte challenge, and approval.
                     if kb not in keys or len(data) != 32 or m != "approve":
                         out = bytes([FAILURE])
@@ -240,6 +241,15 @@ def main():
         finally:
             c.close()
 
+    while True:
+        c, _ = srv.accept()
+        if mode() == "stall":
+            # Accept, never answer: the connection is simply left hanging.
+            print("stall: holding a connection", flush=True)
+            threading.Thread(target=lambda x: (time.sleep(600), x.close()), args=(c,), daemon=True).start()
+            continue
+        # One thread per connection: a stalled SIGN_REQUEST must not hold up the next sudo.
+        threading.Thread(target=serve, args=(c,), daemon=True).start()
 
 if __name__ == "__main__":
     main()

@@ -24,7 +24,7 @@ tools/verify.sh                                           # four gates; needs JA
   `ship X.Y.Z` after the release MR is merged: tag, publish, AUR (`scripts/publish-aur.sh`), Play
   (`tools/play_publish.py`), then `scripts/check-channels.sh`. **Merging is the owner's action.**
   CI never signs and never holds a key; the keys are never decrypted outside tmpfs.
-- Host side: `tools/install.sh {setup|stage|test|apply|rollback|status}`, configured by
+- Host side: `tools/install.sh {setup|stage|test|apply|rollback|status|doctor|uninstall}`, configured by
   `--phone <ip>:7777` (or `SUDOSTAMP_PHONE`), run with plain `sudo`, never `sudo -E`. **Never run `apply` or `rollback` unless asked**:
   they replace `/etc/pam.d/sudo`. `stage` and `test` leave it alone.
 
@@ -87,7 +87,7 @@ UI text lives in `res/values/strings.xml`. Screenshots: the BiometricPrompt is a
 `scripts/` also holds `sbom.py` (CycloneDX SBOMs, stdlib), `verify-reproducible.sh` (rebuild a tag, compare with the
 published APK) and `run-ci-job.sh` (play a manual CI job and wait: `ship` uses it for `reproducible`).
 
-`tools/`: `install.sh` (host installer, every platform; `setup` is the one-command path), `pair.py` (pairing + mDNS discovery, used by install.sh), `pam_check.py` (authenticates one PAM
+`tools/`: `install.sh` (host installer, every platform; `setup` is the one-command path; `doctor` is read-only, `uninstall` removes only what it installed), `patches/pam_rssh-timeouts.patch` (applied to the pinned pam_rssh checkout, hash pinned in `install.sh`), `pair.py` (pairing + mDNS discovery, used by install.sh), `pam_check.py` (authenticates one PAM
 service via libpam; replaces pamtester), `sudostamp-is-local.sh` (PAM gate: exit 1 under
 sshd/sshd-session/mosh-server), `sudostamp-probe.sh` (PAM check before pam_rssh: the phone must
 answer with this user's key within 4 s, else skip), device probes, `verify.sh`, `verify_ssh_sig.py`,
@@ -103,7 +103,8 @@ podman run --rm -v "$PWD":/src:ro <image> bash /src/tools/test/e2e.sh   # CI: ho
 Do not edit `e2e.sh` while a run is reading it: bash reads scripts as it goes. Copy the tree to
 a snapshot first if you need to keep working. Runtime state outside the repo: the key in the phone's TEE,
 `/etc/authorized_keys/<user>.keys`, `/etc/pam.d/sudo`, `/usr/local/sbin/sudostamp-{is-local,probe}`,
-`/var/lib/sudostamp/backups/`.
+`/var/lib/sudostamp/backups/`, `/var/lib/sudostamp/pam_rssh.built` (the record of the module this
+installer built: `uninstall` removes only that, `doctor` reads the patch state from it).
 
 ## Conventions
 
@@ -201,3 +202,15 @@ a snapshot first if you need to keep working. Runtime state outside the repo: th
     the AUR PKGBUILD file lists, or pairing silently loses its attestation. Refresh the roots from
     https://developer.android.com/privacy-and-security/security-key-attestation when Google
     announces one (the pins and a test enforce each copy).
+25. The pam_rssh timeouts patch is a pinned artifact: change it and you must change `PATCH_SHA256` in
+    `install.sh` (the e2e checks the two agree, and that a tampered or non-applying patch is refused).
+    Its 75 s sign limit is coupled to `AgentService.APPROVAL_TIMEOUT_MS` (60 s) and must stay above it.
+    pam_rssh retries a failed call 3 times on the same stream: the patch makes a timeout final and puts
+    one deadline over all attempts, or three stalls would triple the wait. The e2e stall test needs
+    ~75 s on purpose; the mock phone is thread-per-connection so a held signature does not block the next sudo.
+26. `doctor` must never write (no `root_tmp`, `write_atomic`, package manager); the e2e compares
+    checksums and listings before and after. `uninstall` runs the PAM step first because that is the one
+    that can refuse (damaged markers), and deletes the backups last, only after the sanity check passes.
+    Use a variable, not `grep | grep -q`, when the first command's output matters under `pipefail`.
+27. Arch: `pacman -Sy` + `-S` on a stale image is a partial upgrade (openssl moves under curl). The e2e
+    uses `-Syu`; refresh a local image with `podman pull archlinux:latest` before trusting a failure.
