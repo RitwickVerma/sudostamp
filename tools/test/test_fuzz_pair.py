@@ -613,7 +613,9 @@ class Fuzz(unittest.TestCase):
             src = f.read()
         m = re.search(r"^need_phone\(\) \{\n.*?^\}\n", src, re.S | re.M)
         self.assertIsNotNone(m, "need_phone() not found in install.sh")
-        script = m.group(0) + (
+        # With the helpers it calls: the check itself lives in phone_valid (doctor uses it too).
+        helpers = "".join(h.group(0) for h in re.finditer(r"^phone_valid\(\) \{\n.*?^\}\n", src, re.S | re.M))
+        script = helpers + m.group(0) + (
             'while IFS= read -r -d "" v; do PHONE_ADDR=$v; ( need_phone ) >/dev/null 2>&1; echo "$?"; done\n')
         data = b"".join(v.encode("utf-8", "surrogateescape") + b"\0" for v in values)
         p = subprocess.run(["bash", "-c", script], input=data, capture_output=True, timeout=600,
