@@ -6,10 +6,12 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
+import android.util.Log
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.ProviderException
 import java.security.SecureRandom
 import java.security.Signature
 import java.security.interfaces.ECPublicKey
@@ -91,12 +93,28 @@ object Keys {
      * the TEE; both enforce biometric-per-use, StrongBox is only a stronger container.
      * Returns which one the key is really in, read back from the key itself. Throws if it is
      * in neither and [allowSoftware] is false.
+     *
+     * [challenge] asks the Keystore for an attestation certificate chain signed by the secure
+     * hardware (see [attestationChain]); without one Android hands back a self-signed
+     * certificate and nothing can be proved. If a device cannot attest, the key is made
+     * without a challenge rather than not at all: it is the same key in the same hardware, the
+     * computer just cannot verify that and says so.
      */
-    fun create(alias: String, allowSoftware: Boolean): String {
+    fun create(alias: String, allowSoftware: Boolean, challenge: ByteArray? = null): String {
         try {
-            generate(alias, strongBox = true)
-        } catch (e: StrongBoxUnavailableException) {
-            generate(alias, strongBox = false)
+            generate(alias, strongBox = true, challenge)
+        } catch (e: ProviderException) {
+            // StrongBoxUnavailableException is one of these. Any other failure is only
+            // survivable when it may be the attestation's (a StrongBox without an attestation
+            // key); a key made with no challenge has no such excuse and fails as it always did.
+            if (e !is StrongBoxUnavailableException && challenge == null) throw e
+            try {
+                generate(alias, strongBox = false, challenge)
+            } catch (e2: ProviderException) {
+                if (challenge == null) throw e2
+                Log.w("SudoStamp", "no attestation possible on this phone: ${e2.message}")
+                generate(alias, strongBox = false, null)
+            }
         }
         val where = container(alias)
         if (where == null && !allowSoftware) {
@@ -106,7 +124,12 @@ object Keys {
         return where ?: "software"
     }
 
-    private fun generate(alias: String, strongBox: Boolean) {
+    /** The attestation chain of [alias], DER, leaf first; empty if there is none. Only a key made
+     *  with a challenge has a chain signed by the hardware's attestation key. */
+    fun attestationChain(alias: String): List<ByteArray> =
+        runCatching { store().getCertificateChain(alias)?.map { it.encoded } }.getOrNull() ?: emptyList()
+
+    private fun generate(alias: String, strongBox: Boolean, challenge: ByteArray?) {
         val g = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, PROVIDER)
         val b = KeyGenParameterSpec.Builder(
             alias,
@@ -123,6 +146,7 @@ object Keys {
             .setRandomizedEncryptionRequired(false)   // signing only
 
         if (strongBox) b.setIsStrongBoxBacked(true)
+        if (challenge != null) b.setAttestationChallenge(challenge)
 
         g.initialize(b.build())
         g.generateKeyPair()

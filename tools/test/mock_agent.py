@@ -14,6 +14,11 @@ the phone exists to avoid, so this never belongs anywhere near a real host:
         stall     accept connections and never answer (a device squatting on the address)
         foreign   list only a key nobody pinned
 
+After pairing it also answers attest-v1 like the app does (only after pair-done, only for the
+session's key), with a SOFTWARE chain under a throwaway root: what an emulator sends. The
+installer must call that "not hardware-attested", warn and go on, or refuse with
+--require-attestation. --attest none answers FAILURE instead, like an app older than 1.5.
+
 What it buys: tools/install.sh, pam_rssh and a real `sudo` can be exercised end to end on every
 supported distribution, in CI, with no phone and no finger.
 
@@ -110,6 +115,7 @@ def main():
     # Man in the middle: present OUR key to whoever pairs with us, while pairing with the real
     # phone at this address (with a nonce of our choosing), so the real phone shows a code.
     ap.add_argument("--mitm-to")
+    ap.add_argument("--attest", choices=("software", "none"), default="software")
     # A relay that passes everything through to this address, changing nothing.
     ap.add_argument("--relay-to")
     a = ap.parse_args()
@@ -127,6 +133,7 @@ def main():
 
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
     import pair as P                                        # the same derivation as the host
+    import attest_fixture as F                              # a software chain under a throwaway root
 
     first, first_blob = new_key()
     keys = {first_blob: first}                              # blob -> private key
@@ -174,11 +181,20 @@ def main():
             if session.get("dead") or session.get("nh") != nh:
                 return bytes([FAILURE])
             keys[session["blob"]] = session["key"]
+            session["done"] = True
             if a.pubkey_out:
                 with open(a.pubkey_out, "w") as f:
                     f.write(line(session["blob"]))
             print("pairing: done", flush=True)
             return bytes([SUCCESS])
+        if name == P.EXT_ATTEST:
+            # Only after done, only for this session's key, like the app.
+            if a.attest == "none" or not session.get("done") or session.get("dead"):
+                return bytes([FAILURE])
+            challenge = P.attest_challenge(session["np"], session["d"], session["st"])
+            chain = F.build_chain(session["key"].public_key(), challenge, 0, 0)
+            print("attest: software chain sent", flush=True)
+            return bytes([SUCCESS]) + P.s(challenge) + b"".join(P.s(c) for c in chain)
         return bytes([FAILURE])
 
     while True:

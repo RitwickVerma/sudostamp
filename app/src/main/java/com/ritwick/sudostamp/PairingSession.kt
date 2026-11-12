@@ -37,8 +37,13 @@ class PairingSession(
     /** What the screen shows. [code] only in CODE; [label]/[client] once a computer asked. */
     data class View(val state: State, val label: String?, val client: String?, val code: String?, val deadline: Long)
 
-    /** A key made for this pairing: its id (see [Hosts]) and SSH public key blob. */
-    data class NewKey(val id: String, val blob: ByteArray)
+    /** The Keystore's attestation of a new key: the challenge it was made with, and the
+     *  certificate chain (DER, leaf first). Held in memory for the one pairing, never stored. */
+    class Attestation(val challenge: ByteArray, val chain: List<ByteArray>)
+
+    /** A key made for this pairing: its id (see [Hosts]), SSH public key blob and, where the
+     *  Keystore could give one, its attestation. */
+    data class NewKey(val id: String, val blob: ByteArray, val attestation: Attestation? = null)
 
     private var state = State.IDLE
     private var deadline = 0L
@@ -99,12 +104,13 @@ class PairingSession(
     /**
      * pair-commit from [fromClient] on connection [connId], dialled at [dialledAt] (see
      * [Pairing.ENDPOINT_BYTES]); [stableAt] is the address the computer should keep.
-     * [makeKey] creates the key for this computer. Returns the commitment, or null to refuse.
+     * [makeKey] creates the key for this computer, given the attestation challenge of this
+     * pairing (see [Pairing.attestChallenge]). Returns the commitment, or null to refuse.
      */
     @Synchronized
     fun commit(
         fromClient: String, connId: Long, rawLabel: ByteArray,
-        dialledAt: ByteArray, stableAt: ByteArray, makeKey: () -> NewKey?,
+        dialledAt: ByteArray, stableAt: ByteArray, makeKey: (challenge: ByteArray) -> NewKey?,
     ): ByteArray? {
         expire()
         when (state) {
@@ -114,8 +120,9 @@ class PairingSession(
             else -> return null
         }
         if (dialledAt.size != Pairing.ENDPOINT_BYTES || stableAt.size != Pairing.ENDPOINT_BYTES) return null
-        val k = makeKey() ?: return null
+        // Np first: the attestation challenge is made from it, and the key must carry the challenge.
         val np = random(Pairing.NONCE_BYTES)
+        val k = makeKey(Pairing.attestChallenge(np, dialledAt, stableAt)) ?: return null
         state = State.COMMITTED
         label = Pairing.cleanLabel(rawLabel)
         client = fromClient
@@ -159,6 +166,19 @@ class PairingSession(
         if (state != State.CODE || fromClient != client || !nh.contentEquals(hostNonce)) return null
         state = State.DONE
         return key!!.id
+    }
+
+    /**
+     * attest-v1: the attestation of the key THIS session made, or null. Served only to the
+     * computer that paired, only after pair-done and only while the arming lasts; once the
+     * screen closes, another computer cancels the pairing or the time is up, the key is gone
+     * from the session and so is this. Never another key's chain, so nothing leaks about them.
+     */
+    @Synchronized
+    fun attestation(fromClient: String): Attestation? {
+        expire()
+        if (state != State.DONE || now() >= deadline || fromClient != client) return null
+        return key?.attestation
     }
 
     /** Throws away an unfinished pairing's key. A finished one stays with the caller. */

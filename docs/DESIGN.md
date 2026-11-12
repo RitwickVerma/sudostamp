@@ -11,6 +11,7 @@ hardware (not by app code).
 | PAM integration on the host | `pam_rssh` (Rust, MIT, maintained) | **NO** |
 | Signature verification | `pam_rssh` | **NO** |
 | Pairing (setup only) | the app's ssh-agent extensions `pair-commit/reveal/done-v2@sudostamp` and `tools/pair.py`: numeric comparison with a commitment, so the computer learns the key the phone made for it and the address to keep. Never on the sudo path: pam_rssh never sends them | setup tooling |
+| Key attestation (setup only) | `attest-v1@sudostamp` returns the Keystore's certificate chain for the key just made; `tools/attest.py` verifies it against Google's roots (embedded, pinned) with the system `openssl`. Never on the sudo path | setup tooling |
 | Host installer | `tools/install.sh`: inserts one marked block into sudo's existing PAM stack (Arch, Debian, Fedora/RHEL, openSUSE; macOS/FreeBSD experimental). Runs at install time only, never at authentication | setup tooling |
 | Reachability check | `tools/sudostamp-probe.sh`, run by `pam_exec` before pam_rssh: skips it unless the phone answers with this user's key within 4 s. Read-only; it can only make sudo fall to the password sooner | small, on the auth path |
 | Fail-closed behaviour | `pam_rssh` (non-zero => PAM falls through) | **NO** |
@@ -79,8 +80,9 @@ only a request the app makes.
 
 - No TLS on the socket — the signature is the security, not the channel. Adding TLS
   would be more custom code for no gain.
-- No attestation / certificate chain. Could be added later to prove the key is
-  TEE-resident; not required for the guarantee, since the key cannot leave.
+- Attestation is checked once, at pairing, and only for the key just made: never on the sudo path,
+  and the phone serves it to nobody else (see *Pairing, version 2*). It proves the key is in the
+  TEE or StrongBox; it is not what enforces the guarantee, the TEE is.
 - One key per paired computer, and a list to remove them; no key rotation, no multi-phone,
   no accounts, no sync.
 - No AndroidX and no third-party runtime dependencies — platform APIs only. (Gradle and AGP
@@ -123,3 +125,15 @@ The computer refuses unless the phone was dialled on the address the computer di
 address is not), and pins the key and the address. The phone records the computer as *new* until
 one of its requests is approved; a second pairing attempt while the screen is open cancels the
 pairing, finished or not. Version 1 (one key for all computers, no address binding) is refused.
+
+Attestation (1.5) rides on the same pairing without changing its messages or vectors. The key is
+made with `setAttestationChallenge(H(tag, Np, D, S))` (the phone's nonce and the two addresses,
+all known before the key exists), so the Keystore signs a chain that names this pairing. After
+`pair-done` the computer sends `attest-v1@sudostamp`; the phone holds the chain only in the
+session, and serves it only to the pairing's own address while the arming lasts. The computer
+recomputes the challenge, verifies the chain to a pinned Google root, and compares the leaf's EC
+point with the SSH key. Outcomes: attested (StrongBox or TEE), not checkable (warn and go on, or
+refuse with `--require-attestation`), or a genuine chain that disagrees (refuse). The result is
+kept in `/etc/authorized_keys/<user>.attestation`, beside the key file because pam_rssh reads
+every line of that one, and shown by `install.sh status`. A phone that cannot attest, or an app
+before 1.5, makes the key without a challenge and the computer says `NOT hardware-attested`.

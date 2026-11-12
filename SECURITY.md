@@ -38,6 +38,21 @@ design, so nobody is locked out by a dead phone.
 The app never verifies anything and holds no secret it could leak: the private keys never leave
 the secure hardware.
 
+## Key attestation (1.5)
+
+While the pairing screen is open and after `pair-done`, the computer that paired may send
+`attest-v1@sudostamp`; the phone answers with the certificate chain Android's Keystore produced
+for that one key (leaf first, DER) and the challenge it was made with. Before `pair-done`, after
+the pairing ends, to any other address, or for any other key, the answer is `SSH2_AGENT_FAILURE`:
+nothing leaks about other keys. The chain is a few KB and the answer is capped. `tools/pair.py`
+verifies it with `tools/attest.py`: the signatures with the system `openssl`, link by link up to
+a pinned root (not `openssl verify`: real Pixel 2 chains carry a `CA:FALSE` certificate that signs
+the leaf and path validation would reject them), the single KeyDescription in the leaf, the
+challenge and the key. The challenge is `SHA-256(tag, Np, D, S)`: the Keystore needs it before the
+key exists, so it cannot cover the key or the computer's nonce, but the key is checked against the
+leaf separately. Roots, with the source and date: `tools/attest.py` (fetched 2026-11-12 from
+developer.android.com/privacy-and-security/security-key-attestation).
+
 ## One key per computer
 
 Since 1.4.0 the phone makes a separate Keystore key for every computer it pairs with. A sign
@@ -57,6 +72,8 @@ flagged on every request; pair those computers again and remove it.
 | Threat | Outcome |
 |---|---|
 | Malware on the phone tries to sign | **Fails.** Each key requires a fresh strong biometric for every use, enforced by the TEE. A key that the Keystore would put in software is refused at creation (release builds). |
+| The key the phone hands over is not really in secure hardware (a software Keystore, an emulator, a modified app or OS) | **Detected at pairing** (new in 1.5). The release app refuses software keys itself, but that is the phone's word. Now the Keystore's attestation chain is checked on the computer, against Google's attestation roots pinned in the repository (`tools/attest.py`): the chain must verify to a pinned root, say TEE or StrongBox, carry this pairing's challenge and be for the very key being pinned. A genuine chain that says software, or is for another key or pairing, **refuses the pairing**. A chain that cannot be checked (no Google root, no `openssl`, an old app) is reported as `NOT hardware-attested` and allowed, unless `--require-attestation`. |
+| A real phone's attestation chain is replayed by something that is not that phone | **Refused.** The chain carries a challenge derived from this pairing's phone nonce and both addresses, and a leaf key that must equal the key being pinned; a chain for another pairing or key fails both. |
 | Someone who knows the phone's PIN enrolls their own finger | **Fails.** Enrollment invalidates every key (`setInvalidatedByBiometricEnrollment(true)`); the app marks those computers and the password path takes over until they are paired again. |
 | A device on the LAN that never paired asks the phone to sign | **Refused without a prompt**: its key is not one the phone made. Payloads other than a 32-byte challenge are refused without a prompt too. |
 | A LAN attacker obtains a signature (the user approved their request) | It is over their own 32 bytes, with the key of the computer they named — and the prompt showed that computer's name. pam_rssh issues a fresh random challenge per attempt, so it cannot be replayed into a sudo; only 32-byte payloads are signed, so it cannot be an SSH login or `SSHSIG` signature either. |
@@ -102,8 +119,17 @@ flagged on every request; pair those computers again and remove it.
   session (tmux, screen) reads as local. Either way a physical finger is still needed, and the gate
   fails open to "local" so it can never lock anyone out. A `pam_fprintd` line you added to the sudo
   stack yourself is not covered by the gate at all.
-- **No key attestation.** The phone does not prove to the computer that a key is hardware-backed; it
-  checks that itself at creation.
+- **Key attestation proves where the key lives, nothing more.** It says the key is in the phone's TEE
+  or StrongBox and was made for this pairing. It does not say the phone is yours, that its operating
+  system is unmodified (the boot state in the chain is not read), or that the key still requires a
+  fingerprint: the last is enforced by the TEE from the moment of creation, and is not checked here.
+  A phone without Google's hardware attestation (an emulator, many custom ROMs, some older phones)
+  cannot be checked and is only warned about, unless you pass `--require-attestation`. The roots
+  are the ones Google publishes, embedded in `tools/attest.py` and pinned by SHA-256; certificate
+  validity dates are not checked (phones sold under the 2016 root, which expired in May 2026, still
+  attest under it). Revocation is checked only with `--check-revocation`, so an offline install
+  cannot learn that Google has since revoked a device's attestation key. Computers paired before 1.5
+  have no attestation.
 - **Tethering is not a LAN.** A computer connected through the phone's own hotspot is not on a
   Wi-Fi or Ethernet network the phone *joined*, so it is refused.
 - **The password still works.** That is the point of the design, and it means SudoStamp adds no
