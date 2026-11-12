@@ -93,6 +93,8 @@ android:
   stage: test
   extends: [.sdk_setup, .not_scheduled]
   script:
+    # Includes the *FuzzTest property tests of the JVM parsers (AgentProtocol, SshSig, Net, Pairing):
+    # seeded, a few seconds. -Dsudostamp.fuzz.iterations=N scales them for a long run.
     - ./gradlew --no-daemon --continue -Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8 testDebugUnitTest lintDebug assembleDebug
     # DEBIAN_FRONTEND=noninteractive keeps debconf from spraying noise into the job log.
     - export DEBIAN_FRONTEND=noninteractive
@@ -129,6 +131,9 @@ hygiene:
     - python3 -m py_compile tools/*.py tools/test/*.py && rm -rf tools/__pycache__ tools/test/__pycache__
     - python3 -I tools/test/test_pair.py && rm -rf tools/test/__pycache__ tools/__pycache__
     - python3 -I tools/test/test_attest.py && rm -rf tools/test/__pycache__ tools/__pycache__
+    # Fuzz and property tests of pair.py's parsers and of install.sh's --phone check: seeded, stdlib
+    # only, about 10 s. SUDOSTAMP_FUZZ_ITERATIONS=2000000 for a long local run.
+    - python3 -I tools/test/test_fuzz_pair.py && rm -rf tools/test/__pycache__ tools/__pycache__
 
 # The host side, end to end, on every supported Linux family: tools/install.sh installs
 # pam_rssh (packaged or built from the pinned commit), pins the key of a mock phone
