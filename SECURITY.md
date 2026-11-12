@@ -219,6 +219,25 @@ documented command does), read `tools/install.sh` first, as with any installer.
   rather than a compromised server), and use it in the build directory only. It asks first.
 - The AUR package (`sudostamp`) depends on the AUR's `pam_rssh`, so on that path you trust that
   package's maintainer instead of the pinned build.
+- **SBOMs.** Every release carries two CycloneDX 1.5 documents, `sudostamp-vX.Y.Z.apk.cdx.json` and
+  `sudostamp-setup.cdx.json`, listed in the signed `SHA256SUMS`. The APK's says what the tests assert:
+  no runtime dependencies, and everything the build used (every Gradle artifact by SHA-256, the Gradle
+  distribution, the Android tools) as `scope: excluded`. The installer's lists pam_rssh at its pinned
+  commit and every crate of that commit's `Cargo.lock`, whose SHA-256 is pinned in `scripts/sbom.py`.
+- **Reproducible, and proved in CI.** The CI job `reproducible` rebuilds each tag with no key, copies the
+  published signature onto the result and fails unless the APK is byte-identical; it also checks that the
+  signed `SHA256SUMS` lists it and that the installer rebuilt from the tag is the one listed
+  (`scripts/verify-reproducible.sh`, `docs/RELEASING.md`). It needs no secret, and `release.sh ship`
+  fails the release if it does not match. It proves the published APK is this source, not that the source
+  is safe.
+- **Parsers of untrusted bytes are fuzzed.** The agent's frame and request readers, the DER signature
+  reader, address and subnet logic and the pairing messages (JVM), and the installer's mDNS, agent-reply
+  and `--phone` parsing (Python) are tested on every push with seeded random and structure-aware damaged
+  input (length lies, pointer loops, truncation, one-byte reads), against independent reference parsers:
+  only the documented errors, no read or allocation beyond the 64 KiB cap, no signature for anything but a
+  paired key and exactly 32 bytes. It found one gap, now closed: the DER reader accepted non-canonical
+  signatures. Another stays open in `tools/pair.py` (a truncated mDNS A record ends discovery; the
+  address can still be typed), pinned by a known-failure test.
 - `tools/test/mock_agent.py` signs with software keys and exists only for automated tests: it binds
   loopback only and its keys are generated per run. It must never stand in for the phone.
 

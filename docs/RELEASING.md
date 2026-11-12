@@ -67,21 +67,66 @@ again.
 | Gate | Where |
 |---|---|
 | secret scan (tree), gitleaks (full history), shellcheck, Python tests | CI `hygiene`, `gitleaks` |
+| fuzz / property tests of every parser of untrusted bytes: agent frames, DER signatures, addresses, pairing (JVM); mDNS, agent replies, pairing against a dishonest phone, `--phone` (Python) | CI `android` (`*FuzzTest`), `hygiene` (`test_fuzz_pair.py`) |
+| SBOM generator: CycloneDX 1.5 shape, "no runtime dependencies", pam_rssh's Cargo.lock still the pinned one | CI `hygiene` (`test_sbom.py`, online) |
 | unit tests + independent signature check, lint, debug build | CI `android` (one Gradle run) |
 | host installer end to end on 7 distributions, including what must fail | CI `host-e2e` |
 | versions, store notes, dated changelog, store listing, signer line in app + README | CI `release-check` (tags and `release/*`) |
 | signed build, certificate == pinned release key, not debuggable, installer signature verifies | `release.sh package` |
+| both SBOMs written, listed in `SHA256SUMS`, valid, and naming the APK and installer beside them | `release.sh package` (`release-check.sh X.Y.Z --dist`) |
 | upload, Release, anonymous download verified | `release.sh publish` |
+| the published APK is exactly what the tag builds (rebuilt unsigned, signature copied on, bytes compared); `SHA256SUMS` signed and listing it; installer and SBOMs match | CI `reproducible`, played by `ship` after publish (`scripts/run-ci-job.sh`) |
 | AUR package builds, pushed, served | `scripts/publish-aur.sh` (from `ship`) |
 | Play bundle + listing | `tools/play_publish.py` (from `ship`) |
 | every channel serves the newest tag | `scripts/check-channels.sh`: end of `ship`, and CI `channels` daily |
+
+### Supply-chain proof: SBOMs and the reproducible build
+
+**SBOMs.** `scripts/sbom.py` (Python standard library) writes two CycloneDX 1.5 JSON documents
+during `package`: `sudostamp-vX.Y.Z.apk.cdx.json` and `sudostamp-setup.cdx.json`. They are in
+`SHA256SUMS`, so the installer signature over it covers them, and `publish` uploads and links them.
+
+- The APK one has the APK (version, SHA-256) as its subject and **no runtime dependencies**: the
+  subject's `dependsOn` is empty and marked complete, and every component listed is `scope: excluded`:
+  the 314 artifacts pinned in `gradle/verification-metadata.xml` (each with its SHA-256), the Gradle
+  distribution, the Android command-line tools, build-tools, platform, and the JDK image CI builds in.
+- The installer one has `sudostamp-setup.sh` as its subject, pam_rssh at the commit `tools/install.sh`
+  pins, and every crate in that commit's `Cargo.lock` (checksums, dependency graph). The Cargo.lock
+  is fetched from the commit's own URL (or `--cargo-lock FILE`) and must have the SHA-256 pinned in
+  `scripts/sbom.py`; a moved file or a bumped commit stops the release until that pin is updated
+  after reviewing the crate changes. CI (`hygiene`) checks the pin against the live URL on every push.
+- Output is deterministic (serial number from the content, timestamp from the commit), so rebuilding
+  gives the same SBOM. `python3 scripts/sbom.py check FILE...` validates the shape.
+
+**Reproducible build, in CI, with no secret.** The `reproducible` job (stage `verify`) runs
+`scripts/verify-reproducible.sh X.Y.Z`: it waits (up to 60 minutes) for the Release to exist, rebuilds
+the tag unsigned, copies the published APK's signature onto the result (`apksigcopier` and click, each pinned by hash
+in `scripts/requirements-reproducible.txt`) and fails unless the bytes are identical. With
+`VERIFY_RELEASE_FILES=1` (set in CI) it also checks that `SHA256SUMS` verifies against the tag's
+`keys/allowed_signers` and lists that APK, that the installer rebuilt from the tag is the listed one,
+and that the SBOMs, when listed, are the signed ones and the APK one names this APK.
+
+Why the job is **manual** on a tag, and not an automatic job that waits for the Release: `ship` waits
+for the tag pipeline to succeed *before* it publishes, and a pipeline holding a job that waits for the
+Release is never "success", so the two would wait on each other. A manual `allow_failure` job leaves
+the pipeline green. `ship` plays it itself after publishing (`scripts/run-ci-job.sh`, with the
+maintainer's `glab`; CI holds nothing) and exits 3 if it fails, naming it; run it by hand from the
+pipeline page (the wait loop covers "not published yet") if you publish another way. The job is also
+available manually on `master` (variable `REPRO_VERSION=X.Y.Z`, else the newest tag), and runs
+by itself in a pipeline schedule that sets `CHECK_REPRODUCIBLE=1`: create a weekly one so that a
+moved builder image or changed dependency, which silently breaks reproducibility, fails loudly. The
+existing daily `channels` schedule is untouched (it runs `channels` only).
+
+By hand: `scripts/verify-reproducible.sh X.Y.Z` (needs JDK 17, the SDK and `pip install apksigcopier`);
+add `VERIFY_RELEASE_FILES=1` for the signed-listing checks.
 
 ## 3. Signing without publishing (dry run)
 
 ```sh
 git worktree add --detach /tmp/rel vX.Y.Z && cp local.properties /tmp/rel/ && cd /tmp/rel
 JAVA_HOME=~/opt/jdk ANDROID_HOME=~/opt/android-sdk scripts/release.sh package X.Y.Z
-# dist/: sudostamp-vX.Y.Z.apk, sudostamp-setup.sh(.sig), SHA256SUMS(.sig), mapping-vX.Y.Z.txt.
+# dist/: sudostamp-vX.Y.Z.apk, sudostamp-setup.sh(.sig), SHA256SUMS(.sig), mapping-vX.Y.Z.txt,
+#        sudostamp-vX.Y.Z.apk.cdx.json, sudostamp-setup.cdx.json (the SBOMs; both in SHA256SUMS).
 cd - && git worktree remove --force /tmp/rel
 ```
 
