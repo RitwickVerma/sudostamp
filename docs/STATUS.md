@@ -5,6 +5,20 @@ hardware.** In daily use on one Arch Linux host with a Samsung Galaxy foldable (
 2026-09. This file is the verification log: what was checked, how, and what it showed. Release
 notes are in [CHANGELOG.md](../CHANGELOG.md).
 
+## 2026-11-12 — 1.5.0: ten upgrades
+
+Built in four parallel branches and integrated by hand; each feature was checked where it runs.
+
+| What | How | Result |
+|---|---|---|
+| stall-proof pam_rssh | e2e: a mock phone answers the probe, then never signs | password after 76 s; with the patch disabled the same test hangs past 150 s (the test can fail) |
+| doctor, uninstall | e2e, Arch, Debian 13, Fedora 45, writable source like CI | 109 passed, 0 failed (Arch, after the rebase on attestation) |
+| attestation | emulator API 34, real Keystore, `pair.py` over adb forward | "Key NOT hardware-attested" (software root, as expected); attest-v1 answered while the pairing screen was open, refused after |
+| attestation chains | `test_attest.py`, real chains from five phones | TEE/StrongBox under the 2016, 2019 and 2026 roots; tampered, reordered, wrong-key and wrong-challenge chains refused |
+| lock-screen approval | emulator: lock, request, tap the notification on the keyguard, finger | approval over the keyguard, SIGNED in 14.9 s, back to the lock screen; Back and a launch while locked draw nothing |
+| history, Away, tile | emulator | approved, denied, timed out and refused entries; tile Listening/Away; port refused while away; Away survives a restart; timer resumes |
+| fuzzing | JVM 2,000,000 iterations per property; Python 2,000,000 | 35.3 M + 7.3 M cases; found a non-canonical DER acceptance (fixed) and a discovery crash on a truncated mDNS record (fixed) |
+
 ## 2026-10-23 — security audit and 1.4.0 (protocol 2)
 
 Four independent AI-run reviews (app, host installer + PAM, release chain, protocol), every
