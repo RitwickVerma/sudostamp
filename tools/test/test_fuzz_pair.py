@@ -48,10 +48,6 @@ ITER = int(os.environ.get("SUDOSTAMP_FUZZ_ITERATIONS") or 20000)
 SEED = int(os.environ.get("SUDOSTAMP_FUZZ_SEED") or 0x5D057A)
 # What pair.parse's callers (via_mdns) tolerate: anything else escaping would end discovery.
 MDNS_OK = (ValueError, struct.error, IndexError)
-# KNOWN BUG, pinned by test_truncated_a_record_is_dropped_not_fatal (expectedFailure): an A record
-# whose rdlen says 4 but whose bytes run out makes socket.inet_ntoa raise OSError, which via_mdns
-# does not catch. The fuzz loops tolerate exactly that message, so any OTHER OSError still fails.
-KNOWN_A_BUG = "packed IP wrong length for inet_ntoa"
 # What cmd_pair and the stable-address probe catch.
 AGENT_OK = (OSError, ValueError)          # ConnectionError is an OSError
 
@@ -228,9 +224,6 @@ class Fuzz(unittest.TestCase):
                     P.parse(msg, ptrs, srvs, addrs, addrs6)
             except MDNS_OK:
                 pass
-            except OSError as e:
-                if KNOWN_A_BUG not in str(e):
-                    raise
             # Whatever was learnt, turning it into answers must not raise, and what reaches the
             # user is display text at a plausible address.
             with deadline():
@@ -247,9 +240,6 @@ class Fuzz(unittest.TestCase):
                     P.parse(rbytes(r, r.randrange(0, 200)), set(), {}, {}, {})
             except MDNS_OK:
                 pass
-            except OSError as e:
-                if KNOWN_A_BUG not in str(e):
-                    raise
         cases("pair/parse-noise", 5, ITER // 2, body)
 
     # -------------------------------------------------------------- discovery loop
@@ -303,20 +293,9 @@ class Fuzz(unittest.TestCase):
             srv = rr(P.qname("Evil." + P.SERVICE), 33, struct.pack(">HHH", 0, 0, 7777) + P.qname("e.local."))
             return header(an=1, ar=2) + ptr + srv + rr(P.qname("e.local."), 1, addr_bytes)
 
-        def parses(msg):
-            """False for the one datagram shape that crashes discovery today (see KNOWN_A_BUG)."""
-            try:
-                P.parse(msg, set(), {}, {}, {})
-            except MDNS_OK:
-                pass
-            except OSError as e:
-                if KNOWN_A_BUG in str(e):
-                    return False
-                raise
-            return True
-
         def body(i, r):
-            noise = [m for m in (damage(r, valid_response(r)) for _ in range(r.randrange(0, 6))) if parses(m)]
+            # Every damaged datagram goes in: none may end discovery any more.
+            noise = [damage(r, valid_response(r)) for _ in range(r.randrange(0, 6))]
             bait = [hostile_answer(r, bytes(a)) for a in ([8, 8, 8, 8], [127, 0, 0, 1], [100, 64, 0, 1], [169, 254, 1, 1], [0, 0, 0, 0])]
             stream = noise + r.sample(bait, r.randrange(0, 3))
             got = self._run_discovery(stream)
@@ -336,24 +315,24 @@ class Fuzz(unittest.TestCase):
             self.assertEqual([a for a, _ in baited], ["192.168.1.50:7777"], baited)
         cases("pair/discovery", 6, max(50, ITER // 40), body)
 
-    @unittest.expectedFailure
     def test_truncated_a_record_is_dropped_not_fatal(self):
-        """KNOWN BUG in tools/pair.py (reported, not edited here): one datagram on 5353 with an A
-        record that claims 4 address bytes and ends early makes socket.inet_ntoa raise OSError;
-        via_mdns catches (ValueError, struct.error, IndexError) only, so `pair.py discover`
-        dies with a traceback instead of ignoring the packet -- any host on the LAN can break
-        discovery (the person can still type the address). Fail-closed, but a one-line fix:
-
-            parse():   elif rtype == 1 and rdlen == 4 and len(rd) == 4:     # and len(rd) == 16 for AAAA
-            or via_mdns():   except (ValueError, struct.error, IndexError, OSError): continue
-
-        When fixed this test passes, expectedFailure then fails: delete the decorator and KNOWN_A_BUG."""
+        """One datagram on 5353 with an A record that claims 4 address bytes and ends early used to
+        make socket.inet_ntoa raise OSError, which via_mdns does not catch: any host on the LAN
+        could end `pair.py discover` with a traceback. parse() now checks the bytes that arrived,
+        not the length the sender claimed. The phone answering after it must still be found."""
         name = P.qname("p.local.")
         bad = header(an=1) + name + struct.pack(">HHIH", 1, 1, 120, 4) + b"\x01\x02"
         ptr = rr(P.qname(P.SERVICE), 12, P.qname("Pixel." + P.SERVICE))
         srv = rr(P.qname("Pixel." + P.SERVICE), 33, struct.pack(">HHH", 0, 0, 7777) + P.qname("p.local."))
         good = header(an=1, ar=2) + ptr + srv + rr(P.qname("p.local."), 1, bytes([192, 168, 1, 50]))
         self.assertEqual([a for a, _ in self._run_discovery([bad, good])], ["192.168.1.50:7777"])
+
+    def test_truncated_aaaa_record_is_dropped_not_fatal(self):
+        """The same lie in an AAAA record (claims 16, carries 5) must not end discovery either."""
+        bad = header(an=1) + P.qname("p.local.") + struct.pack(">HHIH", 28, 1, 120, 16) + b"\xfd\x00\x00\x00\x01"
+        addrs6 = {}
+        P.parse(bad, set(), {}, {}, addrs6)    # raises nothing
+        self.assertEqual(addrs6, {})
 
     def test_cmd_discover_prints_only_plausible_addresses_with_display_names(self):
         def body(i, r):
@@ -518,8 +497,10 @@ class Fuzz(unittest.TestCase):
         def close(self):
             pass
 
-        def ext(self, name, payload):
+        def ext(self, name, payload, limit=4096):
             f = self.fault
+            if name == getattr(P, "EXT_ATTEST", None):
+                return None   # a phone without attest-v1: pairing must still go through, unattested
             if name == P.EXT_COMMIT:
                 if f == "refuse-commit":
                     return None
@@ -559,7 +540,9 @@ class Fuzz(unittest.TestCase):
         P.Agent = phone
         P.read_line = lambda: typed if typed is not None else phone.typed_code()
         out, err = io.StringIO(), io.StringIO()
-        args = type("A", (), {"phone": "192.168.1.50:7777", "label": "host", "addr_out": addr_out})()
+        # Every pair.py option at its default, as argparse would give it; attestation is not required.
+        args = type("A", (), {"phone": "192.168.1.50:7777", "label": "host", "addr_out": addr_out,
+                              "attest_out": None, "require_attestation": False, "check_revocation": False})()
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), deadline(5):
                 P.cmd_pair(args)
@@ -600,7 +583,7 @@ class Fuzz(unittest.TestCase):
 
     def test_cmd_pair_random_phone_answers_never_pin(self):
         class Noise(Fuzz.Phone):
-            def ext(self, name, payload):
+            def ext(self, name, payload, limit=4096):
                 r = self.r
                 k = r.randrange(5)
                 if k == 0:
