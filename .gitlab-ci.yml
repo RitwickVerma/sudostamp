@@ -165,7 +165,10 @@ gitleaks:
   variables:
     GIT_DEPTH: 0
   script:
-    - gitleaks git . --redact --no-banner
+    # HEAD only: `gitleaks git` scans every ref in the checkout, and the runner reuses build
+    # directories, so refs fetched by another branch's job got scanned here too (master pipeline
+    # 3059201575 failed on test fixtures that exist only on upgrade/attestation).
+    - gitleaks git . --redact --no-banner --log-opts=HEAD
 
 # ---------------------------------------------------------------- releases
 # docs/RELEASING.md. CI never signs and never publishes: the release key, the installer key and the
