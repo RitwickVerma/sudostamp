@@ -62,6 +62,9 @@ TARGET_USER="${SUDOSTAMP_USER:-${SUDO_USER:-}}"
 [ -z "$TARGET_USER" ] && [ "$(id -u)" -ne 0 ] && TARGET_USER="$(id -un)"
 KEYDIR="/etc/authorized_keys"
 KEYFILE="${KEYDIR}/${TARGET_USER}.keys"
+# What the phone's hardware attestation said about the pinned key (tools/pair.py --attest-out).
+# Beside the key file, not in it: pam_rssh reads every line of the key file.
+ATTESTFILE="${KEYDIR}/${TARGET_USER}.attestation"
 GATE="/usr/local/sbin/sudostamp-is-local"
 PROBE="/usr/local/sbin/sudostamp-probe"
 # The gate's control flags. NOT `[success=ok default=1]`: in Linux-PAM `ok` makes a
@@ -701,9 +704,11 @@ acquire_key() {
     fp="$(printf '%s\n' "$key" | ssh-keygen -lf - | awk '{print $2}')"
     [ "$fp" = "$SUDOSTAMP_FINGERPRINT" ] || { bad "fingerprint mismatch: the phone's key is $fp" >&2; return 1; }
   else
-    local addr_file; addr_file="$(root_tmp)/phone-addr"
+    local addr_file extra=(); addr_file="$(root_tmp)/phone-addr"
+    [ -z "${SUDOSTAMP_REQUIRE_ATTESTATION:-}" ] || extra+=(--require-attestation)
+    [ -z "${SUDOSTAMP_CHECK_REVOCATION:-}" ] || extra+=(--check-revocation)
     key="$(python3 -I "$HERE/pair.py" pair --phone "$PHONE_ADDR" --label "$(hostname 2>/dev/null || uname -n)" \
-             --addr-out "$addr_file")" || return 1
+             --addr-out "$addr_file" --attest-out "$(root_tmp)/attest" ${extra[@]+"${extra[@]}"})" || return 1
   fi
   # Exactly one line of exactly this shape, whatever produced it: this is the content of a
   # root-owned file that decides who may approve sudo.
@@ -729,6 +734,20 @@ pin_key() {
   mkdir -p "$KEYDIR" && chown 0:0 "$KEYDIR" && chmod 0755 "$KEYDIR"
   printf '%s\n' "$1" | write_atomic "$KEYFILE"
   ok "pinned $(printf '%s\n' "$1" | ssh-keygen -lf - | awk '{print $2}') in $KEYFILE"
+  # A key pinned any other way (--key, --fingerprint) has no attestation; it must not keep the
+  # line of the key it replaced.
+  if [ -s "${ROOT_TMP:-/nonexistent}/attest" ]; then write_atomic "$ATTESTFILE" < "$ROOT_TMP/attest"
+  else rm -f "$ATTESTFILE"; fi
+}
+
+# The pinned key's hardware attestation, as recorded when it was paired: "<fingerprint> TAB
+# <sentence>". Shown only if it is about the key that is pinned now.
+attest_line() {
+  local fp rec
+  fp="$(ssh-keygen -lf "$KEYFILE" 2>/dev/null | awk 'NR==1 {print $2}')"
+  rec="$(head -1 "$ATTESTFILE" 2>/dev/null | tr -cd '[:print:]\t')"
+  if [ -n "$fp" ] && [ "${rec%%$'\t'*}" = "$fp" ]; then echo "${rec#*$'\t'}"
+  else echo "not attested (paired before 1.5, or pinned without the pairing code)"; fi
 }
 
 # Find the phone on the LAN (it advertises only while its pairing screen is open), or ask.
@@ -973,6 +992,7 @@ cmd_status() {
   if mod="$(find_pam_rssh)"; then say "pam_rssh        : $mod"; else say "pam_rssh        : MISSING"; fi
   if [ -f "$KEYFILE" ]; then say "pinned key      : $KEYFILE ($(ls -l "$KEYFILE" | awk '{print $1, $3":"$4}'))"
   else say "pinned key      : absent ($KEYFILE)"; fi
+  [ -f "$KEYFILE" ] && say "key attestation : $(attest_line)"
   say "local reader    : $(has_fprintd && echo "pam_fprintd (gate: $GATE)" || echo none)"
   say "probe           : $([ -x "$PROBE" ] && echo "$PROBE" || echo "absent$(linux_pam || echo ' (not used on OpenPAM)')")"
   if has_block "$target" && grep -qF "$OLD_GATE_CONTROL" "$target"; then
@@ -1002,6 +1022,8 @@ while [ $# -gt 0 ]; do
     --allow-rustup) SUDOSTAMP_ALLOW_RUSTUP=1; shift ;;
     --key)          SUDOSTAMP_KEY="${2:-}"; shift 2 ;;
     --yes)          SUDOSTAMP_YES=1; shift ;;
+    --require-attestation) SUDOSTAMP_REQUIRE_ATTESTATION=1; shift ;;
+    --check-revocation)    SUDOSTAMP_CHECK_REVOCATION=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -1013,5 +1035,5 @@ case "$CMD" in
   apply)    cmd_apply ;;
   rollback) cmd_rollback ;;
   status)   cmd_status ;;
-  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes]"; exit 2 ;;
+  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes] [--require-attestation] [--check-revocation]"; exit 2 ;;
 esac
