@@ -224,8 +224,11 @@ sast-gate:
       sys.exit(1 if bad else 0)
       PY
 
-# GitLab's SAST template job: not on schedules either (its own rules are replaced here).
+# GitLab's SAST template job: not on schedules either (its own rules are replaced here). No cache:
+# it inherited the top-level Gradle/SDK cache and saved an empty archive under the same key, which
+# can overwrite the 1.5 GB cache `android` just saved (it showed as `Failed to extract cache`).
 semgrep-sast:
+  cache: []
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
