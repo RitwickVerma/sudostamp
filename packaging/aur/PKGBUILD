@@ -21,6 +21,8 @@ package() {
   for f in install.sh pair.py attest.py pam_check.py sudostamp-is-local.sh sudostamp-probe.sh; do
     install -Dm755 "tools/$f" "$pkgdir/usr/lib/$pkgname/$f"
   done
+  # Where install.sh looks for it (patches/ beside itself): the pinned pam_rssh timeouts.
+  install -Dm644 tools/patches/pam_rssh-timeouts.patch "$pkgdir/usr/lib/$pkgname/patches/pam_rssh-timeouts.patch"
   install -Dm755 /dev/stdin "$pkgdir/usr/bin/$pkgname" <<'SH'
 #!/bin/sh
 SUDOSTAMP_PROG=sudostamp exec /usr/lib/sudostamp/install.sh "$@"
