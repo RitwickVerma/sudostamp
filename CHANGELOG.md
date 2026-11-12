@@ -2,7 +2,7 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
-## 1.5.0 — unreleased
+## 1.5.0 — 2026-11-12
 
 Includes 1.4.1, which was prepared but never published on its own.
 
