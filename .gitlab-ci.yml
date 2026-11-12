@@ -166,7 +166,10 @@ gitleaks:
   variables:
     GIT_DEPTH: 0
   script:
-    - gitleaks git . --redact --no-banner
+    # HEAD only: `gitleaks git` scans every ref in the checkout, and the runner reuses build
+    # directories, so refs fetched by another branch's job got scanned here too (master pipeline
+    # 3059201575 failed on test fixtures that exist only on upgrade/attestation).
+    - gitleaks git . --redact --no-banner --log-opts=HEAD
 
 # ---------------------------------------------------------------- releases
 # docs/RELEASING.md. CI never signs and never publishes: the release key, the installer key and the
@@ -222,8 +225,11 @@ sast-gate:
       sys.exit(1 if bad else 0)
       PY
 
-# GitLab's SAST template job: not on schedules either (its own rules are replaced here).
+# GitLab's SAST template job: not on schedules either (its own rules are replaced here). No cache:
+# it inherited the top-level Gradle/SDK cache and saved an empty archive under the same key, which
+# can overwrite the 1.5 GB cache `android` just saved (it showed as `Failed to extract cache`).
 semgrep-sast:
+  cache: []
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
