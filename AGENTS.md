@@ -31,7 +31,7 @@ tools/verify.sh                                           # four gates; needs JA
 ## Test
 
 ```sh
-./gradlew testDebugUnitTest                          # 98 JVM tests (incl. fuzz), no emulator, no mocks
+./gradlew testDebugUnitTest                          # 97 JVM tests (incl. fuzz), no emulator, no mocks
 python3 tools/verify_ssh_sig.py app/build/sshcheck   # AFTER the unit tests
 ./gradlew lintDebug
 python3 tools/check-secrets.py --all

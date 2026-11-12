@@ -578,7 +578,8 @@ class Fuzz(unittest.TestCase):
             self.assertIsNone(code, err)
             self.assertEqual(out.count("\n"), 1)
             self.assertTrue(out.startswith("ecdsa-sha2-nistp256 "), out)
-            self.assertEqual(open(f).read(), "192.168.1.50:7777\n")
+            with open(f) as fh:
+                self.assertEqual(fh.read(), "192.168.1.50:7777\n")
 
         faults = ["refuse-commit", "bad-commitment", "short-commit", "refuse-reveal", "flip-key", "flip-np", "flip-dialled",
                   "flip-stable", "short-nonce", "relay", "truncated-reveal", "refuse-done"]
@@ -625,7 +626,8 @@ class Fuzz(unittest.TestCase):
     def need_phone_codes(self, values):
         """need_phone's exit status for each value: the function is cut out of install.sh and run in
         a subshell (no root, no side effect), exactly as the installer calls it."""
-        src = open(INSTALL).read()
+        with open(INSTALL) as f:
+            src = f.read()
         m = re.search(r"^need_phone\(\) \{\n.*?^\}\n", src, re.S | re.M)
         self.assertIsNotNone(m, "need_phone() not found in install.sh")
         script = m.group(0) + (
