@@ -431,10 +431,17 @@ snap() {
   ls -la --time-style=full-iso /etc/pam.d /etc/authorized_keys /usr/local/sbin /var/lib/sudostamp "$(dirname "$MOD")" 2>&1
 }
 doc() {   # $1 = log name; sets rc, and fails the run if doctor changed anything
-  local s0; s0="$(snap | cksum)"
+  snap > "/tmp/doctor-$1.before"
   bash "$I" doctor > "/tmp/doctor-$1.log" 2>&1; rc=$?
   sed 's/^/    | /' "/tmp/doctor-$1.log"     # what a person would see
-  if [ "$s0" = "$(snap | cksum)" ]; then pass "doctor ($1) changed nothing"; else fail "doctor ($1) changed something"; fi
+  snap > "/tmp/doctor-$1.after"
+  if cmp -s "/tmp/doctor-$1.before" "/tmp/doctor-$1.after"; then pass "doctor ($1) changed nothing"
+  else
+    fail "doctor ($1) changed something"
+    # Say WHAT, or the next person reruns blind: lines only in before (-) or only in after (+).
+    grep -vxFf "/tmp/doctor-$1.after" "/tmp/doctor-$1.before" | sed 's/^/    - /'
+    grep -vxFf "/tmp/doctor-$1.before" "/tmp/doctor-$1.after" | sed 's/^/    + /'
+  fi
 }
 doc healthy
 check "doctor on a healthy install exits 0" test "$rc" = 0
