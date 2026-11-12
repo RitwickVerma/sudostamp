@@ -55,13 +55,20 @@ cache:
     - .gradle/caches/modules-2/
     - android-sdk/
 
-.sdk_setup: &sdk_setup
+.sdk_setup:
   before_script:
     - bash scripts/ci-setup-sdk.sh
 
+# Pipeline schedules run only `channels` (at the end); every other job is for pushes and tags.
+.not_scheduled:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - when: on_success
+
 unit-test:
   stage: test
-  <<: *sdk_setup
+  extends: [.sdk_setup, .not_scheduled]
   script:
     - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 testDebugUnitTest
     # The unit test `emit artifacts for external verification` leaves app/build/sshcheck/
@@ -85,6 +92,7 @@ unit-test:
 # as root on the host pass shellcheck, and the Python tools at least compile.
 hygiene:
   stage: test
+  extends: .not_scheduled
   image: debian:stable-slim
   cache: []
   script:
@@ -109,6 +117,7 @@ hygiene:
 # which is what the test needs: it rewrites /etc/pam.d/sudo.
 host-e2e:
   stage: test
+  extends: .not_scheduled
   image: $IMAGE
   cache: []
   before_script: []
@@ -128,6 +137,7 @@ host-e2e:
 # Secrets in any commit ever pushed, not just the current tree (check-secrets.py scans the tree).
 gitleaks:
   stage: test
+  extends: .not_scheduled
   image:
     name: docker.io/zricethezav/gitleaks@sha256:cdbb7c955abce02001a9f6c9f602fb195b7fadc1e812065883f695d1eeaba854   # v8.28.0
     entrypoint: [""]
@@ -139,7 +149,7 @@ gitleaks:
 
 lint:
   stage: test
-  <<: *sdk_setup
+  extends: [.sdk_setup, .not_scheduled]
   script:
     - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 lintDebug
   artifacts:
@@ -150,7 +160,7 @@ lint:
 
 assemble-debug:
   stage: build
-  <<: *sdk_setup
+  extends: [.sdk_setup, .not_scheduled]
   script:
     - ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8 assembleDebug
   artifacts:
@@ -159,15 +169,11 @@ assemble-debug:
     expire_in: 1 week
 
 # ---------------------------------------------------------------- releases
-# docs/RELEASING.md. A release is: scripts/release.sh prepare X.Y.Z (release branch + merge request),
-# the owner merges it and pushes tag vX.Y.Z on the merge commit. The tag pipeline then runs every
-# check above plus `release-check`, and waits: `package` is MANUAL, so the signing key is used only
-# when a person clicks it. `package` signs (key from the SOPS vault, opened by a protected File
-# variable only v* tags receive), verifies the certificate, and uploads the APK, the single-file
-# host installer, mapping.txt and SHA256SUMS to the generic package registry (permanent); then
-# `publish-release` creates the GitLab Release linking them, so
-#   https://gitlab.com/ritwick7/sudostamp/-/releases/permalink/latest/downloads/sudostamp-setup.sh
-# always serves the newest installer.
+# docs/RELEASING.md. CI never signs and never publishes: the release key, the installer key and the
+# store credentials stay on the maintainer's machine, where `scripts/release.sh ship X.Y.Z` tags the
+# merged release, waits for this pipeline on the tag, signs, publishes to every channel (GitLab,
+# AUR, Google Play) and checks them. What CI adds: every check on the tag, and the daily `channels`
+# job, which fails -- GitLab's failure email is the alert -- whenever a channel is behind.
 
 .release_tag: &release_tag
   if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
@@ -182,6 +188,8 @@ release-check:
   variables:
     GIT_DEPTH: 0
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
     - *release_tag
     - if: '$CI_COMMIT_BRANCH =~ /^release\/[0-9]+\.[0-9]+\.[0-9]+$/'
   script:
@@ -191,6 +199,7 @@ release-check:
 
 sast-gate:
   stage: test
+  extends: .not_scheduled
   image: python:3.12-slim
   cache: []
   before_script: []
@@ -212,3 +221,29 @@ sast-gate:
       print("%d finding(s), %d high or critical" % (len(findings), len(bad)))
       sys.exit(1 if bad else 0)
       PY
+
+# GitLab's SAST template job: not on schedules either (its own rules are replaced here).
+semgrep-sast:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - when: on_success
+
+# Every channel serves the newest tagged release (scripts/check-channels.sh). Runs from a daily
+# pipeline schedule on master; silent when everything is in step, a failed pipeline when not.
+channels:
+  stage: test
+  image: debian:stable-slim
+  cache: []
+  before_script: []
+  variables:
+    GIT_DEPTH: 0
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  script:
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates curl git openssh-client >/dev/null
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - V=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1)
+    - echo "newest tag $V"
+    - scripts/check-channels.sh "${V#v}"

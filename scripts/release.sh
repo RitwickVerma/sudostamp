@@ -21,13 +21,17 @@
 #   scripts/release.sh ship X.Y.Z
 #       Everything after the release MR is merged, in one go, from any checkout: tags the merge
 #       commit, waits for the tag pipeline, runs publish in a temporary worktree (asks once
-#       before uploading), removes the worktree, and prepares the AUR update on a branch.
+#       before uploading), pushes the host package to the AUR (scripts/publish-aur.sh), uploads
+#       the bundle and listing to Google Play (tools/play_publish.py), and ends with
+#       scripts/check-channels.sh. Exit 0 only when every channel has X.Y.Z.
 #
 # Signing material, read from the maintainer's infrastructure checkout (SUDOSTAMP_HOMELAB_INFRA,
 # default ../homelab-infra) at origin/master, so the checkout's own branch does not matter:
 #   sops/sudostamp/release-signing.sops.env    the APK keystore and its passwords
 #   sops/sudostamp/installer-signing.sops.env  the ed25519 key that signs the installer
 #                                              (public half: keys/allowed_signers)
+#   sops/sudostamp/play-service-account.sops.json  the Google Play service account (ship only;
+#                                              without it Play is reported as not updated)
 #   SOPS_AGE_KEY_FILE   the age key that opens ONLY these two files;
 #                       default ~/.config/sops/age/sudostamp-release.txt.
 # Needs: JDK 17 (JAVA_HOME), Android SDK with build-tools 36.0.0 (ANDROID_HOME), sops,
@@ -119,20 +123,40 @@ except Exception: print("unknown")')
   git worktree add -q --detach "$WT" "$TAG"
   [ -f local.properties ] && cp local.properties "$WT/"
   HOMELAB="${SUDOSTAMP_HOMELAB_INFRA:-$PWD/../homelab-infra}"
-  (cd "$WT" && SUDOSTAMP_HOMELAB_INFRA="$(cd "$HOMELAB" && pwd)" scripts/release.sh publish "$VERSION") || die "publish failed"
+  # Re-runnable: once the GitLab Release exists (a later step failed), rebuild instead of
+  # publishing again -- the build is reproducible, so the bundle for Play is the same one.
+  if glab api "projects/:id/releases/$TAG" >/dev/null 2>&1; then MODE_AT=package; else MODE_AT=publish; fi
+  echo "GitLab Release $TAG: $([ $MODE_AT = package ] && echo "exists, rebuilding for the stores" || echo "publishing")"
+  (cd "$WT" && SUDOSTAMP_HOMELAB_INFRA="$(cd "$HOMELAB" && pwd)" scripts/release.sh "$MODE_AT" "$VERSION") || die "$MODE_AT failed"
+  # The publish worktree's dist/ holds the signed bundle; keep it for Play before it goes.
+  AAB_KEEP=$(mktemp -d "${XDG_RUNTIME_DIR:-/dev/shm}/sudostamp-aab.XXXXXX")
+  cleanup_ship() { git worktree remove --force "$WT" 2>/dev/null || true; rm -rf "$AAB_KEEP"; }
+  trap cleanup_ship EXIT
+  cp "$WT/dist/sudostamp-$TAG.aab" "$AAB_KEEP/" || die "$MODE_AT left no app bundle (tags before 1.4.1 build none)"
+
+  ok_aur=0; ok_play=0
   step "AUR"
-  if [ -x scripts/update-aur.sh ]; then
-    AUR_BRANCH="packaging/aur-$VERSION"
-    git worktree remove --force "$WT"
-    git worktree add -q -b "$AUR_BRANCH" "$WT" origin/master
-    (cd "$WT" && scripts/update-aur.sh "$VERSION" >/dev/null && git add packaging/aur && \
-      git commit -q -m "AUR: sudostamp $VERSION" && \
-      git push -q -u origin "$AUR_BRANCH" -o merge_request.create -o merge_request.target=master \
-        -o merge_request.remove_source_branch -o "merge_request.title=AUR: sudostamp $VERSION") || \
-      die "the AUR update failed (the release itself is published)"
-    git branch -D "$AUR_BRANCH" >/dev/null 2>&1 || true
-    echo "AUR update: merge request opened. After merging, push packaging/aur/ to aur@aur.archlinux.org:sudostamp.git"
+  scripts/publish-aur.sh "$VERSION" && ok_aur=1
+
+  step "Google Play"
+  SA=$(mktemp -d "${XDG_RUNTIME_DIR:-/dev/shm}/sudostamp-play.XXXXXX"); chmod 700 "$SA"
+  export SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/sudostamp-release.txt}"
+  if git -C "$HOMELAB" show origin/master:sops/sudostamp/play-service-account.sops.json > "$SA/sa.sops.json" 2>/dev/null &&
+     (umask 077; sops decrypt --input-type json --output-type json "$SA/sa.sops.json" > "$SA/sa.json"); then
+    rm -f "$SA/sa.sops.json"
+    python3 -I tools/play_publish.py --credentials "$SA/sa.json" --bundle "$AAB_KEEP/sudostamp-$TAG.aab" \
+      --version "$VERSION" --track "${SUDOSTAMP_PLAY_TRACK:-production}" && ok_play=1
+  else
+    echo "no Play credentials (sops/sudostamp/play-service-account.sops.json): Play NOT updated" >&2
   fi
+  rm -rf "$SA"
+
+  step "every channel"
+  scripts/check-channels.sh "$VERSION"; ok_all=$?
+  [ "$ok_aur" = 1 ] || echo "AUR: NOT updated -- ssh-add ~/.ssh/aur, then scripts/publish-aur.sh $VERSION" >&2
+  [ "$ok_play" = 1 ] || echo "Google Play: NOT updated" >&2
+  [ "$ok_all" = 0 ] && [ "$ok_aur" = 1 ] && [ "$ok_play" = 1 ] || exit 3
+  echo "$TAG is out on every channel (Play after Google's review)"
   exit 0
 fi
 
@@ -208,8 +232,10 @@ step "signed release build"
 # and unsalted hashes of both passwords) as task inputs in its execution history, which would
 # otherwise stay behind in .gradle/ on disk.
 ./gradlew -q --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" --project-cache-dir "$SECRETS/gradle-project" \
-  ${SUDOSTAMP_GRADLE_ARGS:-} assembleRelease
+  ${SUDOSTAMP_GRADLE_ARGS:-} assembleRelease bundleRelease
 APK=app/build/outputs/apk/release/app-release.apk
+AAB=app/build/outputs/bundle/release/app-release.aab
+[ -f "$AAB" ] || die "no signed app bundle"
 [ -f "$APK" ] || die "no signed APK (was the keystore read?)"
 rm -rf "$SECRETS/release.jks" "$SECRETS/gradle-project"
 unset SUDOSTAMP_KEYSTORE_PASSWORD SUDOSTAMP_KEY_PASSWORD SUDOSTAMP_KEY_ALIAS SUDOSTAMP_KEYSTORE
@@ -227,6 +253,11 @@ printf '%s\n' "$BADGING" | grep -q "versionCode='$CODE' versionName='$VERSION'" 
 step "artifacts"
 mkdir -p dist
 cp "$APK" "dist/sudostamp-$TAG.apk"
+# The bundle Google Play takes: signed by the same key (Play's upload key), kept out of the GitLab
+# release, which serves the APK.
+AAB_CERT=$("$JAVA_HOME/bin/keytool" -printcert -jarfile "$AAB" | sed -n 's/^[[:space:]]*SHA256: //p' | head -1)
+[ "$AAB_CERT" = "$RELEASE_CERT" ] || die "the app bundle is signed with $AAB_CERT, not the release key"
+cp "$AAB" "dist/sudostamp-$TAG.aab"
 cp app/build/outputs/mapping/release/mapping.txt "dist/mapping-$TAG.txt"
 scripts/bundle-host.sh "$VERSION" >/dev/null
 (cd dist && sha256sum "sudostamp-$TAG.apk" sudostamp-setup.sh > SHA256SUMS && cat SHA256SUMS)

@@ -48,6 +48,9 @@ object Pairing {
     const val EXT_REVEAL = "pair-reveal-v2@sudostamp"
     const val EXT_DONE = "pair-done-v2@sudostamp"
 
+    /** Version 1's first message: recognised only to tell the person their installer is old. */
+    const val EXT_COMMIT_V1 = "pair-commit@sudostamp"
+
     const val NONCE_BYTES = 32
     const val CODE_DIGITS = 6
 

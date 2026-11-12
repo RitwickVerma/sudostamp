@@ -772,6 +772,16 @@ class MainActivity : Activity() {
                     addView(button(getString(R.string.pair_again), Kind.PRIMARY) { startPairing() }, matchWrap(top = dp(28)))
                     addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(8)))
                 }
+                PairingSession.State.OUTDATED -> {
+                    addView(ResultMark(context, Ui.WARN, false, getString(R.string.pair_outdated)).apply {
+                        layoutParams = LinearLayout.LayoutParams(dp(120), dp(120)).apply { gravity = Gravity.CENTER_HORIZONTAL }
+                    })
+                    addView(text(getString(R.string.pair_outdated), Type.DISPLAY, Ui.WARN, center = true), matchWrap(top = dp(20)))
+                    addView(text(getString(R.string.pair_outdated_detail, v.client ?: ""), Type.BODY, Ui.MUTED, center = true),
+                        matchWrap(top = dp(8)))
+                    addView(button(getString(R.string.pair_again), Kind.PRIMARY) { startPairing() }, matchWrap(top = dp(28)))
+                    addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(8)))
+                }
                 else -> {   // EXPIRED, IDLE
                     addView(text(getString(R.string.pair_expired), Type.DISPLAY, center = true), matchWrap())
                     addView(text(getString(R.string.pair_expired_detail), Type.BODY, Ui.MUTED, center = true),

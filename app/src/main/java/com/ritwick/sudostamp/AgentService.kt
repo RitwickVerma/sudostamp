@@ -447,6 +447,11 @@ class AgentService : Service() {
                 }
                 if (id != null) AgentProtocol.success() else AgentProtocol.failure()
             }
+            Pairing.EXT_COMMIT_V1 -> {
+                Log.w(TAG, "pairing: $client speaks the pairing protocol of 1.3 or older; refused")
+                pairing.olderProtocol(client)
+                AgentProtocol.failure()
+            }
             else -> AgentProtocol.failure()
         }
     }

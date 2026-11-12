@@ -21,8 +21,9 @@ tools/verify.sh                                           # four gates; needs JA
   `-Dorg.gradle.java.home=$JAVA_HOME` (verify.sh does).
 - Releases: `scripts/release.sh prepare X.Y.Z` (release branch + MR), `package X.Y.Z` (signed build
   into dist/, dry run) and `publish X.Y.Z` (package + upload + GitLab Release). docs/RELEASING.md.
-  **Merging, tagging and `publish` are the owner's actions; never run them unasked.** CI never signs
-  and never holds a key; the keys are never decrypted outside tmpfs.
+  `ship X.Y.Z` after the release MR is merged: tag, publish, AUR (`scripts/publish-aur.sh`), Play
+  (`tools/play_publish.py`), then `scripts/check-channels.sh`. **Merging is the owner's action.**
+  CI never signs and never holds a key; the keys are never decrypted outside tmpfs.
 - Host side: `tools/install.sh {setup|stage|test|apply|rollback|status}`, configured by
   `--phone <ip>:7777` (or `SUDOSTAMP_PHONE`), run with plain `sudo`, never `sudo -E`. **Never run `apply` or `rollback` unless asked**:
   they replace `/etc/pam.d/sudo`. `stage` and `test` leave it alone.

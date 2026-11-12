@@ -38,10 +38,25 @@ scripts/release.sh prepare X.Y.Z      # bumps versionCode/versionName, dates the
 JAVA_HOME=~/opt/jdk ANDROID_HOME=~/opt/android-sdk scripts/release.sh ship X.Y.Z
 ```
 
-`ship` tags the release merge commit, waits for the tag pipeline, runs `publish` in a temporary
-worktree (one question, before uploading), and opens the AUR update as a merge request. After
-merging that, push `packaging/aur/` to the AUR. The steps it runs can also be run by hand: tag,
-then `publish` from a worktree at the tag.
+`ship` does the rest, and is done only when every channel is:
+
+1. tags the release merge commit and waits for the tag pipeline;
+2. `publish` in a temporary worktree (one question, before uploading): signed APK, signed
+   installer, GitLab Release, anonymous downloads verified;
+3. `scripts/publish-aur.sh`: builds the AUR package, pushes it (the AUR key must be in ssh-agent:
+   `ssh-add ~/.ssh/aur`), reads the AUR back, and opens the `packaging/aur/` merge request;
+4. `tools/play_publish.py`: the signed bundle to the production track, and the en-US listing
+   (texts, icon, feature graphic, screenshots) replaced from `fastlane/metadata/` -- with the
+   service account in `sops/sudostamp/play-service-account.sops.json`;
+5. `scripts/check-channels.sh`: GitLab, AUR and Play all serve X.Y.Z. Exit 3 names what is behind.
+
+It is safe to run again after a failure: once the GitLab Release exists it rebuilds instead (the
+build is reproducible, so the bundle is the same) and redoes only what is missing.
+
+**Why the AUR is part of the release.** The app and the installer speak one pairing protocol. When
+1.4.0 changed it, the AUR stayed at 1.3.0 for weeks and every Arch user with the new app got "the
+phone refused to pair". A daily CI job (`channels`, from a pipeline schedule on master) now fails --
+GitLab's failure email is the alert -- whenever a channel is behind the newest tag.
 
 `publish` builds and signs (as `package` below), shows the six files and asks, then uploads them to
 the package registry, creates the GitLab Release with permanent `/-/releases/permalink/latest/`
@@ -57,6 +72,9 @@ again.
 | versions, store notes, dated changelog, store listing, signer line in app + README | CI `release-check` (tags and `release/*`) |
 | signed build, certificate == pinned release key, not debuggable, installer signature verifies | `release.sh package` |
 | upload, Release, anonymous download verified | `release.sh publish` |
+| AUR package builds, pushed, served | `scripts/publish-aur.sh` (from `ship`) |
+| Play bundle + listing | `tools/play_publish.py` (from `ship`) |
+| every channel serves the newest tag | `scripts/check-channels.sh`: end of `ship`, and CI `channels` daily |
 
 ## 3. Signing without publishing (dry run)
 
@@ -97,10 +115,11 @@ between release builds keep the key, like `adb install -r` does for debug builds
 
 | Channel | How it gets the build | Who |
 |---|---|---|
-| GitLab Releases | `scripts/release.sh publish` | owner |
+| GitLab Releases | `release.sh ship` (publish) | automatic |
 | Obtainium | reads GitLab Releases | nothing to do |
-| AUR (`sudostamp`, host side) | `scripts/update-aur.sh X.Y.Z`, push `packaging/aur/` to `aur@aur.archlinux.org:sudostamp.git` | owner (AUR account) |
-| IzzyOnDroid / F-Droid | `fastlane/metadata/android/en-US/` + the signed APK | owner files the inclusion request once |
+| AUR (`sudostamp`, host side) | `release.sh ship` (`scripts/publish-aur.sh`) | automatic; AUR key in ssh-agent |
+| Google Play (`com.ritwick.sudostamp`) | `release.sh ship` (`tools/play_publish.py`), then Google's review | automatic; service account in the vault |
+| IzzyOnDroid / F-Droid | read GitLab Releases + `fastlane/metadata/` once included | owner files the inclusion request once |
 
 ## 8. Updating dependencies
 
