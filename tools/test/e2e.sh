@@ -48,7 +48,8 @@ case " ${ID:-} ${ID_LIKE:-} " in
     apt-get update -q >/dev/null
     DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends sudo python3 python3-cryptography procps passwd >/dev/null ;;
   *" fedora "*|*" rhel "*)
-    dnf install -y -q sudo python3 python3-cryptography procps-ng shadow-utils >/dev/null ;;
+    # util-linux: the test switches users with `su`, which Fedora 45's container image dropped.
+    dnf install -y -q sudo python3 python3-cryptography procps-ng shadow-utils util-linux >/dev/null ;;
   *suse*)
     zypper -q --non-interactive install -y sudo python3 python3-cryptography procps shadow >/dev/null ;;
 esac

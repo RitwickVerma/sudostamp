@@ -72,6 +72,8 @@
     <string name="pair_finish">Done</string>
     <string name="pair_interrupted">Pairing stopped</string>
     <string name="pair_interrupted_detail">A second device tried to pair while this pairing was open, so nothing was kept. If that was not you, someone on this network may be trying their luck.</string>
+    <string name="pair_outdated">Update the computer first</string>
+    <string name="pair_outdated_detail">The computer at %1$s runs a SudoStamp installer from version 1.3 or older, which this app no longer pairs with. Update it (Arch: sudo pacman -Syu sudostamp, or yay -Syu; anywhere else: copy the command again), then tap Try again.</string>
     <string name="pair_expired">Pairing timed out</string>
     <string name="pair_expired_detail">No computer finished pairing within two minutes.</string>
     <string name="pair_again">Try again</string>

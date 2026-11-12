@@ -2,6 +2,27 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
+## 1.4.1 — 2026-11-12
+
+Keeps every channel in step, after the AUR stayed at 1.3.0 while the app was 1.4.0 and pairing
+failed for Arch users with "the phone refused to pair".
+
+### Phone
+- A computer that tries to pair with the protocol of SudoStamp 1.3 or older now gets a clear
+  screen on the phone, **Update the computer first**, naming the computer and how to update it,
+  instead of only "refused" on the computer. Pairing is still refused, as before.
+- Signed builds are now byte-for-byte reproducible too: the Android build's encrypted
+  "dependency info" block (random on every build, and flagged by F-Droid/IzzyOnDroid) is off. The
+  app has no dependencies, so it carried nothing.
+
+### Releases
+- `scripts/release.sh ship` publishes to every channel and checks them: GitLab, the AUR
+  (`scripts/publish-aur.sh`: build, push, read back) and Google Play (`tools/play_publish.py`:
+  bundle plus the store listing from `fastlane/metadata/`). It is re-runnable after a failure.
+- `scripts/check-channels.sh` checks that GitLab, the AUR and Play serve one version; CI runs it
+  daily and fails when a channel falls behind.
+- The README links Google Play.
+
 ## 1.4.0 — 2026-10-24
 
 **Security release.** Fixes every finding of a four-part security audit (2026-10-23: the app, the

@@ -1,0 +1,1 @@
+If a computer still runs a SudoStamp installer from 1.3 or older, the phone now says so on the pairing screen and tells you how to update it, instead of the computer only reporting "refused". Signed builds are byte-for-byte reproducible.

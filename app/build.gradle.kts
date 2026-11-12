@@ -15,8 +15,8 @@ android {
         // would be a lie -- and the unguarded call would crash at key-creation time.
         minSdk = 30
         targetSdk = 36
-        versionCode = 9
-        versionName = "1.4.0"
+        versionCode = 10
+        versionName = "1.4.1"
     }
 
     // Release signing comes from the environment, never from the repo: scripts/release.sh, on the
@@ -42,6 +42,14 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (keystorePath != null) signingConfig = signingConfigs.getByName("release")
         }
+    }
+
+    // No "dependency info" block in the APK or bundle signature. AGP encrypts it for Google with a
+    // fresh random key on every build, so two signed builds of the same source differed; it lists
+    // no dependencies here anyway (there are none), and F-Droid/IzzyOnDroid flag the extra block.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
     }
 
     compileOptions {

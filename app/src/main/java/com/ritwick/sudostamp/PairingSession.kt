@@ -30,7 +30,9 @@ class PairingSession(
     private val now: () -> Long = System::currentTimeMillis,
     private val random: (Int) -> ByteArray = { n -> ByteArray(n).also { SecureRandom().nextBytes(it) } },
 ) {
-    enum class State { IDLE, WAITING, COMMITTED, CODE, DONE, INTERRUPTED, EXPIRED }
+    /** OUTDATED: a computer tried the pairing protocol of SudoStamp 1.3 or older, which this
+     *  app refuses; the screen tells the person to update the computer's installer. */
+    enum class State { IDLE, WAITING, COMMITTED, CODE, DONE, INTERRUPTED, EXPIRED, OUTDATED }
 
     /** What the screen shows. [code] only in CODE; [label]/[client] once a computer asked. */
     data class View(val state: State, val label: String?, val client: String?, val code: String?, val deadline: Long)
@@ -163,6 +165,21 @@ class PairingSession(
     private fun abandon() {
         if (state == State.COMMITTED || state == State.CODE) key?.let { discarded += it.id }
         clear()
+    }
+
+    /**
+     * A computer sent a pairing message of an older protocol (version 1). It is refused, as
+     * before; but while the person is waiting on the pairing screen, say why, instead of leaving
+     * them with "the phone refused" on the computer -- which is what happened when the AUR
+     * package lagged a release behind the app. Only from WAITING, and it ends the arming.
+     */
+    @Synchronized
+    fun olderProtocol(fromClient: String) {
+        expire()
+        if (state != State.WAITING) return
+        clear()
+        client = fromClient
+        state = State.OUTDATED
     }
 
     /** Stops the pairing, finished or not, and throws its key away. */

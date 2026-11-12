@@ -104,8 +104,10 @@ before you rely on it. Reviews are very welcome.
 
 ## Setup
 
-**1. Phone.** Install the app from the [Releases](https://gitlab.com/ritwick7/sudostamp/-/releases)
-page, or let [Obtainium](https://github.com/ImranR98/Obtainium) install it and keep it updated: add
+**1. Phone.** Install the app from
+[Google Play](https://play.google.com/store/apps/details?id=com.ritwick.sudostamp), from the
+[Releases](https://gitlab.com/ritwick7/sudostamp/-/releases) page, or let
+[Obtainium](https://github.com/ImranR98/Obtainium) install it and keep it updated: add
 `https://gitlab.com/ritwick7/sudostamp` as an app. Open it and tap **Get started**: the phone waits
 for your computer, and makes a key for it, inside its secure hardware, when you pair.
 

@@ -209,6 +209,24 @@ class PairingTest {
     }
 
     @Test
+    fun `an old installer is named on screen, and only while waiting`() {
+        val p = session()
+        p.arm()
+        p.olderProtocol("192.168.1.7")
+        assertEquals(PairingSession.State.OUTDATED, p.view().state)
+        assertEquals("192.168.1.7", p.view().client)
+        assertEquals("it ends the arming: nothing more is accepted", null, p.commit("192.168.1.7", 1))
+        assertEquals(0, made)
+
+        val q = session()
+        q.arm()
+        q.commit("10.0.0.2", 1)!!
+        q.olderProtocol("10.0.0.66")
+        assertEquals("a pairing under way is not disturbed", PairingSession.State.COMMITTED, q.view().state)
+        session().olderProtocol("10.0.0.66")   // not armed: nothing happens
+    }
+
+    @Test
     fun `discoverable only until a computer commits`() {
         val p = session()
         p.arm()
