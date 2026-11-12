@@ -33,14 +33,23 @@ class Limiter(private val now: () -> Long = System::currentTimeMillis) {
     private val recent = ArrayDeque<Long>()
 
     /** Why a request for [hostId] must be refused without asking, or null if it may be asked. */
+    fun refusal(hostId: String): String? = check(hostId)?.let {
+        when (it) {
+            Refusal.AFTER_APPROVAL -> "a request was just approved; refusing the next one for a moment"
+            Refusal.RATE_LIMITED -> "too many unapproved requests recently"
+            else -> "cooling down after an unapproved request from this computer"
+        }
+    }
+
+    /** The same decision as [refusal], typed for the history. */
     @Synchronized
-    fun refusal(hostId: String): String? {
+    fun check(hostId: String): Refusal? {
         val t = now()
         while (recent.isNotEmpty() && t - recent.first() >= GLOBAL_WINDOW_MS) recent.removeFirst()
         return when {
-            t < quietUntil -> "a request was just approved; refusing the next one for a moment"
-            recent.size >= GLOBAL_LIMIT -> "too many unapproved requests recently"
-            t < (until[hostId] ?: 0L) -> "cooling down after an unapproved request from this computer"
+            t < quietUntil -> Refusal.AFTER_APPROVAL
+            recent.size >= GLOBAL_LIMIT -> Refusal.RATE_LIMITED
+            t < (until[hostId] ?: 0L) -> Refusal.COOLDOWN
             else -> null
         }
     }

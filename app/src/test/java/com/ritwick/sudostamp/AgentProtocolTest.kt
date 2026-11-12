@@ -168,4 +168,18 @@ class AgentProtocolTest {
     private fun int32Bytes(v: Int): ByteArray = byteArrayOf(
         (v ushr 24).toByte(), (v ushr 16).toByte(), (v ushr 8).toByte(), v.toByte()
     )
+
+    @Test
+    fun `the typed refusal agrees with the text one`() {
+        for (known in listOf(true, false)) for (size in listOf(0, 31, 32, 33, 64)) {
+            val data = ByteArray(size)
+            assertEquals(
+                "known=$known size=$size",
+                AgentProtocol.refusal(known, data) != null, AgentProtocol.refusalKind(known, data) != null
+            )
+        }
+        assertEquals(Refusal.UNKNOWN_KEY, AgentProtocol.refusalKind(false, ByteArray(32)))
+        assertEquals(Refusal.NOT_A_CHALLENGE, AgentProtocol.refusalKind(true, ByteArray(64)))
+        assertNull(AgentProtocol.refusalKind(true, ByteArray(32)))
+    }
 }

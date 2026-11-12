@@ -100,6 +100,75 @@
     <string name="result_denied_detail">No signature was sent. The host falls back to the password.</string>
     <string name="result_expired_detail">The request timed out before the touch. Run sudo again.</string>
 
+    <!-- Away mode -->
+    <string name="status_away">Away</string>
+    <string name="away_title">Away mode</string>
+    <string name="away_detail_off">Stops the listener, so sudo asks for your password. Nothing is approved while away.</string>
+    <string name="away_detail_until">Not listening: sudo asks for your password. Resumes at %1$s</string>
+    <string name="away_detail_never">Not listening: sudo asks for your password until you resume</string>
+    <string name="check_listener_away">Away: the port is closed</string>
+    <string name="action_go_away">Go away</string>
+    <string name="resume">Resume</string>
+    <string name="away_choice_title">Resume automatically</string>
+    <string name="away_choice_1h">In 1 hour</string>
+    <string name="away_choice_8h">In 8 hours</string>
+    <string name="away_choice_never">Never: I will resume</string>
+    <string name="notif_away_title">Away: sudo asks for your password</string>
+    <string name="notif_away_text">Resumes at %1$s</string>
+    <string name="notif_away_text_never">Not listening until you resume</string>
+    <string name="tile_label">SudoStamp</string>
+    <string name="tile_listening">Listening</string>
+    <string name="tile_away">Away</string>
+    <string name="tile_off">Needs attention</string>
+
+    <!-- Lock screen -->
+    <string name="locked_blank">Unlock to open SudoStamp</string>
+
+    <!-- History -->
+    <string name="history_open">Request history</string>
+    <string name="history_title">Request history</string>
+    <string name="history_intro">The last 100 requests this phone decided, newest first. A refused request was never shown to you: no prompt and no signature.</string>
+    <string name="history_empty">Nothing yet. Every request this phone approves, denies or refuses will appear here.</string>
+    <string name="history_back">Back</string>
+    <string name="history_clear">Clear history</string>
+    <string name="history_clear_title">Clear the history?</string>
+    <string name="history_clear_message">Deletes the list on this phone. It does not change what is paired or approved.</string>
+    <string name="history_today">Today</string>
+    <string name="history_yesterday">Yesterday</string>
+    <string name="history_unknown_device">Unknown device</string>
+    <plurals name="history_times">
+        <item quantity="one">%1$d time, last at %2$s</item>
+        <item quantity="other">%1$d times, last at %2$s</item>
+    </plurals>
+    <string name="history_peer">from %1$s</string>
+    <string name="verdict_approved">Approved</string>
+    <string name="verdict_denied">Denied</string>
+    <string name="verdict_denied_notification">Denied</string>
+    <string name="verdict_timed_out">Timed out</string>
+    <string name="verdict_cancelled">Cancelled</string>
+    <string name="verdict_refused">Refused</string>
+    <string name="verdict_approved_detail">Your fingerprint signed this one request.</string>
+    <string name="verdict_denied_detail">You tapped Deny. No signature was sent.</string>
+    <string name="verdict_denied_notification_detail">You denied it from the notification. No signature was sent.</string>
+    <string name="verdict_timed_out_detail">Nobody touched the sensor in time, so it was denied.</string>
+    <string name="verdict_cancelled_detail">Dropped while waiting: Away began or the listener stopped.</string>
+    <string name="refusal_unknown_key">Not one of your computers: it asked with a key this phone never made for any computer. You were not asked.</string>
+    <string name="refusal_not_a_challenge">A paired computer\'s key, but not a sudo challenge (a sudo challenge is exactly 32 bytes), so it was not shown.</string>
+    <string name="refusal_outside_lan">Not on this phone\'s Wi-Fi or Ethernet network, so it was ignored before anything was read.</string>
+    <string name="refusal_rate_limited">Too many unapproved requests lately. Everything is refused for a while.</string>
+    <string name="refusal_after_approval">Arrived within 3 seconds of an approval, so it was not shown. This stops a second prompt from riding on a real one.</string>
+    <string name="refusal_cooldown">That computer was just denied or timed out, so it is cooling down.</string>
+
+    <!-- Accessibility -->
+    <string name="a11y_approval_mark">Waiting for your fingerprint</string>
+    <plurals name="a11y_seconds_left">
+        <item quantity="one">%1$d second left</item>
+        <item quantity="other">%1$d seconds left</item>
+    </plurals>
+    <string name="a11y_remove">Remove %1$s</string>
+    <string name="a11y_go_away">Go away: stop listening for sudo</string>
+    <string name="a11y_resume">Resume listening for sudo</string>
+
     <!-- Biometric prompt -->
     <string name="prompt_title">Approve sudo on %1$s</string>
     <string name="prompt_subtitle">Request from %1$s</string>

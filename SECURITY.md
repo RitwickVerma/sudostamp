@@ -89,6 +89,8 @@ flagged on every request; pair those computers again and remove it.
 | A device on mobile data, a VPN or another subnet reaches the phone | **Refused before a byte is read**: the peer must be inside the subnet of the Wi-Fi or Ethernet address the connection arrived on, and a LAN-range address. Loopback only in debug builds. |
 | Overlay app draws over the approval screen | Hidden on Android 12+ (`setHideOverlayWindows`); on Android 11 touches through an overlay are dropped. The biometric prompt itself is system UI. |
 | Another app adopts the approval screen into its task ("StrandHogg") | `taskAffinity=""` on the activity. |
+| Someone holding your locked phone | Sees a pending request's computer name if they tap its notification, nothing else: the approval screen is allowed over the lock screen only for the request whose notification was tapped and only while it is pending, and every other screen draws nothing while the phone is locked. Approving still needs the enrolled finger, because every key demands a fresh strong biometric for each signature. |
+| A computer misuses its pairing (malware running sudo as you) | Every request the phone sees is in the on-phone history, including those it refused without asking, so a request you did not make can be noticed. Away stops listening altogether. |
 | Unprivileged user edits the pinned key | Root-owned directory and file; the installer creates both. |
 | A replaced installer in the release downloads | The package registry accepts re-uploads, so files there can change after publishing. The installer and `SHA256SUMS` are signed (`ssh-keygen -Y`, key in `keys/allowed_signers`, also carried in the app); the documented command verifies before running anything. |
 

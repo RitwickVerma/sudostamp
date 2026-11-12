@@ -22,7 +22,16 @@
                                     leaving sudo on the password path until the app is
                                     next opened by hand.
 
+  The Quick Settings tile (AwayTileService) is bound by the system, which holds
+  BIND_QUICK_SETTINGS_TILE; no permission is requested for it. Away mode's resume timer is an
+  INEXACT alarm: no SCHEDULE_EXACT_ALARM and no USE_EXACT_ALARM.
+
   NOT requested: location, storage, camera, microphone, contacts, phone state.
+  showWhenLocked="true" on the activity is only the INVITATION: it is what lets the system
+  launch it from a notification tap without first demanding the PIN, because the system checks
+  this manifest flag, not the runtime call. MainActivity withdraws it (setShowWhenLocked(false))
+  at the start of onCreate for every launch except one opened from its own pending request's
+  notification, and never draws anything else while the device is locked. See LockScreen.kt.
   taskAffinity="" on the activity: no other app's task can adopt the approval screen
   (task hijacking, "StrandHogg").
 
@@ -59,6 +68,7 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
+            android:showWhenLocked="true"
             android:taskAffinity=""
             android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
@@ -83,6 +93,19 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="signed_approval_of_privilege_escalation_requests" />
+        </service>
+
+        <!-- Away on/off. The platform requires the permission and an exported service here:
+             only the system can bind it. -->
+        <service
+            android:name=".AwayTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_stat_notify"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
         </service>
     </application>
 </manifest>

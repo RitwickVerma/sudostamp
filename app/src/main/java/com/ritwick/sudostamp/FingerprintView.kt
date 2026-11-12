@@ -18,6 +18,10 @@ import kotlin.math.abs
  * "breathing" pulse on the glyph itself. Pure platform drawing -- no
  * dependencies, no bitmaps -- one ValueAnimator drives everything.
  *
+ * Decorative by default; the approval screen gives it a contentDescription and updates its
+ * stateDescription with the time left, so the countdown is not visual-only. It honours
+ * "remove animations": see [animating].
+ *
  * On the approval screen the sweep becomes a countdown ring ([countDown]): the arc that is
  * left is the time left before the request is denied, turning amber in the last quarter.
  */
@@ -77,9 +81,15 @@ class FingerprintView(context: Context, private val accent: Int) : View(context)
         }
     }
 
+    /** Whether the animator drives this view. Off when the user removed animations: then the
+     *  mark is drawn at rest, and a countdown still redraws (see [onDraw]) because the time
+     *  left is information, not decoration. */
+    private var animating = false
+
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        animator.start()
+        animating = Ui.animationsOn()
+        if (animating) animator.start() else phase = 0.5f
     }
 
     override fun onDetachedFromWindow() {
@@ -151,5 +161,9 @@ class FingerprintView(context: Context, private val accent: Int) : View(context)
             (cx + s / 2f).toInt(), (cy + s / 2f).toInt()
         )
         glyph.draw(canvas)
+
+        // Without the animator nothing else would redraw the ring: once a second is enough
+        // for a countdown measured in seconds.
+        if (!animating && windowMs > 0) postInvalidateDelayed(1000)
     }
 }

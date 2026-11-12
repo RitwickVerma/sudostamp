@@ -277,6 +277,18 @@ fingerprint**. A computer's first request after pairing is flagged — if you di
 there, deny it. Unanswered requests are denied after 60 seconds. The app lists your paired
 computers; **Remove** deletes that computer's key, and its sudo falls back to the password.
 
+- **From the lock screen.** Tap the request's notification on a locked phone and the approval
+  shows over the lock screen with the fingerprint prompt already up. Only that request: every
+  other screen of the app still needs the phone unlocked.
+- **History.** The last 100 requests, with what became of each, including the ones the phone
+  refused without asking you (an unpaired device, too many requests, a cooldown). A request you
+  did not make is how you would notice a computer that is misusing its pairing. It never leaves
+  the phone and can be cleared.
+- **Away.** A Quick Settings tile (and a button in the app) stops listening for a while: an hour,
+  eight hours or until you resume. Meanwhile sudo goes straight to the password. Away lasts
+  through a restart of the phone, and the ongoing notification has **Resume**.
+- Every screen works with TalkBack, large fonts and animations turned off.
+
 ## Development
 
 ```sh

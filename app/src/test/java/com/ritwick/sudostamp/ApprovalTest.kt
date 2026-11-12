@@ -1,7 +1,9 @@
 package com.ritwick.sudostamp
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -79,5 +81,37 @@ class ApprovalTest {
         assertNull(a.await(5_000))
         assertTrue("interrupt flag preserved", Thread.interrupted())
         assertFalse(a.approve(sig))
+    }
+
+    @Test
+    fun `how a request ended is recorded, first resolution only`() {
+        val a = approval()
+        assertNull(a.resolution)
+        assertTrue(a.deny(Approval.How.DENIED_FROM_NOTIFICATION))
+        assertFalse(a.deny(Approval.How.DENIED_IN_APP))
+        assertFalse(a.approve(sig))
+        assertEquals(Approval.How.DENIED_FROM_NOTIFICATION, a.resolution)
+
+        val b = approval()
+        assertTrue(b.approve(sig))
+        assertEquals(Approval.How.APPROVED, b.resolution)
+
+        val c = approval()
+        assertNull(c.await(10))
+        assertEquals(Approval.How.TIMED_OUT, c.resolution)
+    }
+
+    @Test
+    fun `denying cannot claim approval`() {
+        assertThrows(IllegalArgumentException::class.java) { approval().deny(Approval.How.APPROVED) }
+    }
+
+    @Test
+    fun `an interrupted wait is a cancel, not a timeout`() {
+        val a = approval()
+        Thread.currentThread().interrupt()
+        assertNull(a.await(10_000))
+        Thread.interrupted()
+        assertEquals(Approval.How.CANCELLED, a.resolution)
     }
 }

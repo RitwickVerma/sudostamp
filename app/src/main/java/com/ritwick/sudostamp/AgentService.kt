@@ -6,11 +6,15 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
 import android.graphics.drawable.Icon
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.service.quicksettings.TileService
 import android.util.Log
 import java.io.InputStream
 import java.net.ServerSocket
@@ -47,6 +51,9 @@ class AgentService : Service() {
 
         /** Intent action behind the notification's Deny button. */
         const val ACTION_DENY = "com.ritwick.sudostamp.DENY"
+
+        /** Intent action behind the ongoing notification's Resume button (Away mode). */
+        const val ACTION_RESUME = "com.ritwick.sudostamp.RESUME"
 
         /** The request a notification (and its Deny button) was posted for ([Approval.id]). */
         const val EXTRA_REQUEST = "com.ritwick.sudostamp.REQUEST"
@@ -88,6 +95,12 @@ class AgentService : Service() {
         /** True while the server socket is bound and accepting. The setup screen shows
          *  THIS, not "a key exists", so a dead listener can never read as healthy. */
         @Volatile var listening = false
+            private set
+
+        /** True while the service exists. The tile and the timer use it to choose between a
+         *  plain start (allowed from the background for a running foreground service) and a
+         *  foreground start. */
+        @Volatile var alive = false
             private set
 
         /**
@@ -162,52 +175,112 @@ class AgentService : Service() {
         }
     }
 
-    @Volatile private var running = false
-    private var server: ServerSocket? = null
+    /**
+     * One run of the accept loop. Stopping a listener (Away, or the service ending) flips
+     * [live] and closes its socket; a later listener is a NEW object, so a slow-dying old
+     * thread can never be mistaken for the current one or fight it for the port.
+     */
+    private inner class Listener : Thread("agent-accept") {
+        @Volatile var live = true
+        @Volatile var server: ServerSocket? = null
+
+        init { isDaemon = true }
+
+        override fun run() = acceptLoop(this)
+    }
+
+    private var listener: Listener? = null
+
+    /** Away mode, as last read by [applyAway]: whether the socket is deliberately closed, and
+     *  until when ([Away.NEVER] for until resumed). */
+    private var away = false
+    private var awayUntil = Away.OFF
+    private val timer = Handler(Looper.getMainLooper())
 
     override fun onCreate() {
         super.onCreate()
+        alive = true
         ensureChannels(this)
         Hosts.reconcile(this)
+        loadAway()
         // A foreground service MUST show an ongoing notification (Android 8+) or the
         // OS kills the listener; there is no way around it without losing the
         // always-on property. Keep it quiet (LOW channel) and minimal: what it is.
         // Tapping opens the app.
-        val status = getString(R.string.notif_listener_title)
-        val open = PendingIntent.getActivity(
-            this, 1,
-            Intent(this, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        startForeground(
-            NOTIF_ID,
-            buildNotification(status, null, CHANNEL_PERSISTENT, open)
-        )
+        startForeground(NOTIF_ID, listenerNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_DENY) {
-            // From the approval notification: reject without opening the app at all -- but only
-            // the request that notification was about. A stale tap must not deny the next one.
-            val p = current
-            if (p != null && p.id == intent.getLongExtra(EXTRA_REQUEST, -1) && p.deny()) {
-                Log.i(TAG, "denied from the notification")
+        when (intent?.action) {
+            ACTION_DENY -> {
+                // From the approval notification: reject without opening the app at all -- but only
+                // the request that notification was about. A stale tap must not deny the next one.
+                val p = current
+                if (p != null && p.id == intent.getLongExtra(EXTRA_REQUEST, -1) &&
+                    p.deny(Approval.How.DENIED_FROM_NOTIFICATION)
+                ) {
+                    Log.i(TAG, "denied from the notification")
+                }
             }
+            ACTION_RESUME -> AwayControl.clear(this)   // the ongoing notification's Resume button
         }
-        if (!running) {
-            running = true
-            Thread(::acceptLoop, "agent-accept").apply { isDaemon = true }.start()
-        }
+        // Every start, whatever its reason, re-reads Away: this is also how a reboot, an app
+        // update and a restart after the process was killed come back in the state the user left.
+        applyAway()
         return START_STICKY
     }
 
-    override fun onDestroy() {
-        running = false
-        runCatching { server?.close() }
+    /**
+     * Brings the listener in line with the stored Away state: socket open, or deliberately
+     * closed. Away can only close it. Closing denies a request that is waiting, since nothing
+     * can answer it any more.
+     */
+    private fun applyAway() {
+        timer.removeCallbacksAndMessages(null)
+        loadAway()
+        if (away) stopListening() else startListening()
+        Log.i(TAG, if (away) "away: not listening" else "not away")
+        // While awake, look again exactly when the timer ends; the alarm covers deep sleep.
+        val end = awayUntil.takeIf { away && it != Away.NEVER }
+        if (end != null) timer.postDelayed(::applyAway, (end - System.currentTimeMillis()).coerceAtLeast(0) + 50)
+        mgr().notify(NOTIF_ID, listenerNotification())
+        refreshTile()
+        changed()
+    }
+
+    private fun loadAway() {
+        val p = AwayControl.plan(this)
+        away = p.away
+        awayUntil = p.until
+    }
+
+    private fun startListening() {
+        if (listener?.live == true) return
+        listener = Listener().also { it.start() }
+    }
+
+    private fun stopListening() {
+        val l = listener ?: return
+        listener = null
+        l.live = false
+        runCatching { l.server?.close() }
+        listening = false
         // Release a parked request now rather than leaving pam_rssh waiting out the full
-        // approval window on a service that no longer exists.
-        current?.deny()
+        // approval window on a listener that no longer exists.
+        current?.deny(Approval.How.CANCELLED)
+    }
+
+    /** Asks the Quick Settings tile to redraw if it is on screen. */
+    private fun refreshTile() {
+        runCatching { TileService.requestListeningState(this, ComponentName(this, AwayTileService::class.java)) }
+    }
+
+    override fun onDestroy() {
+        alive = false
+        timer.removeCallbacksAndMessages(null)
+        stopListening()
+        // (stopListening released a parked request.)
+        changed()
         super.onDestroy()
     }
 
@@ -215,19 +288,20 @@ class AgentService : Service() {
 
     // ------------------------------------------------------------------- accept
 
-    private fun acceptLoop() {
-        val srv = bind() ?: return
+    private fun acceptLoop(l: Listener) {
+        val srv = bind(l) ?: return
         listening = true
         changed()
+        refreshTile()
         var acceptFailures = 0
-        while (running) {
+        while (l.live) {
             try {
                 srv.accept().use { s ->
                     acceptFailures = 0
-                    handle(s)
+                    handle(s, l)
                 }
             } catch (e: Exception) {
-                if (!running) break
+                if (!l.live) break
                 acceptFailures++
                 Log.w(TAG, "connection ended: ${e.message}")
                 // A single dropped connection is routine, but a run of immediate
@@ -238,19 +312,25 @@ class AgentService : Service() {
                 }
             }
         }
-        listening = false
-        changed()
+        // A listener that ended on its own (not stopped) is a dead one; a stopped one has
+        // already said so, and must not overwrite its successor's state.
+        if (l.live) {
+            listening = false
+            changed()
+        }
     }
 
-    /** Binds the listener, retrying until it works or the service is stopped. */
-    private fun bind(): ServerSocket? {
-        while (running) {
+    /** Binds the listener, retrying until it works or [l] is stopped. */
+    private fun bind(l: Listener): ServerSocket? {
+        while (l.live) {
             try {
                 // Wildcard (null address): dual-stack where the platform has IPv6, so IPv4
                 // clients still connect (as IPv4-mapped addresses, which Java reports as
                 // Inet4Address) and the computer can use the phone's stable IPv6 address.
                 return ServerSocket(PORT, 4, null).also {
-                    server = it
+                    l.server = it
+                    // Stopped while binding (Away began): do not leave the port open.
+                    if (!l.live) { runCatching { it.close() }; return null }
                     Log.i(TAG, "listening on $PORT")
                 }
             } catch (e: Exception) {
@@ -264,13 +344,14 @@ class AgentService : Service() {
     /** Who is on the other end of one connection, and where they reached us. */
     private class Conn(val id: Long, val client: String, val local: java.net.InetAddress, val localPort: Int)
 
-    private fun handle(s: Socket) {
+    private fun handle(s: Socket, l: Listener) {
         val client = Net.hostPort(s.inetAddress, s.port).substringBeforeLast(':')
         // LAN-only is enforced here, not just assumed. The socket binds every interface: the
         // peer must be on the Wi-Fi or Ethernet subnet the connection arrived on (Net.allowedPeer),
         // so neither the internet, a carrier's network nor a VPN can post an approval prompt.
         if (!Net.allowedPeer(s.localAddress, s.inetAddress, Net.lanPrefixes(this), debuggable(this))) {
             Log.w(TAG, "refusing $client: not on this phone's Wi-Fi or Ethernet subnet")
+            remember(Verdict.REFUSED, Refusal.OUTSIDE_LAN, null, "", client)
             return
         }
         val conn = Conn(connections.incrementAndGet(), client, s.localAddress, s.localPort)
@@ -286,7 +367,7 @@ class AgentService : Service() {
         // one frame and hanging up therefore broke EVERY real authentication, while still
         // passing any test client that opened a fresh connection per request -- which is
         // exactly what the earlier end-to-end check did, and why it looked like it worked.
-        while (running) {
+        while (l.live) {
             if (++frames > MAX_FRAMES_PER_CONNECTION) {
                 Log.w(TAG, "$client sent more than $MAX_FRAMES_PER_CONNECTION frames, closing")
                 return
@@ -332,9 +413,11 @@ class AgentService : Service() {
                 r.int32()                       // flags
 
                 val host = Hosts.all(this).firstOrNull { Keys.blob(Keys.aliasFor(it.id))?.contentEquals(keyBlob) == true }
-                val refusal = AgentProtocol.refusal(host != null, data) ?: limiter.refusal(host!!.id)
-                if (refusal != null) {
-                    Log.w(TAG, "$refusal (from $client)")
+                val why = AgentProtocol.refusalKind(host != null, data) ?: limiter.check(host!!.id)
+                if (why != null) {
+                    Log.w(TAG, "${AgentProtocol.refusal(host != null, data) ?: limiter.refusal(host!!.id) ?: why} (from $client)")
+                    // Refused unprompted: the user never saw it, so the history is where it shows.
+                    remember(Verdict.REFUSED, why, host?.id, host?.label ?: "", client)
                     AgentProtocol.writeFrame(out, AgentProtocol.failure())
                     return 0
                 }
@@ -367,11 +450,12 @@ class AgentService : Service() {
                     if (wake.isHeld) wake.release()
                     // Resolved whichever way await ended, so a prompt still on screen is
                     // told to come down rather than collect a fingerprint for nothing.
-                    p.deny()
+                    p.deny(Approval.How.CANCELLED)
                     current = null
                     resetNotification()
                     changed()
                 }
+                remember(p.resolution.toVerdict(), null, host.id, host.label, client)
                 val waited = SystemClock.elapsedRealtimeNanos() - waitStart
                 if (der == null) {
                     limiter.unapproved(host.id, host.confirmed)
@@ -527,6 +611,40 @@ class AgentService : Service() {
                 ).build()
             )
         )
+    }
+
+    /**
+     * The ongoing notice: "ready", or, in Away mode, that sudo is on the password until a time
+     * or until resumed, with a Resume button. Both on the quiet channel.
+     */
+    private fun listenerNotification(): Notification {
+        val open = PendingIntent.getActivity(
+            this, 1,
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        if (!away) return buildNotification(getString(R.string.notif_listener_title), null, CHANNEL_PERSISTENT, open)
+        val resume = PendingIntent.getService(
+            this, 4, Intent(this, AgentService::class.java).setAction(ACTION_RESUME),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val text = if (awayUntil == Away.NEVER) getString(R.string.notif_away_text_never)
+        else getString(R.string.notif_away_text, android.text.format.DateFormat.getTimeFormat(this).format(awayUntil))
+        return buildNotification(
+            getString(R.string.notif_away_title), text, CHANNEL_PERSISTENT, open,
+            Notification.Action.Builder(
+                Icon.createWithResource(this, R.drawable.ic_play_arrow), getString(R.string.resume), resume
+            ).build()
+        )
+    }
+
+    /** Records one decision in the history (best-effort: never on the request's critical path). */
+    private fun remember(verdict: Verdict, refusal: Refusal?, hostId: String?, label: String, peer: String) {
+        runCatching {
+            HistoryStore.get(this).record(HistoryEntry(System.currentTimeMillis(), verdict, refusal, hostId, label, peer))
+        }.onFailure { Log.w(TAG, "history: ${it.message}") }
+        changed()
     }
 
     private fun resetNotification() {

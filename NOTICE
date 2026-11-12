@@ -5,7 +5,9 @@ This product includes third-party material:
 
   Material Symbols (Rounded) glyphs: fingerprint, and the interface icons
   check_circle, warning, error, content_copy, notifications, battery_full,
-  terminal, key, schedule, computer, lock, do_not_disturb_on
+  terminal, key, schedule, computer, lock, do_not_disturb_on, history, pause,
+  play_arrow, shield
+  (history, pause, play_arrow and shield are the standard, not Rounded, variants)
   Copyright Google LLC
   Licensed under the Apache License, Version 2.0 (see LICENSES/Apache-2.0.txt)
   https://github.com/google/material-design-icons
