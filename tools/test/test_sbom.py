@@ -216,6 +216,14 @@ class Sbom(unittest.TestCase):
         pam = refs["pkg:github/z4yx/pam_rssh@" + commit]
         self.assertEqual((pam["version"], pam["scope"]), (tag, "required"))
         self.assertEqual(pam["pedigree"]["commits"][0]["uid"], commit)
+        # The timeouts patch is in the pedigree, pinned by the same hash install.sh enforces, and that
+        # hash is the patch file's real one: the SBOM cannot describe a different build than ships.
+        self.assertEqual(pam["pedigree"]["patches"][0]["diff"]["url"], "tools/patches/pam_rssh-timeouts.patch")
+        props = {p["name"]: p["value"] for p in pam["properties"]}
+        pinned = re.search(r'^PATCH_SHA256="([0-9a-f]{64})"', install, re.M)[1]
+        real = hashlib.sha256(open(os.path.join(ROOT, "tools", "patches", "pam_rssh-timeouts.patch"), "rb").read()).hexdigest()
+        self.assertEqual(props["sudostamp:patch-sha256"], pinned)
+        self.assertEqual(pinned, real)
         self.assertEqual(doc["metadata"]["component"]["hashes"], [{"alg": "SHA-256", "content": self.setup_sha}])
         # The four non-root crates, registry ones with their lock checksums, all `required`.
         self.assertEqual(sorted(c["name"] + "@" + c["version"] for c in doc["components"] if c["bom-ref"] != pam["bom-ref"]),
@@ -249,7 +257,7 @@ class Sbom(unittest.TestCase):
 
     @unittest.skipUnless(ONLINE, "set SUDOSTAMP_ONLINE=1 to fetch pam_rssh's Cargo.lock")
     def test_the_real_pinned_cargo_lock_matches_the_pin(self):
-        _, _, commit, _ = S.install_pins()
+        _, _, commit, _, _ = S.install_pins()
         lock = S.fetch_cargo_lock(commit)
         self.assertEqual(hashlib.sha256(lock).hexdigest(), S.PAM_RSSH_CARGO_LOCK_SHA256,
                          "tools/install.sh pins a pam_rssh commit whose Cargo.lock is not the one pinned in scripts/sbom.py")

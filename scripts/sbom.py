@@ -245,7 +245,8 @@ def install_pins():
     text = read("tools/install.sh")
     return (must(r'^RSSH_REPO="([^"]+)"', text, "RSSH_REPO"), must(r'^RSSH_TAG="([^"]+)"', text, "RSSH_TAG"),
             must(r'^RSSH_COMMIT="([0-9a-f]{40})"', text, "RSSH_COMMIT"),
-            must(r"^CARGO_MIN_MINOR=([0-9]+)", text, "CARGO_MIN_MINOR"))
+            must(r"^CARGO_MIN_MINOR=([0-9]+)", text, "CARGO_MIN_MINOR"),
+            must(r'^PATCH_SHA256="([0-9a-f]{64})"', text, "PATCH_SHA256"))
 
 
 def cargo_lock_url(commit):
@@ -314,7 +315,7 @@ def cargo_components(lock_bytes, pam_ref):
 
 
 def host_bom(setup_path, version, lock_bytes):
-    repo, tag, commit, min_minor = install_pins()
+    repo, tag, commit, min_minor, patch_sha = install_pins()
     lock_sha = hashlib.sha256(lock_bytes).hexdigest()
     if lock_sha != PAM_RSSH_CARGO_LOCK_SHA256:
         die("pam_rssh's Cargo.lock is %s, not the pinned %s (commit %s). A moved file, or a bumped commit: review the "
@@ -334,10 +335,15 @@ def host_bom(setup_path, version, lock_bytes):
         "type": "library", "bom-ref": pam_ref, "name": "pam_rssh", "version": tag, "scope": "required",
         "description": "PAM module that authenticates through an ssh-agent; built from the commit tools/install.sh pins",
         "licenses": [{"license": {"id": "MIT"}}], "purl": pam_ref,
-        "pedigree": {"commits": [{"uid": commit, "url": repo[:-4] + "/commit/" + commit}]},
+        # What runs is the pinned commit PLUS SudoStamp's timeouts patch (install.sh refuses to build
+        # without it), so the patch is part of the pedigree, with the hash the build enforces.
+        "pedigree": {"commits": [{"uid": commit, "url": repo[:-4] + "/commit/" + commit}],
+                     "patches": [{"type": "unofficial",
+                                  "diff": {"url": "tools/patches/pam_rssh-timeouts.patch"}}]},
         "externalReferences": [{"type": "vcs", "url": repo, "comment": "commit " + commit}],
         "properties": [{"name": "sudostamp:cargo-lock-sha256", "value": lock_sha},
-                       {"name": "sudostamp:cargo-lock-url", "value": cargo_lock_url(commit)}],
+                       {"name": "sudostamp:cargo-lock-url", "value": cargo_lock_url(commit)},
+                       {"name": "sudostamp:patch-sha256", "value": patch_sha}],
     }
     dependencies = [{"ref": ref, "dependsOn": [pam_ref]}] + crate_deps
     return envelope(subject, [pam] + crates, dependencies,
