@@ -233,7 +233,7 @@ impl App {
             }
         });
         ui.add_space(4.0);
-        let mut go_pair = false;
+        let mut go_pair: Option<Option<std::net::SocketAddr>> = None;
         let mut fix: Option<Vec<String>> = None;
         match self.doctor.clone() {
             None => {
@@ -268,9 +268,12 @@ impl App {
                                             fix = Some(args);
                                         }
                                     }
-                                    Fix::Pair => {
+                                    Fix::Pair(addr) => {
+                                        if !check.fix.is_empty() {
+                                            ui.weak(&check.fix);
+                                        }
                                         if ui.button("Pair again").clicked() {
-                                            go_pair = true;
+                                            go_pair = Some(addr);
                                         }
                                     }
                                     Fix::Show(cmd) => {
@@ -308,8 +311,11 @@ impl App {
             }
             None => {}
         }
-        if go_pair {
+        if let Some(addr) = go_pair {
             self.tab = Tab::Pair;
+            if let Some(a) = addr {
+                self.manual = a.to_string();
+            }
         }
         if let Some(args) = fix {
             self.run_fix(args);

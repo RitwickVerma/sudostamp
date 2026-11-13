@@ -97,8 +97,9 @@ impl Report {
 pub enum Fix {
     /// `pkexec <installer> <args>`: only `apply` or `stage`, with at most a concrete `--phone`.
     Installer(Vec<String>),
-    /// Pairing again is the repair: open the Pair tab.
-    Pair,
+    /// Pairing again is the repair: open the Pair tab (with the phone's address when the fix
+    /// names one).
+    Pair(Option<SocketAddr>),
     /// Anything else (`chown`, `sudoedit`, a package manager): shown to copy, never run.
     Show(String),
 }
@@ -111,7 +112,7 @@ pub enum Fix {
 pub fn plan_fix(fix: &str) -> Fix {
     let fix = fix.split("   (").next().unwrap_or("").trim();
     let Some(cmd) = fix.strip_prefix("sudo ") else {
-        return Fix::Pair;
+        return Fix::Pair(None);
     };
     let words: Vec<&str> = cmd.split_whitespace().collect();
     let prog_ok = words
@@ -121,13 +122,16 @@ pub fn plan_fix(fix: &str) -> Fix {
         return Fix::Show(fix.to_string());
     }
     match words.as_slice() {
-        [_, "setup", ..] => Fix::Pair,
+        [_, "setup", "--phone", addr] => {
+            Fix::Pair(addr.parse().ok().filter(|a: &SocketAddr| a.port() != 0))
+        }
+        [_, "setup", ..] => Fix::Pair(None),
         [_, sub @ ("apply" | "stage")] => Fix::Installer(vec![(*sub).to_string()]),
         [_, sub @ ("apply" | "stage"), "--phone", addr] => match addr.parse::<SocketAddr>() {
             Ok(a) if a.port() != 0 => {
                 Fix::Installer(vec![(*sub).to_string(), "--phone".into(), a.to_string()])
             }
-            _ => Fix::Pair,
+            _ => Fix::Pair(None),
         },
         _ => Fix::Show(fix.to_string()),
     }
@@ -209,7 +213,7 @@ mod tests {
 
     #[test]
     fn fixes() {
-        use Fix::*;
+        use Fix::{Installer, Pair, Show};
         let apply = |a: &str| Installer(vec!["apply".into(), "--phone".into(), a.into()]);
         assert_eq!(
             plan_fix("sudo sudostamp apply --phone 192.168.1.20:7777"),
@@ -230,16 +234,32 @@ mod tests {
         // Placeholders and interactive setup go to pairing.
         assert_eq!(
             plan_fix("sudo sudostamp apply --phone <phone-ip>:7777"),
-            Pair
+            Pair(None)
         );
         assert_eq!(
             plan_fix("sudo sudostamp setup   (migrates an older SudoStamp)"),
-            Pair
+            Pair(None)
         );
-        assert_eq!(plan_fix("sudo sudostamp setup"), Pair);
-        assert_eq!(plan_fix(""), Pair);
-        assert_eq!(plan_fix("pair again"), Pair);
-        assert_eq!(plan_fix("sudo sudostamp apply --phone 1.2.3.4:0"), Pair);
+        let a: SocketAddr = "192.168.1.20:7777".parse().unwrap();
+        assert_eq!(
+            plan_fix("sudo sudostamp setup --phone 192.168.1.20:7777"),
+            Pair(Some(a))
+        );
+        assert_eq!(
+            plan_fix("sudo sudostamp setup --phone <phone-ip>:7777"),
+            Pair(None)
+        );
+        assert_eq!(
+            plan_fix("open the app, tap 'Pair a computer', then: sudo sudostamp setup"),
+            Pair(None)
+        );
+        assert_eq!(plan_fix("sudo sudostamp setup"), Pair(None));
+        assert_eq!(plan_fix(""), Pair(None));
+        assert_eq!(plan_fix("pair again"), Pair(None));
+        assert_eq!(
+            plan_fix("sudo sudostamp apply --phone 1.2.3.4:0"),
+            Pair(None)
+        );
         // Other commands are shown, never run.
         assert_eq!(
             plan_fix("sudo rm -f /tmp/x"),

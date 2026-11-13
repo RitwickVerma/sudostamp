@@ -83,6 +83,8 @@ pub fn read(path: &Path) -> Vec<Entry> {
         lines.next();
     }
     let mut all: Vec<Entry> = lines.filter_map(parse_line).collect();
+    // Appended in time order, but a clock step or a hand edit must not scramble the list.
+    all.sort_by_key(|e| e.ts);
     all.drain(..all.len().saturating_sub(KEEP));
     all
 }

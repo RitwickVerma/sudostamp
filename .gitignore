@@ -39,3 +39,4 @@ dist/
 
 # Rust (desktop/)
 desktop/target/
+.cargo-home/

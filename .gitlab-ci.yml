@@ -165,6 +165,44 @@ host-e2e:
   script:
     - SUDOSTAMP_SRC="$CI_PROJECT_DIR" bash tools/test/e2e.sh
 
+# The desktop app (desktop/, docs/DESKTOP.md): Rust, per-user, unprivileged, off the authentication
+# path. Formatting, clippy with warnings as errors, every test (the agent integration test runs
+# against tools/test/mock_agent.py, so SUDOSTAMP_REQUIRE_MOCK=1 makes a missing python3/cryptography a
+# failure instead of a silent skip), and `cargo deny` (advisories, licenses, bans, sources). The
+# toolchain is the one desktop/rust-toolchain.toml pins; the image is pinned by digest and cargo-deny
+# by release and SHA-256, so nothing here moves under a green pipeline.
+# The Gradle/SDK cache above is for `android`: this job keeps its own, keyed by Cargo.lock.
+desktop:
+  stage: test
+  extends: .not_scheduled
+  image: rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea
+  variables:
+    CARGO_HOME: "$CI_PROJECT_DIR/.cargo-home"
+    CARGO_TARGET_DIR: "$CI_PROJECT_DIR/desktop/target"
+    CARGO_DENY_VERSION: "0.20.2"
+    CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+  cache:
+    key:
+      files:
+        - desktop/Cargo.lock
+      prefix: "rust1.100.0"
+    paths:
+      - .cargo-home/registry/
+      - desktop/target/
+  before_script: []
+  script:
+    - cd desktop
+    - rustup show active-toolchain
+    - cargo fmt --check
+    - cargo clippy --locked --all-targets -- -D warnings
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends python3-cryptography >/dev/null
+    - SUDOSTAMP_REQUIRE_MOCK=1 cargo test --locked
+    - 'curl -fsSL -o /tmp/deny.tgz "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl.tar.gz"'
+    - echo "$CARGO_DENY_SHA256  /tmp/deny.tgz" | sha256sum -c -
+    - tar -xzf /tmp/deny.tgz -C /tmp && install -m755 /tmp/cargo-deny-*/cargo-deny /usr/local/bin/cargo-deny
+    - cargo deny check
+
 # Secrets in any commit ever pushed, not just the current tree (check-secrets.py scans the tree).
 gitleaks:
   stage: test
