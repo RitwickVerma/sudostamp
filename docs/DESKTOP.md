@@ -105,6 +105,38 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
   `{"v":1,"done":true|false,"attestation":"<line>","phone":"<addr>","text":"…"}`.
 - Same code path as interactive setup; `--json` changes presentation only.
 
+### Implementation notes (where the plumbing pins down what the text above leaves open)
+- **Who runs the probe.** `pam_exec` runs its command with the caller's *real* uid unless given
+  `seteuid`, and under sudo the real uid is the user's. So under sudo the probe (and the hook) is
+  **already the user, with no privilege**; the helpers then run as they are. Only a root caller
+  (`pam_check.py`, `su`, `pam_exec seteuid`) takes the `setpriv` drop. Either way the path under
+  `/run/user/<uid>` is only ever touched by the user's uid; any other uid, or no `setpriv`: no events
+  and no pause. The word `after` is the first argument of the hook line:
+  `auth [success=ignore ignore=ignore default=ignore] pam_exec.so quiet /usr/local/sbin/sudostamp-probe after phone=<addr> keys=<dir>`;
+  `check` (for `doctor`) is the phone check alone, with no flag and no event.
+- **`command`** starts with sudo's own `argv[0]` (`sudo pacman -Syu`), as `/proc/<pid>/cmdline` has
+  it; an empty argument shows as two spaces. When 512 characters of multi-byte text would pass 2048
+  bytes, the command is cut further until the datagram fits.
+- **`skipped`/`wrong-key`** is sent when the phone answers but offers none of the pinned keys;
+  `away` for everything else (nothing answers, a refused connection, a garbled answer).
+- **Pause flag.** Empty means empty after white space is stripped (`echo > paused` pauses). More
+  than 32 bytes, a non-digit, more than 12 digits, a time not in the future, a directory or a FIFO:
+  not paused. A symlink is followed, as the user. The probe exits 1 without dialling the phone and
+  sends `skipped`/`paused`; the hook then adds `not-approved` for the same pid, as for any skip.
+- **`doctor --json` ids.** The stable ids above, plus `helper-probe` and `helper-is-local` (for
+  `helper-<name>`), and three the text did not list: `pam-foreign` (pam_rssh lines SudoStamp did not
+  write), `sudoers` (sudo authenticating as root, or "needs root" when the sudoers files cannot be
+  read) and `scratch-pam` (a leftover test service). `user` is also reported `ok` (with the user's
+  name). An id can appear twice when one check finds two things. Plain `doctor` makes the same
+  "needs root" warning, so the two always agree; for a non-root plain `doctor` that is a new exit 2.
+  `pinned-key` and the others never need root: their files are world-readable.
+- **`setup --json`.** `--phone` is required (the app lists phones itself): without it, `done:false`.
+  Steps are `pairing`, `install`, `test` and `apply`, each `start` then `ok`; a failure is one
+  `fail` for the step that was running, then `done:false` with the reason in `text` (nothing
+  follows `done`). `ask:"confirm"` is asked for the same questions the interactive run asks (an
+  older SudoStamp stack to migrate, a temporary Rust toolchain). The `test` step needs the person
+  to approve on the phone: its start text says so.
+
 ## Explicitly NOT doing (YAGNI)
 
 - No daemon on the authentication path, no privileged helper, no polkit policy of our own.
