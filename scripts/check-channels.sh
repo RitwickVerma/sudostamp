@@ -33,7 +33,12 @@ else
 fi
 
 # AUR: its own copy of the PKGBUILD, not the search index (which lags).
-aur=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=sudostamp" 2>/dev/null | sed -n 's/^pkgver=//p')
+# The AUR's RPC: what yay and paru read, updated by the push itself. Not cgit's plain PKGBUILD, which a
+# cache in front of it kept at the old version for over an hour after the 1.5.0 push landed.
+aur=$(curl -fsSL "https://aur.archlinux.org/rpc/v5/info?arg%5B%5D=sudostamp" 2>/dev/null \
+  | python3 -c 'import json,sys
+try: r=json.load(sys.stdin)["results"]; print(r[0]["Version"].rsplit("-",1)[0] if r else "")
+except Exception: print("")')
 if [ "$aur" = "$VERSION" ]; then row "AUR" "$VERSION"; else row "AUR" "${aur:-unreachable} (expected $VERSION)"; fail=1; fi
 
 # Google Play: the public listing shows the version only on the page; best effort, not a gate
