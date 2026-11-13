@@ -1068,7 +1068,7 @@ cmd_setup() {
   local key why
   key="$(acquire_key)" || {
     # --json: pair.py left the reason in a file (the subshell above could not set LAST_BAD).
-    why="$(tr '\n' ' ' < "$ROOT_TMP/pair-fail" 2>/dev/null)" || why=""
+    why=""; [ -f "$ROOT_TMP/pair-fail" ] && why="$(tr '\n' ' ' < "$ROOT_TMP/pair-fail")"
     die "${why:-not paired; nothing on this computer was changed}"
   }
   adopt_paired_addr

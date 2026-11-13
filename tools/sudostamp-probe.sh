@@ -35,7 +35,8 @@
 # runs us with the caller's real uid), and from a root caller the access is made after dropping
 # to the user with setpriv (real, effective and saved ids, and the groups), so a symlink reaches
 # only what the user could reach anyway. No way to be the user: no events and no pause, never "do
-# it as root instead". 100 ms budget for the event, every failure ignored.
+# it as root instead". Each helper is killed at 250 ms (about 20 ms on a desktop), every failure
+# ignored.
 #
 # Read-only, no state. PATH is set here because pam_exec passes the caller's.
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -76,14 +77,16 @@ if [ "$MODE" != check ]; then
   esac
 fi
 
-# as_user CMD...: run CMD as the user, within 0.5 s (the helpers keep to 100 ms themselves; this
-# is for a hang before they start). No input, no output.
+# as_user CMD...: run CMD as the user, killed at 250 ms: the hard cap, whatever stalls (a loaded
+# machine can take 100 ms just to start python; the helpers' own timers start after that). At most
+# two run per sudo (the flag, the event), so the desktop costs half a second at the very worst.
+# No input, no output.
 as_user() {
   if [ "$DROP" = 1 ]; then
     set -- setpriv --reuid="$EV_UID" --regid="$EV_GID" --init-groups -- "$@"
   fi
   if command -v timeout >/dev/null 2>&1; then
-    timeout -s KILL 0.5 "$@" </dev/null >/dev/null 2>&1
+    timeout -s KILL 0.25 "$@" </dev/null >/dev/null 2>&1
   else
     "$@" </dev/null >/dev/null 2>&1
   fi
@@ -105,9 +108,9 @@ case "$c" in
 esac
 [ "${#c}" -le 12 ] && [ "$c" -gt "$(date +%s)" ]'
 
-# ---------------------------------------------- the event (sent AS THE USER, 100 ms in all)
+# ------------------------------------------- the event (sent AS THE USER, killed at 250 ms)
 # argv: uid sudo-pid event reason phone tty. Every failure exits 0: no socket, a socket of the
-# wrong kind, one nobody reads. The alarm is the 100 ms budget; the send itself waits 30 ms at most.
+# wrong kind, one nobody reads. The alarm gives up 70 ms after start-up; the send waits 30 ms at most.
 EVENT_PY=$(cat <<'PY'
 import _socket, os, signal, sys, time
 

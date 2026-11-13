@@ -16,7 +16,7 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
   the PAM stack, and cannot approve anything. Killing it, or never installing it, changes nothing
   about what sudo accepts.
 - The only PAM-side changes are **notifications out of the probe** (fire-and-forget, after dropping
-  to the user, bounded at 100 ms) and **a pause flag the probe honours**. Both can only make the
+  to the user, killed at 250 ms) and **a pause flag the probe honours**. Both can only make the
   probe *skip* the phone, i.e. go to the password. Neither can make anything authenticate.
 - Every privileged action the app offers runs the existing, reviewed installer through `pkexec`
   (`pkexec /usr/bin/sudostamp <subcommand>`), with polkit's own admin prompt. The app adds no new
@@ -65,8 +65,10 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
   datagram (with a command line the user wrote) at a root daemon's socket, such as journald's
   native socket, and forge its input. Sent as the user, it can reach only what the user could.
   No `setpriv` (macOS/FreeBSD) → no events.
-- Budget: the whole emission is capped at 100 ms and its failure is ignored; the probe's exit code
-  never depends on it.
+- Budget: each helper (the flag check, the send) is killed at 250 ms, so the desktop adds at most
+  half a second to a sudo (about 20 ms on a desktop); every failure is ignored and the probe's exit
+  code never depends on it. (The first draft said 100 ms: a loaded machine needs that just to start
+  python, so it was a target, not a cap.)
 - Payload: one UTF-8 JSON object per datagram, at most 2048 bytes, fields:
   `{"v":1,"event":"asking"|"skipped"|"not-approved","sudo_pid":<int>,"tty":"<PAM_TTY or empty>",
   "command":"<sudo's argv joined by spaces, control chars replaced by '?', cut to 512 chars>",
@@ -108,7 +110,9 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
 ### Implementation notes (where the plumbing pins down what the text above leaves open)
 - **Who runs the probe.** `pam_exec` runs its command with the caller's *real* uid unless given
   `seteuid`, and under sudo the real uid is the user's. So under sudo the probe (and the hook) is
-  **already the user, with no privilege**; the helpers then run as they are. Only a root caller
+  **already the user, with no privilege**: measured on dash (Debian) and bash (Arch), a helper under
+  sudo shows `Uid: 1000 1000 1000 1000` (real, effective, saved and filesystem), so no path in the
+  user's directory can make root send or read anything. The helpers then run as they are. Only a root caller
   (`pam_check.py`, `su`, `pam_exec seteuid`) takes the `setpriv` drop. Either way the path under
   `/run/user/<uid>` is only ever touched by the user's uid; any other uid, or no `setpriv`: no events
   and no pause. The word `after` is the first argument of the hook line:

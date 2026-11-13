@@ -67,8 +67,8 @@ phone:
 
 The directory belongs to the user, so both are made *as the user*. Under sudo, `pam_exec` already
 runs the probe with the caller's real uid; from a root caller the probe drops first with `setpriv`.
-Without `setpriv` (macOS, FreeBSD, which have no probe anyway) there are no events. The emission is
-capped at 100 ms and every failure is ignored: the probe's exit status and its 4 s phone check are
+Without `setpriv` (macOS, FreeBSD, which have no probe anyway) there are no events. Each helper is
+killed at 250 ms (about 20 ms in practice) and every failure is ignored: the probe's exit status and its 4 s phone check are
 exactly what they were. The 4 s check itself reports "offers none of the pinned keys" with its own
 exit status (2) inside the script, only to choose the `skipped` reason.
 

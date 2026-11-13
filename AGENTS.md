@@ -226,11 +226,12 @@ installer built: `uninstall` removes only that, `doctor` reads the patch state f
     Test both: the sudo flow (user) and the probe run directly as root (the drop, and a symlink in
     the user's directory that must reach nothing of root's).
 29. Anything under `/run/user/<uid>/sudostamp/` is the user's: only ever opened by the user's uid,
-    never a FIFO-blocking read (regular files only; the sender has a 30 ms send timeout and a 100 ms
-    alarm), never a decision that can make a sudo succeed. The probe's exit status and its 4 s phone
+    never a FIFO-blocking read (regular files only; the sender has a 30 ms send timeout and a 70 ms
+    alarm, and `timeout -s KILL 0.25` around each helper), never a decision that can make a sudo succeed. The probe's exit status and its 4 s phone
     check must stay what they were whatever happens there; the e2e compares them and times the probe
-    (fastest of 9 runs against the bare `check`, under 100 ms more). A timing test that uses one
-    run is a flaky test.
+    (fastest of 9 runs against the bare `check`, under the 500 ms cap). A timing test that uses one
+    run, or asserts a speed instead of the cap the code enforces, is a flaky test: CI runners
+    took 85-140 ms just to start python.
 30. `--json` keeps stdout for JSON only. `setup --json` moves fd 1 to stderr (`exec 3>&1 1>&2`) and
     writes events to fd 3; pair.py's own stdout is the key line captured by `$(...)`, so its question
     goes to fd 3 too (`--json-fd`) and its failure reason to a file (`--fail-out`). JSON strings are
