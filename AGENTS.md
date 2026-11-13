@@ -28,6 +28,10 @@ tools/verify.sh                                           # four gates; needs JA
   and `setup --json` are for the desktop app, docs/DESKTOP.md), configured by
   `--phone <ip>:7777` (or `SUDOSTAMP_PHONE`), run with plain `sudo`, never `sudo -E`. **Never run `apply` or `rollback` unless asked**:
   they replace `/etc/pam.d/sudo`. `stage` and `test` leave it alone.
+- Desktop app (Rust, `desktop/`, toolchain pinned in `desktop/rust-toolchain.toml`):
+  `cargo build --release --locked`; `target/release/sudostamp-desktop` (tray) or `... window`.
+  `SUDOSTAMP_INSTALLER=<path>` runs a checkout's or a fake installer; `SUDOSTAMP_PKEXEC` replaces
+  pkexec in tests only. Never install or autostart it on a machine you were not asked to.
 
 ## Test
 
@@ -39,6 +43,8 @@ python3 tools/check-secrets.py --all
 shellcheck -S warning tools/*.sh scripts/*.sh tools/test/*.sh
 python3 -I tools/test/test_pair.py && python3 -I tools/test/test_fuzz_pair.py   # CI hygiene
 SUDOSTAMP_ONLINE=1 python3 -I tools/test/test_sbom.py                          # online: pam_rssh Cargo.lock pin
+cd desktop && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings \
+  && cargo test --locked && cargo deny check                                   # CI job `desktop`
 ```
 
 - Fuzz tests (`*FuzzTest`, `SshSigStrictDerTest` on the JVM; `test_fuzz_pair.py`) are seeded and run 20 000
@@ -98,6 +104,15 @@ for `doctor`; docs/DESKTOP.md), device probes, `verify.sh`, `verify_ssh_sig.py`,
 loopback only, tests only), `event_sink.py` (the desktop app's datagram socket, a root socket, a full
 one), `check_event.py` / `check_doctor_json.py` (the schemas of docs/DESKTOP.md), `drive_setup.py`
 (drives `setup --json` like the app does) and `e2e.sh` (the host side end to end in a throwaway container).
+
+`desktop/` (Rust, `sudostamp-desktop`; docs/DESKTOP.md, desktop/README.md): pure modules with the
+tests -- `event` (the probe's datagram, hostile input), `pam` (phone address from the SudoStamp
+block), `keys`, `agent` (REQUEST_IDENTITIES, 4 s, framed reads), `pause`, `doctor`/`setup` (the
+installer's `--json`), `history`, `track` (approved = sudo has a child that is not a PAM helper),
+`state`/`engine` (the tray state) -- and thin edges: `listener` (the 0700/0600 socket), `notify`
+(zbus), `tray` (ksni), `window` (egui), `exec` (the only process starter; privileged = `pkexec` on a
+root-owned installer), `daemon`. Packaging: `packaging/aur-desktop/`, its own AUR package so the
+host package stays `arch=any`.
 
 Host side, per distribution, without a phone:
 

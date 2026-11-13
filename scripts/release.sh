@@ -82,8 +82,11 @@ if [ "$MODE" = prepare ]; then
     [ "$OLD_NAME" = "$VERSION" ] || NEW_CODE=$((OLD_CODE + 1))
     sed -i -E "s/^(\s*versionCode = )[0-9]+/\1$NEW_CODE/; s/^(\s*versionName = )\"[^\"]+\"/\1\"$VERSION\"/" "$GRADLE"
     sed -i -E "s/^## $VERSION — unreleased$/## $VERSION — $(date -u +%Y-%m-%d)/" CHANGELOG.md
+    # The desktop app carries the project's version, and Cargo.lock with it (--locked refuses a stale one).
+    sed -i -E "0,/^version = /s/^version = \"[^\"]+\"/version = \"$VERSION\"/" desktop/Cargo.toml
+    sed -i "/^name = \"sudostamp-desktop\"$/{n;s/^version = .*/version = \"$VERSION\"/}" desktop/Cargo.lock
     scripts/release-check.sh "$VERSION"
-    git add "$GRADLE" CHANGELOG.md
+    git add "$GRADLE" CHANGELOG.md desktop/Cargo.toml desktop/Cargo.lock
     git commit -q -m "Release $VERSION" -m "versionCode $OLD_CODE -> $NEW_CODE. After merging, tag the merge commit: git tag -a $TAG -m \"SudoStamp $VERSION\" && git push origin $TAG"
     git push -q -u origin "$BRANCH" \
       -o merge_request.create -o merge_request.target=master -o merge_request.remove_source_branch \

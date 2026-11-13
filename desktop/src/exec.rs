@@ -301,7 +301,10 @@ mod tests {
 
     #[test]
     fn privileged_runs_refuse_a_user_owned_installer() {
+        // Group-writable, so it is refused whoever runs the test: CI runs as root, where a file
+        // "of the user's" is root's.
         let p = script("owned", "true");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o775)).unwrap();
         let e = privileged(&p, &["apply".into()], &no_env).unwrap_err();
         assert!(e.contains("not owned by root"), "{e}");
         let stub = |k: &str| (k == "SUDOSTAMP_PKEXEC").then(|| "/usr/bin/env".to_string());
