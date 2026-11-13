@@ -2,6 +2,37 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
+## 1.6.0 — unreleased
+
+The phone app is unchanged: this release is the computer side.
+
+### Desktop (new, Linux)
+- **`sudostamp-desktop`**, a tray app (AUR `sudostamp-desktop`). It runs as you, holds no key and
+  is not part of how sudo authenticates: without it, sudo behaves exactly the same.
+- **A tray icon** that says Ready, Phone away, Paused or Needs attention, from the phone's live
+  answer and `doctor`, checked at start, when the menu opens, after each sudo and every 5 minutes.
+- **Notifications that name the command**: "`sudo pacman -Syu` is waiting for your phone", then
+  Approved, Not approved (the password) or Phone not reachable (the password). The phone itself
+  cannot show this: pam_rssh sends it only a challenge.
+- **Pause on this computer** from the tray, until resumed or for an hour: sudo goes straight to the
+  password and the phone hears nothing. It ends at logout or reboot.
+- **A window** with Health (doctor's checks, a Fix button for each, run through `pkexec` and the
+  installer) and Pair a phone (discovery, the 6-digit code, the key's attestation), plus the last
+  100 sudo requests on this computer. GNOME shows tray icons only with the AppIndicator extension.
+
+### Computer
+- The probe tells the desktop app what sudo is doing (asking, skipped, not approved) over a socket
+  in your runtime directory. It sends as you, never as root, so nothing planted there can make root
+  send or read anything; every failure is ignored and each step is killed at 250 ms (about 20 ms
+  in practice).
+- The sudo block gains one line after pam_rssh, a hook whose result never counts. `setup` and
+  `apply` update an older block; `status` and `doctor` say when a block predates it.
+- **Pause flag**: an empty `/run/user/<uid>/sudostamp/paused`, or one holding a future unix time,
+  makes sudo skip the phone. Read as you, never as root.
+- `doctor --json` and `setup --json` for programs. `doctor` now runs without root and says
+  "needs root" for what it cannot read (a non-root `doctor` can now exit 2).
+- A failed pairing no longer prints a stray "No such file or directory".
+
 ## 1.5.0 — 2026-11-12
 
 Includes 1.4.1, which was prepared but never published on its own.
