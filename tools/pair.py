@@ -3,7 +3,7 @@
 
     pair.py discover                       print "address:port<TAB>name" for each phone found
     pair.py pair --phone ADDR [--label L] [--addr-out FILE] [--attest-out FILE]
-                 [--require-attestation] [--check-revocation]
+                 [--require-attestation] [--check-revocation] [--json-fd N] [--fail-out FILE]
                                            pair; print the verified key line on stdout, and
                                            write the address to keep for the phone to FILE
 
@@ -27,13 +27,16 @@ receives "<key fingerprint> TAB <that line>" for `install.sh status`. Nothing is
 the network unless --check-revocation is given.
 
 Prompts go to stderr and the typed code is read from stdin, so `install.sh` can capture the
-key line from stdout. Python standard library only: this runs as root (with -I).
+key line from stdout. With --json-fd N (install.sh setup --json) the question is also written to
+fd N as one JSON line, {"v":1,"ask":"code",...}, which the caller answers on stdin like a person
+would; --fail-out FILE receives the reason of a refused or failed pairing. Python standard library only: this runs as root (with -I).
 """
 import argparse
 import base64
 import hashlib
 import hmac
 import importlib.util
+import json
 import ipaddress
 import os
 import re
@@ -58,6 +61,18 @@ SERVICE = "_sudostamp._tcp.local."
 
 def say(msg=""):
     print(msg, file=sys.stderr, flush=True)
+
+
+WHY = ""          # the reason of a failure that has already been said on stderr (sys.exit(1))
+
+
+def ask_json(fd, text):
+    """The question, as one JSON line on fd (setup --json), next to the human prompt."""
+    line = json.dumps({"v": 1, "ask": "code", "text": text}, separators=(",", ":")) + "\n"
+    try:
+        os.write(fd, line.encode("ascii"))
+    except OSError:
+        pass
 
 
 def s(b):
@@ -251,6 +266,7 @@ def fingerprint(blob):
 
 
 def cmd_pair(a):
+    global WHY
     label = (a.label or socket.gethostname()).encode("ascii", "replace")[:64]
     try:
         ag = Agent(a.phone)
@@ -297,6 +313,9 @@ def cmd_pair(a):
     say("  Your phone now shows a 6-digit code.")
     say("  Type it here. (Check the phone says '%s'.)" % label.decode("ascii", "replace"))
     say("")
+    if a.json_fd is not None:
+        ask_json(a.json_fd, "Type the 6-digit code the phone shows (check it names %s)" %
+                 label.decode("ascii", "replace"))
     sys.stderr.write("  Code on the phone: ")
     sys.stderr.flush()
     typed = "".join(ch for ch in read_line() if ch.isdigit())
@@ -307,6 +326,7 @@ def cmd_pair(a):
         say("  That is not the code this computer expected. NOTHING was pinned.")
         say("  If you typed it correctly, this computer may not be talking to your phone directly.")
         say("  Start again from the phone ('Pair a computer').")
+        WHY = "That is not the code this computer expected. NOTHING was pinned."
         sys.exit(1)
 
     # Tells the phone to keep the key (as a new computer, until its first approval). Then, on the
@@ -335,6 +355,7 @@ def cmd_pair(a):
         say("  NOT pinned%s. Nothing on this computer was changed." %
             (" (--require-attestation)" if res.verdict != "refused" else ""))
         say("  The phone still lists this computer; remove it in the app (Computers) if you do not want it.")
+        WHY = "The key was NOT pinned: " + res.line()
         sys.exit(1)
     if a.attest_out:
         with open(a.attest_out, "w") as f:
@@ -586,12 +607,25 @@ def main():
     p.add_argument("--attest-out")
     p.add_argument("--require-attestation", action="store_true")
     p.add_argument("--check-revocation", action="store_true")
+    p.add_argument("--json-fd", type=int)
+    p.add_argument("--fail-out")
     d = sub.add_parser("discover")
     d.add_argument("--timeout", type=float, default=3.0)
     d.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     if a.cmd == "pair":
-        cmd_pair(a)
+        try:
+            cmd_pair(a)
+        except SystemExit as e:
+            # What the person was told, for install.sh's final JSON event.
+            why = e.code if isinstance(e.code, str) else WHY
+            if a.fail_out and why:
+                try:
+                    with open(a.fail_out, "w") as f:
+                        f.write(why)
+                except OSError:
+                    pass
+            raise
     else:
         sys.exit(cmd_discover(a))
 

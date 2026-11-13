@@ -30,8 +30,9 @@ grant one: their lines use `[success=ignore ignore=ignore default=1]`.
 sudo on the host
   |
   v
-/etc/pam.d/sudo  ->  [probe: phone answers with this user's key within 4 s? else skip]
+/etc/pam.d/sudo  ->  [probe: paused? phone answers with this user's key within 4 s? else skip]
                      auth sufficient pam_rssh.so ssh_agent_addr=<phone>:7777 auth_key_file=/etc/authorized_keys/${user}.keys cue
+                     [hook: only reached when the phone path did not authenticate; tells the desktop]
   |
   v   (direct TCP, no bridge: pam_rssh connects to the phone itself)
 Android app (listening on TCP 7777; serves only peers on the Wi-Fi/Ethernet subnet it was reached on)
@@ -46,6 +47,34 @@ Android app
   v
 SSH2_AGENT_SIGN_RESPONSE  ->  pam_rssh verifies -> exit 0 -> sudo granted
 ```
+
+## The desktop's two side channels (1.6)
+
+The optional desktop app (docs/DESKTOP.md) lives entirely outside the authentication path. Two
+things on the host serve it, both inside the probe, and both can only make the probe *skip* the
+phone:
+
+- **Events.** The probe sends one datagram (`asking`, `skipped`) to
+  `/run/user/<uid>/sudostamp/events.sock`, and a hook line after pam_rssh sends `not-approved`
+  when the phone path did not authenticate. The hook's PAM control is
+  `[success=ignore ignore=ignore default=ignore]`, so it cannot change the stack's result. One
+  file, three modes (`sudostamp-probe`, `... after`, `... check`), so the bundle and the packages
+  carry the same single helper as before. The datagram carries the sudo's command line, which
+  pam_rssh never gives the phone.
+- **Pause.** The same probe reads `/run/user/<uid>/sudostamp/paused` before dialling the phone:
+  empty is "until resumed", a future unix time is "until then". Paused, it exits 1, so sudo goes
+  to the password and the phone sees nothing.
+
+The directory belongs to the user, so both are made *as the user*. Under sudo, `pam_exec` already
+runs the probe with the caller's real uid; from a root caller the probe drops first with `setpriv`.
+Without `setpriv` (macOS, FreeBSD, which have no probe anyway) there are no events. The emission is
+capped at 100 ms and every failure is ignored: the probe's exit status and its 4 s phone check are
+exactly what they were. The 4 s check itself reports "offers none of the pinned keys" with its own
+exit status (2) inside the script, only to choose the `skipped` reason.
+
+`install.sh doctor --json` and `setup --json` are the same code as `doctor` and `setup` with another
+presentation (a JSON object, JSON lines with the questions answered on stdin), so the app drives
+the reviewed installer through `pkexec` and adds no privileged code of its own.
 
 ## Why this is a HARD gate
 

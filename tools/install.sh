@@ -9,6 +9,10 @@
 #   sudo tools/install.sh rollback           # take the block out again
 #   tools/install.sh status                  # what is in place
 #   sudo tools/install.sh doctor             # is it healthy? read-only; exit 0 OK, 1 FAIL, 2 WARN
+#   tools/install.sh doctor --json           # the same, as one JSON object; runs without root
+#   sudo tools/install.sh setup --phone $P --json   # the same setup, progress as JSON lines
+#                                            # (stdout), human text on stderr, answers on stdin
+#                                            # (docs/DESKTOP.md: the desktop app drives this)
 #   sudo tools/install.sh uninstall [--yes]  # remove everything SudoStamp installed, nothing else
 #
 # Options: --fingerprint SHA256:... skips the interactive fingerprint check (the app's "Copy
@@ -85,6 +89,10 @@ PROBE="/usr/local/sbin/sudostamp-probe"
 # check failing would still have authenticated. `ignore` makes success mean only "carry on".
 # The probe in front of pam_rssh uses the same flags: success carries on, failure skips one line.
 GATE_CONTROL='[success=ignore ignore=ignore default=1]'
+# The hook after pam_rssh. Whatever it returns, the stack's result is unchanged: success and
+# ignore do not count, and any failure is ignored too. It only tells the desktop that the phone
+# path did not authenticate (docs/DESKTOP.md).
+AFTER_CONTROL='[success=ignore ignore=ignore default=ignore]'
 # How long the LOCAL sensor waits for a finger. Only ever paid at the desk: the gate skips
 # pam_fprintd on remote (SSH/mosh) sessions.
 FPRINT_TIMEOUT=15
@@ -116,9 +124,65 @@ VENDOR_MARK="# SudoStamp: copied from the vendor file; rollback deletes this fil
 
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$*"; }
-bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
+bad()  { LAST_BAD="$*"; printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33mWARN\033[0m %s\n' "$*"; }
 die()  { bad "$*"; exit 1; }
+
+# --json (docs/DESKTOP.md): `doctor` prints one JSON object, `setup` prints JSON lines on the real
+# stdout, kept on fd 3 while fd 1 carries the human text to stderr (cmd_setup does the exec). No
+# python3 here: setup may run before python3 is installed, and doctor must stay read-only and
+# self-contained. Text reaching it is ours, a hostname or the phone's; printable ASCII is all that
+# survives, so the output is valid UTF-8 JSON whatever came in.
+JSON=0
+JSON_CMD=""
+LAST_BAD=""
+json_esc() {
+  local s
+  s="$(printf '%s' "$1" | LC_ALL=C tr -c ' -~' '?')"
+  s="${s//\\/\\\\}"
+  printf '%s' "${s//\"/\\\"}"
+}
+# A JSON line for setup, on the real stdout: jline key value [key value]... (strings only).
+jline() {
+  local out='{"v":1' k
+  while [ $# -ge 2 ]; do
+    k="$1"
+    case "$2" in
+      true|false) out="$out,\"$k\":$2" ;;
+      *)          out="$out,\"$k\":\"$(json_esc "$2")\"" ;;
+    esac
+    shift 2
+  done
+  printf '%s}\n' "$out" >&3
+}
+JSON_STEP=""
+JSON_DONE=0
+# A setup step: start / ok / fail, one line each.
+jstep() {
+  [ "$JSON" = 1 ] || return 0
+  [ "$2" = start ] && JSON_STEP="$1"
+  jline step "$1" status "$2" text "$3"
+}
+# Setup's last word, once: a failed run says why through its step, then done:false.
+jfinish() {   # exit status
+  [ "$JSON" = 1 ] && [ "$JSON_CMD" = setup ] && [ "$JSON_DONE" = 0 ] || return 0
+  JSON_DONE=1
+  if [ "$1" -ne 0 ]; then
+    [ -z "$JSON_STEP" ] || jline step "$JSON_STEP" status fail text "${LAST_BAD:-stopped}"
+    jline "done" false attestation "" phone "$PHONE_ADDR" text "${LAST_BAD:-stopped}"
+  fi
+}
+# A yes/no question. Interactive: as before. --json: asked of the caller, answered on stdin.
+ask_yes() {   # prompt; true on "yes"
+  local answer=""
+  if [ "$JSON" = 1 ]; then
+    jline ask confirm text "$1"
+    read -r answer || answer=""
+  else
+    read -r -p "     $1 [yes/no] " answer || answer=""
+  fi
+  [ "$answer" = yes ]
+}
 
 # Temporary files root writes live in ONE private directory (0700, root), created with an
 # explicit template so a caller's TMPDIR cannot steer it into a user-writable parent. Names
@@ -126,7 +190,11 @@ die()  { bad "$*"; exit 1; }
 # list, and a pre-planted symlink at such a name would be written through as root.
 ROOT_TMP=""
 BUILD_DIR=""
-cleanup() { rm -rf "${BUILD_DIR:-}" "${ROOT_TMP:-}" "${SUDOSTAMP_BUNDLE_DIR:-}"; }
+cleanup() {
+  local rc=$?
+  rm -rf "${BUILD_DIR:-}" "${ROOT_TMP:-}" "${SUDOSTAMP_BUNDLE_DIR:-}"
+  jfinish "$rc"
+}
 trap cleanup EXIT
 root_tmp() {
   [ -n "$ROOT_TMP" ] || ROOT_TMP="$(mktemp -d /tmp/sudostamp.XXXXXXXX)" || die "mktemp failed"
@@ -276,7 +344,7 @@ module_ref() {
 need_root() {
   local more=" --phone <phone-ip>:7777"
   case "$1" in rollback|uninstall|doctor) more="" ;; esac
-  [ "$(id -u)" -eq 0 ] || { echo "This needs root. Run: sudo $PROG $1$more" >&2; exit 1; }
+  [ "$(id -u)" -eq 0 ] || { LAST_BAD="This needs root. Run: sudo $PROG $1$more"; echo "$LAST_BAD" >&2; exit 1; }
 }
 need_platform() {
   [ -n "$FAMILY" ] || die "unsupported platform ($OS, /etc/os-release: ${ids:-none}). See README.md for the lines to add by hand."
@@ -456,7 +524,7 @@ newer_cargo() {
 # It downloads and runs a toolchain, so it needs consent: SUDOSTAMP_ALLOW_RUSTUP=1, or a
 # yes at the prompt. The binary is checked against the checksum rust-lang publishes.
 rustup_cargo() {
-  local work="$1" triple answer
+  local work="$1" triple
   case "$(uname -m)" in
     x86_64|amd64) triple=x86_64 ;;
     aarch64|arm64) triple=aarch64 ;;
@@ -470,8 +538,7 @@ rustup_cargo() {
   if [ "${SUDOSTAMP_ALLOW_RUSTUP:-}" != 1 ]; then
     # stderr: this runs inside $(...), whose stdout is the cargo path.
     say "     The system Rust is too old to build pam_rssh (needs 1.$CARGO_MIN_MINOR)." >&2
-    read -r -p "     Download a temporary toolchain with rustup (deleted afterwards)? [yes/no] " answer
-    [ "$answer" = yes ] || return 1
+    ask_yes "Download a temporary toolchain with rustup (deleted afterwards)?" >&2 || return 1
   fi
   local url="https://static.rust-lang.org/rustup/dist/$triple/rustup-init"
   local dir="$work/rust" sum
@@ -646,6 +713,16 @@ sudo_auths_as_root() {
   # shellcheck disable=SC2086
   ! grep -hqE "^[[:space:]]*Defaults:${TARGET_USER}[[:space:]][^#]*!(targetpw|rootpw|runaspw)" $files 2>/dev/null
 }
+# Is one of the sudoers files out of this user's reach? Then sudo_auths_as_root cannot see it, and
+# its "no" would be a guess: doctor says "needs root" instead of passing it.
+sudoers_unreadable() {
+  local f
+  [ "$(id -u)" -ne 0 ] || return 1
+  for f in /etc/sudoers /usr/etc/sudoers /usr/local/etc/sudoers /etc/sudoers.d/* /usr/etc/sudoers.d/*; do
+    [ -f "$f" ] && [ ! -r "$f" ] && return 0
+  done
+  return 1
+}
 warn_targetpw() {
   sudo_auths_as_root || return 0
   warn "sudo here asks for the TARGET's (root's) password: 'Defaults targetpw' or 'rootpw' is set."
@@ -662,6 +739,7 @@ warn_targetpw() {
 #   reader (only with a local reader) pam_fprintd, sufficient
 #   probe  phone not answering with this user's key within seconds? then skip pam_rssh
 #   phone  pam_rssh, sufficient
+#   after  (Linux-PAM) tell the desktop the phone did not authenticate; its result never counts
 # Nothing here can grant anything by itself: only pam_fprintd and pam_rssh say yes, and both
 # are `sufficient` -- on failure the stack below (the password) decides, untouched. OpenPAM has
 # no skipping syntax, so there it is the phone line alone.
@@ -676,6 +754,9 @@ block_lines() {
   fi
   printf 'auth       sufficient   %s ssh_agent_addr=%s auth_key_file=%s/${user}.keys cue cue_prompt=SudoStamp-approve-on-your-phone-(up-to-60s)\n' \
     "$mod" "$PHONE_ADDR" "$KEYDIR"
+  if linux_pam; then
+    printf 'auth       %s  pam_exec.so quiet %s after phone=%s keys=%s\n' "$AFTER_CONTROL" "$PROBE" "$PHONE_ADDR" "$KEYDIR"
+  fi
 }
 block() { echo "$BEGIN_MARK"; block_lines; echo "$END_MARK"; }
 
@@ -806,6 +887,9 @@ acquire_key() {
     local addr_file extra=(); addr_file="$(root_tmp)/phone-addr"
     [ -z "${SUDOSTAMP_REQUIRE_ATTESTATION:-}" ] || extra+=(--require-attestation)
     [ -z "${SUDOSTAMP_CHECK_REVOCATION:-}" ] || extra+=(--check-revocation)
+    # --json: pair.py asks its question on fd 3 (the real stdout; its own stdout is the key
+    # line captured here) and leaves the reason it failed in a file for the final event.
+    [ "$JSON" = 0 ] || extra+=(--json-fd 3 --fail-out "$(root_tmp)/pair-fail")
     key="$(python3 -I "$HERE/pair.py" pair --phone "$PHONE_ADDR" --label "$(hostname 2>/dev/null || uname -n)" \
              --addr-out "$addr_file" --attest-out "$(root_tmp)/attest" ${extra[@]+"${extra[@]}"})" || return 1
   fi
@@ -900,7 +984,7 @@ run_test() {
 # by this script) hold the stack from before it; restore the newest one without pam_rssh, after
 # keeping a copy of what is there now. Asks first: other edits made since would go too.
 migrate_legacy() {
-  local target bak answer
+  local target bak
   target="$(pam_target)"
   has_foreign_rssh "$target" || return 0
   bak="$(clean_backups "$target" | tail -1)"
@@ -909,8 +993,7 @@ migrate_legacy() {
   say "     It will be replaced by $bak (from before SudoStamp), and then get the new block."
   say "     Any other change made to $target since then is lost; a copy is kept."
   if [ "${SUDOSTAMP_YES:-}" != 1 ]; then
-    read -r -p "     Continue? [yes/no] " answer
-    [ "$answer" = yes ] || die "stopped; nothing changed"
+    ask_yes "Continue?" || die "stopped; nothing changed"
   fi
   backup_of "$target" >/dev/null || die "could not back up $target"
   cp -p "$bak" "$target.sudostamp-new" && mv -f "$target.sudostamp-new" "$target"
@@ -968,36 +1051,57 @@ cmd_setup() {
   say "=== SudoStamp setup ($FAMILY) ==="
   base_deps >/dev/null || die "could not install base dependencies (python3, ssh-keygen, git)"
   root_tmp >/dev/null
+  if [ -z "$PHONE_ADDR" ] && [ "$JSON" = 1 ]; then
+    # Nobody to ask which phone: the caller (the desktop app) lists them first.
+    LAST_BAD="setup --json needs --phone <address>:7777"; echo "$LAST_BAD" >&2; exit 2
+  fi
   [ -n "$PHONE_ADDR" ] || find_phone
   need_phone
 
   say
   say "1/4  Pairing with the phone at $PHONE_ADDR"
-  local key
-  key="$(acquire_key)" || die "not paired; nothing on this computer was changed"
+  jstep pairing start "Pairing with the phone at $PHONE_ADDR"
+  local key why
+  key="$(acquire_key)" || {
+    # --json: pair.py left the reason in a file (the subshell above could not set LAST_BAD).
+    why="$(tr '\n' ' ' < "$ROOT_TMP/pair-fail" 2>/dev/null)" || why=""
+    die "${why:-not paired; nothing on this computer was changed}"
+  }
   adopt_paired_addr
   ok "the phone will be reached at $PHONE_ADDR"
+  jstep pairing ok "Paired: the phone will be reached at $PHONE_ADDR"
 
   say
   say "2/4  Installing pam_rssh"
+  jstep install start "Installing pam_rssh and pinning the phone's key"
   install_pam_rssh
   install_helpers
   pin_key "$key"
+  jstep install ok "pam_rssh installed, the phone's key pinned"
 
   say
   say "3/4  Testing, without touching sudo yet"
+  jstep test start "Approve the test request on your phone"
   run_test || exit 1
+  jstep test ok "The phone approved through PAM"
 
   say
   say "4/4  Turning it on for sudo"
+  jstep apply start "Adding the SudoStamp block to sudo's PAM stack"
   migrate_legacy
   do_apply
   warn_targetpw
+  jstep apply ok "sudo now asks the phone first"
 
   say
   ok "Done. Every sudo now asks your phone first; your password still works as before."
   say "     Try it in a second terminal:   sudo -k && sudo true"
   say "     Undo at any time:              sudo $PROG rollback"
+  if [ "$JSON" = 1 ]; then
+    JSON_DONE=1
+    jline "done" true attestation "$(attest_line)" phone "$PHONE_ADDR" \
+      text "Every sudo now asks your phone first; your password still works as before."
+  fi
 }
 
 # ---------------------------------------------------- stage / test / apply (scripts)
@@ -1247,6 +1351,8 @@ cmd_status() {
   say "probe           : $([ -x "$PROBE" ] && echo "$PROBE" || echo "absent$(linux_pam || echo ' (not used on OpenPAM)')")"
   if has_block "$target" && grep -qF "$OLD_GATE_CONTROL" "$target"; then
     say "PAM             : SudoStamp block from an older version in $target -- run 'sudo $PROG setup' to update it"
+  elif has_block "$target" && linux_pam && ! grep -qF "$PROBE after" "$target"; then
+    say "PAM             : SudoStamp block from an older version in $target (no hook after pam_rssh) -- run 'sudo $PROG setup' to update it"
   elif has_block "$target"; then say "PAM             : SudoStamp block present in $target"
   elif has_foreign_rssh "$target"; then say "PAM             : pam_rssh lines NOT written by this script in $target"
   else say "PAM             : not applied ($target)"; fi
@@ -1265,9 +1371,25 @@ cmd_status() {
 
 DOC_FAIL=0
 DOC_WARN=0
-d_ok()   { ok "$*"; }
-d_warn() { warn "$1"; DOC_WARN=$((DOC_WARN + 1)); [ -z "${2:-}" ] || say "       fix: $2"; }
-d_bad()  { bad "$1"; DOC_FAIL=$((DOC_FAIL + 1)); [ -z "${2:-}" ] || say "       fix: $2"; }
+DOC_JSON=""
+# --json: one object per check, collected here and printed by doctor_end.
+doc_add() {   # id status text fix
+  DOC_JSON="${DOC_JSON:+$DOC_JSON,}{\"id\":\"$1\",\"status\":\"$2\",\"text\":\"$(json_esc "$3")\",\"fix\":\"$(json_esc "${4:-}")\"}"
+}
+# Every check has a stable id (docs/DESKTOP.md): the desktop app keys on them.
+d_ok() {
+  if [ "$JSON" = 1 ]; then doc_add "$1" ok "$2"; else ok "$2"; fi
+}
+d_warn() {
+  DOC_WARN=$((DOC_WARN + 1))
+  if [ "$JSON" = 1 ]; then doc_add "$1" warn "$2" "${3:-}"
+  else warn "$2"; [ -z "${3:-}" ] || say "       fix: $3"; fi
+}
+d_bad() {
+  DOC_FAIL=$((DOC_FAIL + 1))
+  if [ "$JSON" = 1 ]; then doc_add "$1" fail "$2" "${3:-}"
+  else bad "$2"; [ -z "${3:-}" ] || say "       fix: $3"; fi
+}
 
 # "<uid> <mode>" of $1.
 file_facts() { ls -ldn "$1" 2>/dev/null | awk '{print $3, $1}'; }
@@ -1281,16 +1403,20 @@ root_safe() {
   return 0
 }
 doctor_end() {
-  say
-  if [ "$DOC_FAIL" -gt 0 ]; then
-    say "$DOC_FAIL problem(s), $DOC_WARN warning(s). Nothing was changed: run the fix commands above."
-    exit 1
-  elif [ "$DOC_WARN" -gt 0 ]; then
-    say "$DOC_WARN warning(s), no problems. Nothing was changed."
-    exit 2
+  local rc=0
+  [ "$DOC_FAIL" -gt 0 ] && rc=1
+  [ "$rc" = 0 ] && [ "$DOC_WARN" -gt 0 ] && rc=2
+  if [ "$JSON" = 1 ]; then
+    printf '{"v":1,"checks":[%s],"exit":%d}\n' "$DOC_JSON" "$rc"
+    exit "$rc"
   fi
-  say "All checks passed. Nothing was changed."
-  exit 0
+  say
+  case "$rc" in
+    1) say "$DOC_FAIL problem(s), $DOC_WARN warning(s). Nothing was changed: run the fix commands above." ;;
+    2) say "$DOC_WARN warning(s), no problems. Nothing was changed." ;;
+    *) say "All checks passed. Nothing was changed." ;;
+  esac
+  exit "$rc"
 }
 # Does something answer on $1 (host:port) within 4 seconds?
 phone_reachable() {
@@ -1303,125 +1429,132 @@ except Exception:
     sys.exit(1)
 PY
 }
-# A helper script: present, root-owned, identical to this installer's copy ($2 = its name in tools/).
+# A helper script: present, root-owned, identical to this installer's copy ($3 = its name in
+# tools/; $1 = the check's id, helper-<name>).
 doctor_helper() {
-  local path="$1" src="$HERE/$2" fix="$3"
+  local id="$1" path="$2" src="$HERE/$3" fix="$4"
   if [ ! -f "$path" ]; then
-    d_bad "helper $path is missing: the PAM block calls it" "$fix"
+    d_bad "$id" "helper $path is missing: the PAM block calls it" "$fix"
   elif ! root_safe "$path"; then
-    d_bad "helper $path is not root-owned or is writable by others: root runs it on every sudo" "sudo chown 0:0 $path && sudo chmod 0755 $path"
+    d_bad "$id" "helper $path is not root-owned or is writable by others: root runs it on every sudo" "sudo chown 0:0 $path && sudo chmod 0755 $path"
   elif [ -f "$src" ] && [ "$(sha256_file "$path")" != "$(sha256_file "$src")" ]; then
-    d_warn "helper $path differs from this installer's copy" "$fix"
+    d_warn "$id" "helper $path differs from this installer's copy" "$fix"
   else
-    d_ok "helper $path: present, root-owned, matches this installer"
+    d_ok "$id" "helper $path: present, root-owned, matches this installer"
   fi
 }
 
 cmd_doctor() {
   local target block expected mod st addr="" found newaddr facts user_ok=1 gate_expected=0
   target="$(pam_target)"
-  say "=== doctor: read-only, changes nothing ==="
+  [ "$JSON" = 1 ] || say "=== doctor: read-only, changes nothing ==="
 
   # 1. platform
   if [ -z "$FAMILY" ]; then
-    d_bad "platform: $OS is not supported (/etc/os-release: ${ids:-none})" "see README.md for the lines to add by hand"
+    d_bad platform "platform: $OS is not supported (/etc/os-release: ${ids:-none})" "see README.md for the lines to add by hand"
     doctor_end
   fi
-  d_ok "platform: $FAMILY"
+  d_ok platform "platform: $FAMILY"
   if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = root ] || ! id "$TARGET_USER" >/dev/null 2>&1; then
     user_ok=0
-    d_warn "user: cannot tell whose key to check" "sudo $PROG doctor   (from your own account), or SUDOSTAMP_USER=<user> $PROG doctor"
+    d_warn user "user: cannot tell whose key to check" "sudo $PROG doctor   (from your own account), or SUDOSTAMP_USER=<user> $PROG doctor"
+  else
+    d_ok user "user: $TARGET_USER"
   fi
 
   # 2. the PAM block
-  if has_block "$target"; then
+  if [ "$(id -u)" -ne 0 ] && [ -e "$target" ] && [ ! -r "$target" ]; then
+    d_warn pam-block "PAM block: needs root: $target cannot be read by this user" "sudo $PROG doctor"
+  elif has_block "$target"; then
     if ! without_block "$target" >/dev/null; then
-      d_bad "PAM block: damaged markers in $target (a BEGIN without its END, or two blocks)" \
+      d_bad pam-block "PAM block: damaged markers in $target (a BEGIN without its END, or two blocks)" \
         "edit $target: keep exactly one '# >>> SudoStamp >>>' ... '# <<< SudoStamp <<<' pair, or delete both; backups are in $(backup_dir). Then: sudo $PROG setup"
     else
       block="$(awk -v b="$BEGIN_MARK" -v e="$END_MARK" '$0==b{i=1} i{print} $0==e{i=0}' "$target")"
       addr="$(printf '%s\n' "$block" | sed -n 's/.*ssh_agent_addr=\([^ ]*\).*/\1/p' | head -1)"
       if [ -z "$addr" ] || ! phone_valid "$addr"; then
-        d_bad "PAM block: no usable phone address in the pam_rssh line" "sudo $PROG apply --phone <phone-ip>:7777"
+        d_bad pam-block "PAM block: no usable phone address in the pam_rssh line" "sudo $PROG apply --phone <phone-ip>:7777"
         addr=""
       fi
       # What THIS installer would write for that phone on this machine.
       expected="$( (PHONE_ADDR="$addr"; block) 2>/dev/null )" || expected=""
       if printf '%s\n' "$block" | grep -qF "$OLD_GATE_CONTROL"; then
-        d_warn "PAM block: written by an older version (its gate counts as success)" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+        d_warn pam-block "PAM block: written by an older version (its gate counts as success)" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+      elif linux_pam && ! printf '%s\n' "$block" | grep -qF "$PROBE after"; then
+        d_warn pam-block "PAM block: written by an older version (no hook after pam_rssh, so the desktop is not told when the phone did not approve)" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
       elif [ -z "$expected" ]; then
-        d_bad "PAM block: present, but pam_rssh is not installed to compare it with" "sudo $PROG stage --phone ${addr:-<phone-ip>:7777}"
+        d_bad pam-block "PAM block: present, but pam_rssh is not installed to compare it with" "sudo $PROG stage --phone ${addr:-<phone-ip>:7777}"
       elif [ "$block" != "$expected" ]; then
-        d_warn "PAM block: differs from what this installer writes (flags, helper paths, module name or local reader changed)" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+        d_warn pam-block "PAM block: differs from what this installer writes (flags, helper paths, module name or local reader changed)" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
       else
-        d_ok "PAM block: present in $target, current, intact"
+        d_ok pam-block "PAM block: present in $target, current, intact"
       fi
       if has_foreign_rssh "$target"; then
-        d_warn "PAM: $target also has pam_rssh lines SudoStamp did not write (the phone would be asked twice)" "remove those lines by hand: sudoedit $target"
+        d_warn pam-foreign "PAM: $target also has pam_rssh lines SudoStamp did not write (the phone would be asked twice)" "remove those lines by hand: sudoedit $target"
       fi
     fi
   elif has_foreign_rssh "$target"; then
-    d_bad "PAM block: $target has pam_rssh lines SudoStamp did not write, and no block" "sudo $PROG setup   (migrates an older SudoStamp)"
+    d_bad pam-block "PAM block: $target has pam_rssh lines SudoStamp did not write, and no block" "sudo $PROG setup   (migrates an older SudoStamp)"
   else
-    d_bad "PAM block: not applied: sudo does not ask the phone ($target)" "sudo $PROG setup   (or, if paired already: sudo $PROG apply --phone <phone-ip>:7777)"
+    d_bad pam-block "PAM block: not applied: sudo does not ask the phone ($target)" "sudo $PROG setup   (or, if paired already: sudo $PROG apply --phone <phone-ip>:7777)"
   fi
   [ -n "$addr" ] || { phone_valid "${PHONE_ADDR:-}" && addr="$PHONE_ADDR"; }
 
   # 3. the module: present, safe to load, loads, has the timeouts
   if mod="$(find_pam_rssh)"; then
     if ! root_safe "$mod" || ! root_safe "$(dirname "$mod")"; then
-      d_bad "pam_rssh: $mod or its directory is not root-owned or is writable by others: root would load whatever is put there (not loaded by doctor)" \
+      d_bad pam-rssh "pam_rssh: $mod or its directory is not root-owned or is writable by others: root would load whatever is put there (not loaded by doctor)" \
         "sudo chown 0:0 $mod && sudo chmod 0644 $mod"
     elif ! st="$(python3 -I -c 'import ctypes, sys; ctypes.CDLL(sys.argv[1]).pam_sm_authenticate' "$mod" 2>&1)"; then
-      d_bad "pam_rssh: $mod does not load or lacks pam_sm_authenticate: $(printf '%s' "$st" | tail -1)" \
+      d_bad pam-rssh "pam_rssh: $mod does not load or lacks pam_sm_authenticate: $(printf '%s' "$st" | tail -1)" \
         "sudo rm -f $mod && sudo $PROG stage --phone ${addr:-<phone-ip>:7777}   (rebuilds it)"
     else
       case "$(rssh_state)" in
-        patched) d_ok "pam_rssh: patched (timeouts): $mod, loads, exports pam_sm_authenticate" ;;
-        stale)   d_warn "pam_rssh: $mod was built with an older timeouts patch" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}   (rebuilds it)" ;;
+        patched) d_ok pam-rssh "pam_rssh: patched (timeouts): $mod, loads, exports pam_sm_authenticate" ;;
+        stale)   d_warn pam-rssh "pam_rssh: $mod was built with an older timeouts patch" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}   (rebuilds it)" ;;
         *)
           if [ "$FAMILY" = freebsd ]; then
-            d_warn "pam_rssh: $mod loads, but is NOT patched: the FreeBSD package has no timeouts, so a peer that answers the probe and stalls can hold sudo" \
+            d_warn pam-rssh "pam_rssh: $mod loads, but is NOT patched: the FreeBSD package has no timeouts, so a peer that answers the probe and stalls can hold sudo" \
               "no fix on FreeBSD yet: keep a second root shell open"
           else
-            d_warn "pam_rssh: $mod loads, but is NOT patched: no timeouts, so a peer that answers the probe and then stalls can hold sudo" \
+            d_warn pam-rssh "pam_rssh: $mod loads, but is NOT patched: no timeouts, so a peer that answers the probe and then stalls can hold sudo" \
               "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}   (builds the patched module; setup and stage do too)"
           fi ;;
       esac
     fi
   else
-    d_bad "pam_rssh: not installed" "sudo $PROG stage --phone ${addr:-<phone-ip>:7777}"
+    d_bad pam-rssh "pam_rssh: not installed" "sudo $PROG stage --phone ${addr:-<phone-ip>:7777}"
   fi
 
   # 4. helper scripts (Linux-PAM only: OpenPAM cannot skip a line, so it has none)
   if linux_pam; then
-    doctor_helper "$PROBE" sudostamp-probe.sh "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+    doctor_helper helper-probe "$PROBE" sudostamp-probe.sh "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
     if [ -f "$target" ] && grep -qF "$GATE" "$target"; then gate_expected=1; fi
     if [ "$gate_expected" = 1 ]; then
-      doctor_helper "$GATE" sudostamp-is-local.sh "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
-      d_ok "local fingerprint reader: pam_fprintd is tried first at the desk (not over SSH)"
+      doctor_helper helper-is-local "$GATE" sudostamp-is-local.sh "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+      d_ok local-reader "local fingerprint reader: pam_fprintd is tried first at the desk (not over SSH)"
     elif has_fprintd; then
-      d_ok "local fingerprint reader: pam_fprintd is installed; the block does not use it (re-run apply to include it)"
+      d_ok local-reader "local fingerprint reader: pam_fprintd is installed; the block does not use it (re-run apply to include it)"
     else
-      d_ok "local fingerprint reader: none (the phone is asked directly)"
+      d_ok local-reader "local fingerprint reader: none (the phone is asked directly)"
     fi
   else
-    d_ok "helper scripts: not used on OpenPAM ($FAMILY)"
+    d_ok helper-probe "helper scripts: not used on OpenPAM ($FAMILY)"
   fi
 
   # 5. the pinned key
   if [ "$user_ok" = 1 ]; then
     if [ ! -f "$KEYFILE" ]; then
-      d_bad "pinned key: $KEYFILE does not exist: pam_rssh has nothing to check the phone against" "sudo $PROG setup"
+      d_bad pinned-key "pinned key: $KEYFILE does not exist: pam_rssh has nothing to check the phone against" "sudo $PROG setup"
     elif ! root_safe "$KEYDIR" || ! root_safe "$KEYFILE"; then
-      d_bad "pinned key: $KEYFILE or $KEYDIR is not root-owned or is writable by others: anything running as a user could pin its own key" \
+      d_bad pinned-key "pinned key: $KEYFILE or $KEYDIR is not root-owned or is writable by others: anything running as a user could pin its own key" \
         "sudo chown 0:0 $KEYDIR $KEYFILE && sudo chmod 0755 $KEYDIR && sudo chmod 0644 $KEYFILE"
     elif ! grep -qxE "$KEY_RE" "$KEYFILE"; then
-      d_bad "pinned key: $KEYFILE holds no valid ecdsa-sha2-nistp256 SudoStamp key line" "sudo $PROG setup   (pairs again and rewrites it)"
+      d_bad pinned-key "pinned key: $KEYFILE holds no valid ecdsa-sha2-nistp256 SudoStamp key line" "sudo $PROG setup   (pairs again and rewrites it)"
     else
-      d_ok "pinned key: $KEYFILE: root-owned, mode $(file_facts "$KEYFILE" | cut -d' ' -f2), valid ecdsa-sha2-nistp256 key"
+      d_ok pinned-key "pinned key: $KEYFILE: root-owned, mode $(file_facts "$KEYFILE" | cut -d' ' -f2), valid ecdsa-sha2-nistp256 key"
       if [ "$(grep -cv '^[[:space:]]*$' "$KEYFILE")" != "$(grep -cxE "$KEY_RE" "$KEYFILE")" ]; then
-        d_warn "pinned key: $KEYFILE also holds keys that are not SudoStamp's: each can approve sudo for $TARGET_USER" "review it: sudoedit $KEYFILE"
+        d_warn pinned-key "pinned key: $KEYFILE also holds keys that are not SudoStamp's: each can approve sudo for $TARGET_USER" "review it: sudoedit $KEYFILE"
       fi
     fi
   fi
@@ -1430,35 +1563,38 @@ cmd_doctor() {
   if [ "$user_ok" = 0 ]; then
     :
   elif [ -z "$addr" ]; then
-    d_warn "phone: no address to check (none in the PAM block, none given)" "sudo $PROG doctor --phone <phone-ip>:7777"
+    d_warn phone "phone: no address to check (none in the PAM block, none given)" "sudo $PROG doctor --phone <phone-ip>:7777"
   elif ! phone_reachable "$addr"; then
     found="$(python3 -I "$HERE/pair.py" discover --timeout 6 2>/dev/null)" || found=""
     newaddr="$(printf '%s\n' "$found" | cut -f1 | grep -vxF "$addr" | grep . | head -1)" || newaddr=""
     if [ -n "$newaddr" ]; then
-      d_bad "phone: nothing answers at $addr within 4 s, but a SudoStamp phone is now at $newaddr (its address changed). Nothing was rewritten." \
+      d_bad phone "phone: nothing answers at $addr within 4 s, but a SudoStamp phone is now at $newaddr (its address changed). Nothing was rewritten." \
         "sudo $PROG setup --phone $newaddr"
     elif printf '%s\n' "$found" | cut -f1 | grep -qxF "$addr"; then
-      d_bad "phone: $addr is advertising on the network but does not answer on its port within 4 s" \
+      d_bad phone "phone: $addr is advertising on the network but does not answer on its port within 4 s" \
         "open the SudoStamp app once so it restarts its listener, then: sudo $PROG doctor"
     else
-      d_bad "phone: nothing answers at $addr within 4 s, and none shows up on the network (discovery only sees it while its 'Pair a computer' screen is open)" \
+      d_bad phone "phone: nothing answers at $addr within 4 s, and none shows up on the network (discovery only sees it while its 'Pair a computer' screen is open)" \
         "open the app, tap 'Pair a computer', then: sudo $PROG setup"
     fi
   elif [ ! -f "$HERE/sudostamp-probe.sh" ]; then
-    d_warn "phone: answers at $addr, but this installer has no probe to check the key with" "re-download the installer"
-  elif PAM_USER="$TARGET_USER" sh "$HERE/sudostamp-probe.sh" "phone=$addr" "keys=$KEYDIR"; then
-    d_ok "phone: $addr answers within 4 s and offers $TARGET_USER's pinned key"
+    d_warn phone "phone: answers at $addr, but this installer has no probe to check the key with" "re-download the installer"
+  elif PAM_USER="$TARGET_USER" sh "$HERE/sudostamp-probe.sh" check "phone=$addr" "keys=$KEYDIR"; then
+    d_ok phone "phone: $addr answers within 4 s and offers $TARGET_USER's pinned key"
   else
-    d_bad "phone: $addr answers but does not offer the key pinned for $TARGET_USER (paired with another computer, or the app was reinstalled)" \
+    d_bad phone "phone: $addr answers but does not offer the key pinned for $TARGET_USER (paired with another computer, or the app was reinstalled)" \
       "sudo $PROG setup --phone $addr"
   fi
 
   # 7. things that make sudo skip the phone altogether
-  if sudo_auths_as_root; then
-    d_warn "sudoers: sudo authenticates as ROOT here (targetpw/rootpw): the phone is never asked" \
+  if sudoers_unreadable; then
+    # Root's files: without root the check below would find nothing and say nothing.
+    d_warn sudoers "sudoers: needs root to read the sudoers files, so 'targetpw' (sudo asking for root's password) is not checked" "sudo $PROG doctor"
+  elif sudo_auths_as_root; then
+    d_warn sudoers "sudoers: sudo authenticates as ROOT here (targetpw/rootpw): the phone is never asked" \
       "echo 'Defaults:$TARGET_USER !targetpw, !rootpw, !runaspw' | sudo tee /etc/sudoers.d/50-sudostamp && sudo chmod 0440 /etc/sudoers.d/50-sudostamp && sudo visudo -cf /etc/sudoers.d/50-sudostamp"
   fi
-  [ -f "$PAM_TEST" ] && d_warn "a scratch PAM service was left behind: $PAM_TEST" "sudo rm -f $PAM_TEST"
+  [ -f "$PAM_TEST" ] && d_warn scratch-pam "a scratch PAM service was left behind: $PAM_TEST" "sudo rm -f $PAM_TEST"
   doctor_end
 }
 
@@ -1479,9 +1615,21 @@ while [ $# -gt 0 ]; do
     --yes|-y)       SUDOSTAMP_YES=1; shift ;;
     --require-attestation) SUDOSTAMP_REQUIRE_ATTESTATION=1; shift ;;
     --check-revocation)    SUDOSTAMP_CHECK_REVOCATION=1; shift ;;
+    --json)         JSON=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
+
+if [ "$JSON" = 1 ]; then
+  case "$CMD" in
+    doctor) ;;
+    setup)
+      # Progress goes to the real stdout (fd 3) as JSON lines; everything the person would have
+      # read goes to stderr. Same code path as the interactive setup: only presentation differs.
+      JSON_CMD=setup; exec 3>&1 1>&2 ;;
+    *) echo "--json is for 'doctor' and 'setup'" >&2; exit 2 ;;
+  esac
+fi
 
 case "$CMD" in
   setup)    cmd_setup ;;
@@ -1492,5 +1640,5 @@ case "$CMD" in
   status)   cmd_status ;;
   doctor)   cmd_doctor ;;
   uninstall) cmd_uninstall ;;
-  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status|doctor|uninstall} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes] [--require-attestation] [--check-revocation]"; exit 2 ;;
+  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status|doctor|uninstall} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes] [--require-attestation] [--check-revocation] [--json (doctor, setup)]"; exit 2 ;;
 esac
