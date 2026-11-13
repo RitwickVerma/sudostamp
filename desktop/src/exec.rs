@@ -24,14 +24,27 @@ const REPAIR_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_OUTPUT: usize = 256 * 1024;
 const MAX_LINE: usize = 8 * 1024;
 
+/// `spawn`, again on "text file busy" (ETXTBSY): a program written a moment ago can still be open
+/// for writing in a child that another thread forked and has not yet exec'd. Tests write their fake
+/// installers in parallel and met it one run in six; a real installer could too, right after an update.
+fn spawn(cmd: &mut Command) -> io::Result<Child> {
+    for _ in 0..20 {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(26) => thread::sleep(Duration::from_millis(10)),
+            r => return r,
+        }
+    }
+    cmd.spawn()
+}
+
 /// Run to completion (or kill at the timeout), collecting stdout and stderr up to `max` bytes.
 /// Returns the exit status (`None` = killed or signalled) and the output.
 fn capture(mut cmd: Command, timeout: Duration, max: usize) -> io::Result<(Option<i32>, Vec<u8>)> {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+    let mut child = spawn(
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )?;
     let out = Arc::new(Mutex::new(Vec::new()));
     let (done_tx, done_rx) = mpsc::channel();
     let streams: [Option<Box<dyn Read + Send>>; 2] = [
@@ -203,12 +216,13 @@ impl SetupProc {
             phone.addr.to_string(),
             "--json".into(),
         ];
-        let mut child = privileged(installer, &args, env)?
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("cannot run pkexec: {e}"))?;
+        let mut child = spawn(
+            privileged(installer, &args, env)?
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .map_err(|e| format!("cannot run pkexec: {e}"))?;
         let stdin = child.stdin.take();
         let mut out = io::BufReader::new(child.stdout.take().ok_or("no stdout")?);
         let (tx, rx) = mpsc::channel();
