@@ -141,6 +141,20 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
   older SudoStamp stack to migrate, a temporary Rust toolchain). The `test` step needs the person
   to approve on the phone: its start text says so.
 
+### App implementation notes (where the desktop app pins down what the text above leaves open)
+- **Approved.** sudo's children include PAM's own helpers (the gate, the probe, the hook), which
+  `pam_exec` forks inside sudo during authentication. The app ignores children present when the
+  event arrives and any whose command line names `sudostamp-probe` or `sudostamp-is-local`: rename
+  either helper and `track.rs` must follow. The user can read sudo's `task/*/children` (checked
+  on Debian and Arch); under `hidepid` the app cannot, and says nothing rather than guess.
+- **Needs attention** comes from doctor's `fail`s except `phone`, which fails whenever the phone is
+  away: the app's own REQUEST_IDENTITIES tells Away from a wrong key, and a wrong key is Needs
+  attention.
+- **Fix buttons** run `pkexec <installer> apply|stage [--phone <ip:port>]` and nothing else; a `fix`
+  naming `setup` opens Pair a phone (the address filled in); any other text is shown to copy, never
+  run. The installer must be root-owned and writable by no one else, or the app refuses to pkexec it.
+- **The window is its own process** (`sudostamp-desktop window`), so the tray loads no GL.
+
 ## Explicitly NOT doing (YAGNI)
 
 - No daemon on the authentication path, no privileged helper, no polkit policy of our own.

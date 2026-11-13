@@ -253,3 +253,8 @@ installer built: `uninstall` removes only that, `doctor` reads the patch state f
     made in bash, not python3 (setup runs before python3 may exist; doctor must stay self-contained):
     printable ASCII only. Every doctor check carries a stable id: renaming one breaks the app.
     `doctor` as non-root says "needs root" (WARN) for what only root can read, in both forms.
+31. The desktop app reads three things from the host side by name: the event schema, doctor's check
+    ids, and the helpers' file names (`sudostamp-probe`, `sudostamp-is-local`), which
+    `desktop/src/track.rs` must ignore among sudo's children or "approved" would fire before the
+    phone is asked. Change any of them on both sides in one MR. Its tests run as root in CI: a
+    test that wants a file "not root's" must make it writable by others instead.
