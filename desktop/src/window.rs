@@ -254,7 +254,11 @@ impl App {
                         ui.label(RichText::new(tag).monospace().color(colour));
                         ui.vertical(|ui| {
                             ui.add(egui::Label::new(&check.text).wrap());
-                            if check.level == Level::Fail {
+                            // A warning with a fix gets its button too: the one every upgrade shows
+                            // ("a block from an older version") is fixed by `apply`.
+                            let actionable = check.level == Level::Fail
+                                || (check.level == Level::Warn && !check.fix.is_empty());
+                            if actionable {
                                 match doctor::plan_fix(&check.fix) {
                                     Fix::Installer(args) => {
                                         let label = format!("Fix: sudostamp {}", args.join(" "));
@@ -277,19 +281,18 @@ impl App {
                                         }
                                     }
                                     Fix::Show(cmd) => {
-                                        ui.horizontal(|ui| {
-                                            ui.add(
-                                                egui::Label::new(RichText::new(&cmd).monospace())
-                                                    .selectable(true),
-                                            );
-                                            if ui.small_button("Copy").clicked() {
-                                                ui.ctx().copy_text(cmd.clone());
-                                            }
-                                        });
+                                        // Wrapped, with Copy under it: a long command beside the
+                                        // button pushed the button past the window's edge.
+                                        ui.add(
+                                            egui::Label::new(RichText::new(&cmd).monospace())
+                                                .selectable(true)
+                                                .wrap(),
+                                        );
+                                        if ui.small_button("Copy").clicked() {
+                                            ui.ctx().copy_text(cmd.clone());
+                                        }
                                     }
                                 }
-                            } else if check.level == Level::Warn && !check.fix.is_empty() {
-                                ui.weak(&check.fix);
                             }
                         });
                     });
@@ -402,9 +405,11 @@ impl App {
             }
         }
         ui.add_space(8.0);
-        ui.label("Or type the phone's address (shown on its pairing screen):");
+        let label = ui.label("Or type the phone's address (shown on its pairing screen):");
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.manual).hint_text("192.168.1.20:7777"));
+            // Named by its label, for screen readers (accesskit) and AT-SPI tools.
+            ui.add(egui::TextEdit::singleline(&mut self.manual).hint_text("192.168.1.20:7777"))
+                .labelled_by(label.id);
             let addr = setup::manual_address(&self.manual);
             if ui
                 .add_enabled(addr.is_some(), egui::Button::new("Pair"))
@@ -444,14 +449,20 @@ impl App {
         match self.setup.prompt.clone() {
             Some(Prompt::Code(text)) => {
                 ui.add_space(6.0);
-                ui.add(egui::Label::new(RichText::new(text).strong()).wrap());
+                let label = ui.add(egui::Label::new(RichText::new(text).strong()).wrap());
                 ui.horizontal(|ui| {
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut self.code)
-                            .char_limit(6)
-                            .desired_width(90.0)
-                            .hint_text("123456"),
-                    );
+                    let r = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.code)
+                                .char_limit(6)
+                                .desired_width(90.0)
+                                .hint_text("123456"),
+                        )
+                        .labelled_by(label.id);
+                    // The only thing to do here is type the code: be ready for it.
+                    if self.code.is_empty() && !r.has_focus() {
+                        r.request_focus();
+                    }
                     let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let ready = self.code.trim().len() == 6;
                     let clicked = ui
