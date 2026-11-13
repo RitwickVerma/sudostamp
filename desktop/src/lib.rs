@@ -21,5 +21,13 @@ pub mod state;
 pub mod text;
 pub mod track;
 
+// Edges.
+pub mod daemon;
+pub mod exec;
+pub mod listener;
+pub mod notify;
+pub mod tray;
+pub mod window;
+
 #[cfg(test)]
 mod testutil;

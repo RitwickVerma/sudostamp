@@ -1,7 +1,7 @@
 [package]
 name = "sudostamp-desktop"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.100"
 description = "SudoStamp on the desktop: tray status, sudo notifications, pause, pairing and health window"
 license = "MIT"

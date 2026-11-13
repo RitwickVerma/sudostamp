@@ -78,7 +78,7 @@ pub fn parse(text: &str) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{iterations, seed, Rng};
+    use crate::testutil::{Rng, iterations, seed};
 
     fn encode(data: &[u8]) -> String {
         const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

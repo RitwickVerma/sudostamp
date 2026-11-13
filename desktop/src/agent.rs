@@ -140,7 +140,7 @@ pub fn parse_identities(body: &[u8]) -> Option<Vec<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{iterations, seed, Rng};
+    use crate::testutil::{Rng, iterations, seed};
 
     fn s(b: &[u8]) -> Vec<u8> {
         let mut v = (b.len() as u32).to_be_bytes().to_vec();

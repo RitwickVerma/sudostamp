@@ -83,7 +83,7 @@ pub fn clear(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{iterations, seed, Rng};
+    use crate::testutil::{Rng, iterations, seed};
     use std::os::unix::fs::PermissionsExt;
 
     fn scratch(name: &str) -> std::path::PathBuf {

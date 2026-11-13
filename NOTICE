@@ -16,3 +16,9 @@ This product includes third-party material:
     app/src/main/res/drawable/ic_launcher_fg.xml
     app/src/main/res/drawable/ic_stat_notify.xml
     app/src/main/res/drawable/ic_<name>.xml for each interface icon above
+    desktop/data/icons/sudostamp-desktop*.svg (the desktop app's icons: the fingerprint glyph, one
+      colour per state)
+
+The desktop app (desktop/) is built from crates.io dependencies, pinned in desktop/Cargo.lock and
+used under their own licenses (MIT, Apache-2.0 and similar permissive terms; deny.toml lists the
+allowed set and `cargo deny check` enforces it in CI).

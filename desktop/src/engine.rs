@@ -129,14 +129,14 @@ impl Engine {
                         .iter()
                         .min_by_key(|(_, p)| p.since)
                         .map(|(k, _)| *k);
-                    if let Some(k) = oldest {
-                        if let Some(p) = self.pending.remove(&k) {
-                            out.push(Action::Notify(Notice {
-                                key: k,
-                                kind: NoticeKind::Close,
-                                command: p.command,
-                            }));
-                        }
+                    if let Some(k) = oldest
+                        && let Some(p) = self.pending.remove(&k)
+                    {
+                        out.push(Action::Notify(Notice {
+                            key: k,
+                            kind: NoticeKind::Close,
+                            command: p.command,
+                        }));
                     }
                 }
                 let command = shown(&e.command);
@@ -411,8 +411,9 @@ mod tests {
         }
         assert_eq!(acted, RATE_MAX);
         // The window moves on: new events are accepted again.
-        assert!(!e
-            .on_event(&ev(Kind::NotApproved, 9, "x"), 5000 + RATE_WINDOW)
-            .is_empty());
+        assert!(
+            !e.on_event(&ev(Kind::NotApproved, 9, "x"), 5000 + RATE_WINDOW)
+                .is_empty()
+        );
     }
 }

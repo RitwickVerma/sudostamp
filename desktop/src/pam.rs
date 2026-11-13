@@ -63,7 +63,9 @@ auth       sufficient   pam_rssh.so ssh_agent_addr=192.168.1.20:7777 auth_key_fi
 ";
 
     fn file(block: &str) -> String {
-        format!("#%PAM-1.0\nauth sufficient pam_other.so ssh_agent_addr=9.9.9.9:1\n{block}auth include system-auth\n")
+        format!(
+            "#%PAM-1.0\nauth sufficient pam_other.so ssh_agent_addr=9.9.9.9:1\n{block}auth include system-auth\n"
+        )
     }
 
     #[test]

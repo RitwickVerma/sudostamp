@@ -106,7 +106,7 @@ pub fn parse(buf: &[u8]) -> Result<Event, Reject> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{iterations, seed, Rng};
+    use crate::testutil::{Rng, iterations, seed};
     use serde_json::json;
 
     fn valid() -> Value {

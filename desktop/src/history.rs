@@ -125,7 +125,7 @@ fn compact(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{iterations, seed, Rng};
+    use crate::testutil::{Rng, iterations, seed};
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("sudostamp-hist-{name}-{}", std::process::id()));
