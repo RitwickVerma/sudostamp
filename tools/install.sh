@@ -718,6 +718,10 @@ sudo_auths_as_root() {
 sudoers_unreadable() {
   local f
   [ "$(id -u)" -ne 0 ] || return 1
+  # A directory this user cannot list hides files (openSUSE keeps the override there).
+  for f in /etc/sudoers.d /usr/etc/sudoers.d; do
+    [ -d "$f" ] && { [ ! -r "$f" ] || [ ! -x "$f" ]; } && return 0
+  done
   for f in /etc/sudoers /usr/etc/sudoers /usr/local/etc/sudoers /etc/sudoers.d/* /usr/etc/sudoers.d/*; do
     [ -f "$f" ] && [ ! -r "$f" ] && return 0
   done
