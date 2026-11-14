@@ -1,0 +1,71 @@
+# cargo-deny policy for the desktop app (docs/DESKTOP.md, "Supply chain"). CI runs
+# `cargo deny check` in desktop/ on every push.
+
+# The app is Linux-only (StatusNotifierItem, Wayland/X11, /proc), so only Linux targets are
+# checked: crates pulled in for Windows or macOS builds are not in anything we ship.
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+[advisories]
+version = 2
+yanked = "deny"
+# An advisory against a dependency is a reason to update or drop it; one that has to be waived
+# goes here with its ID and the reason, in the commit that waives it. These three are "unmaintained"
+# notices, not vulnerabilities: zbus 6 merged zbus_names, zvariant and zvariant_derive into itself
+# (2026-10), while ksni 0.3 (the newest) and egui's accesskit_unix still sit on zbus 5, which keeps
+# receiving releases. Moving this app to zbus 6 alone would put two zbus stacks in the binary, which
+# is worse. Re-check when ksni moves to zbus 6; then delete these lines.
+ignore = [
+  { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; ksni and accesskit_unix are on zbus 5" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; ksni and accesskit_unix are on zbus 5" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; ksni and accesskit_unix are on zbus 5" },
+]
+
+[licenses]
+version = 2
+# Permissive licenses only: nothing here asks anything of the people who run or package the app
+# beyond keeping notices. Anything copyleft (GPL, LGPL, MPL, EUPL) fails the build until someone
+# decides, on purpose, to allow it.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "Unlicense",
+  "Unicode-3.0",
+  # Only epaint_default_fonts: the fonts egui compiles in (Ubuntu-Light, Hack, NotoEmoji, an emoji
+  # icon font) so text can be drawn at all. Free font licenses; NOTICE credits them.
+  "OFL-1.1",
+  "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two majors of one crate is two copies of its code and two sets of bugs. Denied; a crate that
+# genuinely needs a skip is listed below with the reason.
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+skip = [
+  # All from the windowing stack (winit 0.30 -> calloop 0.13, smithay-client-toolkit 0.19) and the
+  # image stack (png -> miniz_oxide, flate2 -> miniz_oxide) lagging one major behind their own
+  # siblings. Not ours to bump; each goes when eframe's next release moves them.
+  { crate = "thiserror@1", reason = "calloop 0.13 (winit's Wayland loop)" },
+  { crate = "thiserror-impl@1", reason = "calloop 0.13 (winit's Wayland loop); a proc macro, not in the binary" },
+  { crate = "rustix@0.38", reason = "calloop 0.13 and smithay-client-toolkit 0.19" },
+  { crate = "linux-raw-sys@0.4", reason = "rustix 0.38" },
+  { crate = "miniz_oxide@0.8", reason = "png 0.18 directly; flate2 pulls 0.9" },
+  # zbus's own proc macros (async-recursion) are on syn 3 while the rest of the tree is on syn 2.
+  { crate = "syn@3", reason = "zbus -> async-recursion; a proc-macro dependency, not in the binary" },
+]
+
+[sources]
+# crates.io only: no git dependencies, no other registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

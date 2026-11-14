@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SudoStamp
+Comment=Tray status and notifications for sudo approvals on your phone
+Exec=sudostamp-desktop
+Icon=sudostamp-desktop
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-phase=2

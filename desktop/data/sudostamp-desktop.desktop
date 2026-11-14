@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SudoStamp
+GenericName=Phone approval for sudo
+Comment=Health checklist, pairing a phone and recent sudo requests
+Exec=sudostamp-desktop window
+Icon=sudostamp-desktop
+Terminal=false
+Categories=System;Security;
+Keywords=sudo;fingerprint;phone;pam;

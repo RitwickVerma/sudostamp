@@ -316,6 +316,26 @@ computers; **Remove** deletes that computer's key, and its sudo falls back to th
   through a restart of the phone, and the ongoing notification has **Resume**.
 - Every screen works with TalkBack, large fonts and animations turned off.
 
+## On the computer's desktop
+
+Optional, Linux: `sudostamp-desktop` (AUR `sudostamp-desktop`; source in [desktop/](desktop/))
+shows at the computer what the phone cannot.
+
+- A **tray icon**: Ready, Phone away, Paused or Needs attention.
+- A **notification naming the command** sudo is waiting on (*`sudo pacman -Syu` is waiting for
+  your phone*), which becomes Approved, Not approved or Phone not reachable.
+- **Pause** on this computer from the tray, until resumed or for an hour: sudo goes straight to
+  the password and the phone hears nothing. It ends at logout or reboot. By hand: an empty
+  `/run/user/$(id -u)/sudostamp/paused` pauses, a unix time in it pauses until then.
+- A **window** with Health (doctor's checks, each with a Fix button) and Pair a phone, plus the last
+  100 sudo requests.
+
+It runs as you, holds no key and is not part of how sudo authenticates: without it, sudo behaves
+exactly the same. Repairs and pairing go through `pkexec` and the installer. GNOME shows tray icons
+only with the AppIndicator extension. For scripts, the installer speaks JSON too:
+`sudostamp doctor --json` (works without root) and `sudo sudostamp setup --phone <ip>:7777 --json`.
+[docs/DESKTOP.md](docs/DESKTOP.md) has the design.
+
 ## Development
 
 ```sh
@@ -323,6 +343,7 @@ computers; **Remove** deletes that computer's key, and its sudo falls back to th
 python3 tools/verify_ssh_sig.py app/build/sshcheck  # the test's SSH blobs, checked by OpenSSH + `cryptography`
 ./gradlew lintDebug assembleDebug
 tools/verify.sh                                   # all of the above as four gates
+(cd desktop && cargo test --locked)               # the desktop app (desktop/README.md)
 ```
 
 Against a real phone (no finger needed, then one approval):

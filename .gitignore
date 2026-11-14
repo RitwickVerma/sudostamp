@@ -36,3 +36,7 @@ __pycache__/
 
 # Release outputs (scripts/bundle-host.sh, CI)
 dist/
+
+# Rust (desktop/)
+desktop/target/
+.cargo-home/

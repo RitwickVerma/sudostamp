@@ -1,0 +1,46 @@
+[package]
+name = "sudostamp-desktop"
+version = "1.5.0"
+edition = "2024"
+rust-version = "1.100"
+description = "SudoStamp on the desktop: tray status, sudo notifications, pause, pairing and health window"
+license = "MIT"
+repository = "https://gitlab.com/ritwick7/sudostamp"
+publish = false
+
+# Every dependency here is on a path no authentication ever takes: this program holds no key, is
+# not in the PAM stack and cannot approve anything (docs/DESKTOP.md). Each one is justified:
+#   ksni        the StatusNotifierItem tray (KDE, GNOME's AppIndicator extension, others). async-io,
+#               not its default tokio: one async runtime family in the tree, and zbus needs none.
+#   zbus        org.freedesktop.Notifications, called directly (notify-rust would pull a second
+#               stack). Major 5, the one ksni uses, so the tree holds a single zbus.
+#   eframe      the window (egui). default-features off: no wgpu (a GL context is enough for a
+#               checklist), no web, no persistence; `default_fonts` is the one extra, since egui
+#               draws no text without a font.
+#   serde(_json) doctor --json, setup --json, the event datagram and the history file.
+[dependencies]
+ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "sudostamp_desktop"
+
+[[bin]]
+name = "sudostamp-desktop"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
