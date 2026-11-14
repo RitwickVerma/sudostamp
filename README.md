@@ -204,6 +204,24 @@ DHCP reservation for the phone keeps that fixed. If the phone does not answer at
 your key within 4 seconds, sudo goes straight to the password; if that happens because the address
 moved, re-run `setup`.
 
+**On the desktop (Linux).** The same installer serves the optional desktop app
+([docs/DESKTOP.md](docs/DESKTOP.md)):
+
+- `doctor --json` prints the checks as one JSON object (`{"v":1,"checks":[…],"exit":N}`, the same
+  checks and exit codes as `doctor`) and runs without root: what only root can read is reported as
+  a warning that says "needs root", not as a failure.
+- `setup --phone <addr> --json` is the same setup with JSON lines on stdout (steps, the questions it
+  would ask you, a final `done`), the human text on stderr, and the answers read from stdin.
+- **Pause.** While `/run/user/<uid>/sudostamp/paused` exists and is empty (or holds a unix time in
+  the future) sudo skips the phone and asks for the password, and the phone sees nothing. The app's
+  tray toggle writes it; so can you: `: > $XDG_RUNTIME_DIR/sudostamp/paused` pauses until
+  `rm $XDG_RUNTIME_DIR/sudostamp/paused`, and `date -d '+1 hour' +%s >` that file pauses for an hour.
+  It lives in your runtime directory, so logging out or rebooting resumes.
+- The sudo block now ends with one more line after pam_rssh's. It tells the desktop app when the
+  phone did not approve and can never change the result of the stack; `sudo sudostamp setup` (or
+  `apply`) adds it to a block an earlier version wrote, and `status` and `doctor` say when it is
+  missing.
+
 If discovery cannot find the phone (some networks block it), `setup` asks for the address
 the phone shows, or pass it: `setup --phone 192.168.1.50:7777`.
 

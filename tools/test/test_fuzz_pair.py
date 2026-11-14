@@ -542,7 +542,8 @@ class Fuzz(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         # Every pair.py option at its default, as argparse would give it; attestation is not required.
         args = type("A", (), {"phone": "192.168.1.50:7777", "label": "host", "addr_out": addr_out,
-                              "attest_out": None, "require_attestation": False, "check_revocation": False})()
+                              "attest_out": None, "require_attestation": False, "check_revocation": False,
+                              "json_fd": None, "fail_out": None})()
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), deadline(5):
                 P.cmd_pair(args)

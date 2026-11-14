@@ -19,6 +19,11 @@
 #       stalls (sudo must not hang), a phone with the wrong key, no phone at all, a hostile
 #       --phone value, a gate whose success must not count as authentication, a damaged
 #       block that rollback must refuse to "fix"
+#   12b-12i. the desktop (docs/DESKTOP.md): the probe's datagrams (valid, with sudo's pid and
+#       command), a symlink in the user's runtime directory reaching nothing of root's, a missing
+#       or wrong or stuck socket changing nothing and costing under the 500 ms cap, the pause flag (and
+#       never read as root), the hook after pam_rssh changing no result, an older block updated
+#   13. doctor, also as JSON and without root; 15. setup --json against the mock phone
 #
 # Exit 0 only if every step behaved. CI runs this for each supported family.
 set -uo pipefail
@@ -421,6 +426,312 @@ check "pam_rssh gave up after its timeout (${el}s: at least 70, under 90)" bash 
 echo approve > /tmp/mode
 pkill -f -- "--port 7795 " 2>/dev/null; sleep 0.5
 
+# ------------------------------------------------------- desktop events and the pause flag
+# docs/DESKTOP.md. The probe tells the user's desktop app what sudo is doing (a datagram on
+# /run/user/<uid>/sudostamp/events.sock), and honours a pause flag in the same directory. Both are
+# courtesies: every way for them to fail must leave sudo exactly as it was, and neither may be
+# done as root, because the directory belongs to the user.
+step "12b. desktop events and the pause flag"
+chmod -R a+rX "$W"
+UID_T="$(id -u "$U")"; GID_T="$(id -g "$U")"
+EVD="/run/user/$UID_T/sudostamp"
+EVLOG=/tmp/ev.log
+EVPHONE="127.0.0.1:7811"
+as_u() { setpriv --reuid="$UID_T" --regid="$GID_T" --init-groups -- "$@"; }
+# What logind makes at login: the user's runtime directory. The app makes the subdirectory.
+mkdir -p "/run/user/$UID_T"; chown "$UID_T:$GID_T" "/run/user/$UID_T"; chmod 0700 "/run/user/$UID_T"
+as_u mkdir -p -m 0700 "$EVD"
+: > /tmp/ev.pid; chown "$UID_T" /tmp/ev.pid
+: > "$EVLOG"; chmod 0666 "$EVLOG"
+printf '%s\n' "$PW" > /tmp/e2e.pw; : > /tmp/e2e.empty; chmod 0644 /tmp/e2e.pw /tmp/e2e.empty
+
+echo approve > /tmp/mode
+pairing_phone 7811
+type_code_from /tmp/p7811.code | bash "$I" setup --phone "$EVPHONE" > /tmp/setup-ev.log 2>&1
+check "setup for the events test" grep -q "Done. Every sudo now asks your phone first" /tmp/setup-ev.log
+check "the block has the hook after pam_rssh, with controls that cannot change the result" \
+  grep -qF "auth       [success=ignore ignore=ignore default=ignore]  pam_exec.so quiet /usr/local/sbin/sudostamp-probe after phone=$EVPHONE keys=/etc/authorized_keys" "$TARGET"
+check "and it is the line right after pam_rssh" bash -c "grep -A1 pam_rssh '$TARGET' | grep -q ' after phone='"
+
+ev_reset() { : > "$EVLOG"; }
+ev_wait() { local _; for _ in $(seq 1 30); do [ "$(grep -c . "$EVLOG")" -ge "$1" ] && break; sleep 0.1; done; sleep 0.3; }
+# sudo as the test user running `echo <marker>`: $1 = file holding what is typed at a password
+# prompt; sudo's pid is left in /tmp/ev.pid (the shell exec's into sudo, so $$ is sudo's pid).
+sudo_marker() {
+  timeout 120 su "$U" -c "sudo -k; echo \$\$ > /tmp/ev.pid; exec sudo -S -p '' echo $2 < $1" >/dev/null 2>&1
+}
+ev_is() { python3 "$W/tools/test/check_event.py" "$EVLOG" "$@"; }
+ph_calls() { grep -c '^identities:' /tmp/p7811.log; }
+LISTENER=""
+start_listener() {
+  setpriv --reuid="$UID_T" --regid="$GID_T" --init-groups -- \
+    python3 -I "$W/tools/test/event_sink.py" log "$EVD/events.sock" "$EVLOG" > /tmp/ev.sink.out 2>&1 &
+  LISTENER=$!
+  for _ in $(seq 1 50); do [ -S "$EVD/events.sock" ] && break; sleep 0.1; done
+}
+stop_listener() { [ -n "$LISTENER" ] && { kill "$LISTENER" 2>/dev/null; wait "$LISTENER" 2>/dev/null; }; LISTENER=""; as_u rm -rf "$EVD/events.sock"; }
+# Make $EVD/paused what $1 (run as the user, in that directory) says, after clearing it.
+flag() { as_u sh -c "cd '$EVD' && rm -rf paused && $1"; }
+
+step "12c. the desktop is told what sudo does, with the command (a)"
+start_listener
+ev_reset
+sudo_marker /tmp/e2e.empty m-approve; rc=$?
+ev_wait 1
+check "approve: sudo ran with no password" test "$rc" = 0
+SUDO_PID="$(cat /tmp/ev.pid)"
+check "approve: one asking datagram, valid, with sudo's own pid, its command and the phone" \
+  ev_is --events asking --pid "$SUDO_PID" --command "echo m-approve" --phone "$EVPHONE"
+echo deny > /tmp/mode; ev_reset
+sudo_marker /tmp/e2e.pw m-deny; rc=$?
+ev_wait 2
+SUDO_PID="$(cat /tmp/ev.pid)"
+check "deny: the password works" test "$rc" = 0
+check "deny: asking, then not-approved, both from that sudo" \
+  ev_is --events asking,not-approved --pid "$SUDO_PID" --command "echo m-deny" --phone "$EVPHONE"
+echo foreign > /tmp/mode; ev_reset
+sudo_marker /tmp/e2e.pw m-foreign; rc=$?
+ev_wait 2
+check "a phone with a key nobody pinned: the password works" test "$rc" = 0
+check "and the desktop hears skipped (wrong-key), then not-approved" \
+  ev_is --events skipped,not-approved --reason wrong-key --pid "$(cat /tmp/ev.pid)"
+echo approve > /tmp/mode
+
+# What the probe does with hostile or huge command lines. The parent of the probe is a shell whose
+# argv[0] is the text under test (pam_exec's parent is sudo, whose argv the user chose).
+craft() {   # $1 = the parent's argv[0]; leaves the one datagram in $EVLOG
+  ev_reset
+  PAM_USER="$U" PAM_TTY=/dev/pts/9 bash -c 'exec -a "$0" bash -c "sh /usr/local/sbin/sudostamp-probe phone=$EVPHONE keys=/etc/authorized_keys; exit \$?"' "$1"
+  ev_wait 1
+}
+export EVPHONE
+craft "$(printf 'evil\001\033[31m\177 a\nb')"
+check "control characters in the command line become '?'" ev_is --events asking --command "$(printf 'evil??[31m? a?b')"
+craft "$(python3 -c 'print("x" * 3000)')"
+check "a 3000-character command line is cut to exactly 512 characters, in one datagram" ev_is --events asking --command-len 512-512
+craft "$(python3 -c 'print("\U0001d11e" * 600)')"
+check "four-byte characters (over 2 KB of UTF-8) still make one datagram of at most 2048 bytes, valid JSON, command shortened not dropped" \
+  ev_is --events asking --command-len 100-512
+
+step "12d. nothing the user does with that directory reaches a root socket (b)"
+# A root-owned datagram socket, mode 0600, standing in for journald's or any daemon's.
+python3 "$W/tools/test/event_sink.py" log /tmp/rootsock /tmp/rootsock.log 600 > /tmp/rootsock.out 2>&1 &
+ROOTSINK=$!
+for _ in $(seq 1 50); do [ -S /tmp/rootsock ] && break; sleep 0.1; done
+python3 -c 'import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); s.sendto(b"root-control", "/tmp/rootsock")'
+sleep 0.3
+check "control: a datagram sent AS ROOT reaches that socket (a root sender would have been fooled)" grep -q root-control /tmp/rootsock.log
+# The probe as a ROOT caller would run it (pam_check, su, polkit, pam_exec's seteuid): sudo's own
+# pam_exec runs it as the user, which is the easy case. Root must drop before touching the path.
+root_probe() {
+  PAM_USER="$U" sh /usr/local/sbin/sudostamp-probe ${1:+"$1"} "phone=$EVPHONE" keys=/etc/authorized_keys </dev/null >/dev/null 2>&1
+}
+user_cannot_send() {
+  ! as_u python3 -c 'import socket; s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM); s.sendto(b"user", "/tmp/rootsock")' 2>/dev/null
+}
+check "control: the test user cannot send to it" user_cannot_send
+: > /tmp/rootsock.log
+stop_listener
+as_u ln -s /tmp/rootsock "$EVD/events.sock"
+sudo_marker /tmp/e2e.empty s-approve; rc=$?
+echo deny > /tmp/mode
+sudo_marker /tmp/e2e.pw s-deny; rc2=$?
+echo approve > /tmp/mode
+sleep 0.5
+check "with events.sock a symlink to the root socket, sudo behaves as before" test "$rc$rc2" = 00
+check "and the root socket received NOTHING from the probe or its hook" bash -c "[ ! -s /tmp/rootsock.log ]"
+# The same, with the probe running AS ROOT, which is where the drop to the user matters.
+check "run as root, the probe still passes (phone approves)" root_probe
+check "run as root, the hook too" root_probe after
+sleep 0.5
+check "and the root socket still received NOTHING: root sent nothing, the user's drop cannot write there" bash -c "[ ! -s /tmp/rootsock.log ]"
+kill "$ROOTSINK" 2>/dev/null; wait "$ROOTSINK" 2>/dev/null; rm -f /tmp/rootsock /tmp/rootsock.log
+as_u rm -f "$EVD/events.sock"
+
+step "12e. a desktop that is missing, wrong or stuck changes nothing, and stays under its cap (c)"
+variant() {   # $1 = what is at events.sock. sudo's outcomes must be exactly today's
+  echo approve > /tmp/mode
+  sudo_marker /tmp/e2e.empty v-ok; rc=$?
+  check "$1: approve: sudo runs with no password" test "$rc" = 0
+  echo deny > /tmp/mode
+  sudo_marker /tmp/e2e.empty v-nopw; rc=$?
+  check "$1: deny: no password, no sudo" test "$rc" != 0
+  sudo_marker /tmp/e2e.pw v-pw; rc=$?
+  check "$1: deny: the password works" test "$rc" = 0
+  echo foreign > /tmp/mode
+  sudo_marker /tmp/e2e.pw v-foreign; rc=$?
+  check "$1: another phone's key: the password works" test "$rc" = 0
+  echo approve > /tmp/mode
+}
+# Median-free and noise-proof: the fastest of 9 runs of the probe, in milliseconds. $1 = a mode word
+# (check = today's bare phone check) or nothing (the new default).
+probe_ms() {
+  PAM_USER="$U" python3 - "${1:-}" <<'PY'
+import os, subprocess, sys, time
+mode = [sys.argv[1]] if sys.argv[1] else []
+# PROBE_AS / PROBE_GID: run it as the user, which is how sudo's pam_exec runs it (else as root).
+who = {"user": int(os.environ["PROBE_AS"]), "group": int(os.environ["PROBE_GID"])} if os.environ.get("PROBE_AS") else {}
+best = 1e9
+for _ in range(9):
+    t = time.monotonic()
+    subprocess.run(["sh", "/usr/local/sbin/sudostamp-probe"] + mode + [
+        "phone=" + os.environ["EVPHONE"], "keys=/etc/authorized_keys"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **who)
+    best = min(best, time.monotonic() - t)
+print(int(best * 1000))
+PY
+}
+BASE_MS="$(probe_ms check)"
+echo "  the bare phone check takes ${BASE_MS} ms here"
+timed() {   # $1 = state name
+  local ms; ms="$(probe_ms)"
+  # The cap the probe enforces (two helpers, each killed at 250 ms), not a speed target: a loaded
+  # CI runner takes 100+ ms only to start python, a desktop about 20 ms in all.
+  check "$1: the probe takes $((ms - BASE_MS)) ms more than the bare phone check (cap 500)" test $((ms - BASE_MS)) -lt 500
+}
+as_u rm -rf "$EVD/events.sock"
+variant "no socket at all"; timed "no socket at all"
+PROBE_AS="$UID_T" PROBE_GID="$GID_T" timed "no socket at all, run as the user (how sudo runs it)"
+as_u sh -c ": > '$EVD/events.sock'"
+variant "a regular file"; timed "a regular file"
+as_u rm -f "$EVD/events.sock"; as_u mkdir "$EVD/events.sock"
+variant "a directory"; timed "a directory"
+as_u rm -rf "$EVD/events.sock"; as_u mkfifo "$EVD/events.sock"
+variant "a FIFO"; timed "a FIFO"
+as_u rm -f "$EVD/events.sock"
+setpriv --reuid="$UID_T" --regid="$GID_T" --init-groups -- python3 -c '
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind(sys.argv[1]); s.listen(1)
+print("ready", flush=True); time.sleep(600)' "$EVD/events.sock" > /tmp/ev.stream.out 2>&1 &
+STREAM=$!
+for _ in $(seq 1 50); do [ -S "$EVD/events.sock" ] && break; sleep 0.1; done
+variant "a stream socket (the wrong type)"; timed "a stream socket"
+kill "$STREAM" 2>/dev/null; wait "$STREAM" 2>/dev/null; as_u rm -f "$EVD/events.sock"
+setpriv --reuid="$UID_T" --regid="$GID_T" --init-groups -- python3 -I "$W/tools/test/event_sink.py" full "$EVD/events.sock" > /tmp/ev.full.out 2>&1 &
+FULL=$!
+for _ in $(seq 1 50); do grep -q ready /tmp/ev.full.out 2>/dev/null && break; sleep 0.1; done
+variant "a datagram socket nobody reads (its queue is full)"; timed "a full datagram socket"
+PROBE_AS="$UID_T" PROBE_GID="$GID_T" timed "a full datagram socket, run as the user (how sudo runs it)"
+# The probe's own exit status, mode by mode, with the stuck socket still in place: identical to the
+# bare check's, for a phone that offers the key, one that does not, and none.
+rc_of() { PAM_USER="$U" sh /usr/local/sbin/sudostamp-probe ${1:+"$1"} "phone=$2" keys=/etc/authorized_keys </dev/null >/dev/null 2>&1; echo $?; }
+for st in approve foreign; do
+  echo "$st" > /tmp/mode
+  check "probe exit status, phone state '$st': the same as the bare check's" test "$(rc_of "" "$EVPHONE")" = "$(rc_of check "$EVPHONE")"
+done
+echo approve > /tmp/mode
+check "probe exit status, no phone: the same as the bare check's (and not 0)" \
+  bash -c "$(declare -f rc_of); U=$U; [ \"\$(rc_of '' 127.0.0.1:7899)\" = \"\$(rc_of check 127.0.0.1:7899)\" ] && [ \"\$(rc_of '' 127.0.0.1:7899)\" != 0 ]"
+kill "$FULL" 2>/dev/null; wait "$FULL" 2>/dev/null; as_u rm -f "$EVD/events.sock"
+
+step "12f. the pause flag (d)"
+start_listener
+expect_paused() {   # $1 = name. The phone is not dialled, sudo asks for the password, the desktop is told
+  local n0 rc
+  n0="$(ph_calls)"; ev_reset
+  sudo_marker /tmp/e2e.empty p-nopw; rc=$?
+  check "$1: no password, no sudo (it went to the password)" test "$rc" != 0
+  sudo_marker /tmp/e2e.pw p-pw; rc=$?
+  check "$1: the password works" test "$rc" = 0
+  check "$1: the phone saw NO connection" test "$(ph_calls)" = "$n0"
+  ev_wait 4
+  check "$1: the desktop heard skipped (paused), not-approved, twice" ev_is --events skipped,not-approved,skipped,not-approved --reason paused
+}
+expect_not_paused() {   # $1 = name. The phone is asked as normal
+  local n0 rc
+  n0="$(ph_calls)"; ev_reset
+  sudo_marker /tmp/e2e.empty q-ok; rc=$?
+  check "$1: not paused: sudo ran with no password (the phone approved)" test "$rc" = 0
+  check "$1: the phone was asked" test "$(ph_calls)" -gt "$n0"
+  ev_wait 1
+  check "$1: the desktop heard asking" ev_is --events asking
+}
+flag ': > paused'
+expect_paused "an empty flag"
+n0="$(ph_calls)"
+check "run as root (it must drop first), an empty flag pauses too: exit 1" bash -c "$(declare -f root_probe); U=$U; EVPHONE=$EVPHONE; ! root_probe"
+check "and root did not dial the phone either" test "$(ph_calls)" = "$n0"
+flag "echo $(( $(date +%s) + 3600 )) > paused"
+expect_paused "a time an hour from now"
+flag 'echo > paused'
+expect_paused "a flag holding only a newline"
+flag 'echo 1000000000 > paused'
+expect_not_paused "a time in the past"
+flag 'echo yes > paused'
+expect_not_paused "garbage"
+flag 'echo 99999999999999999999999999999999999999 > paused'
+expect_not_paused "a number too long to be a time"
+flag ':'
+expect_not_paused "no flag"
+flag 'mkdir paused'
+expect_not_paused "a directory"
+flag 'mkfifo paused'
+expect_not_paused "a FIFO (it must not hold sudo either)"
+# Never read as root: a flag that is a symlink to a root-only file. Were root to open it, the
+# (empty) file would pause everything; the user cannot, so it is not paused.
+: > /tmp/rootflag; chmod 0600 /tmp/rootflag
+flag 'ln -s /tmp/rootflag paused'
+expect_not_paused "a symlink to a file only root can read"
+check "(the user really cannot read it)" bash -c "! setpriv --reuid=$UID_T --regid=$GID_T --init-groups -- cat /tmp/rootflag 2>/dev/null"
+check "(as root: the probe does not read it either: not paused, the phone is dialled, exit 0)" root_probe
+# ...whereas one the user can read is the user's own business: followed as the user.
+: > "$EVD/target"; chown "$UID_T" "$EVD/target"
+flag 'ln -s target paused'
+expect_paused "a symlink to the user's own empty file"
+# Pausing for a while ends by itself.
+flag "echo $(( $(date +%s) + 25 )) > paused"
+n0="$(ph_calls)"
+sudo_marker /tmp/e2e.pw t-pw; rc=$?
+check "paused for 25 s: the password works and the phone is not dialled" bash -c "[ $rc = 0 ] && [ \"\$(grep -c '^identities:' /tmp/p7811.log)\" = '$n0' ]"
+sleep 26
+expect_not_paused "after the time has passed"
+flag ':'
+
+step "12g. the hook after pam_rssh can never change a result (e)"
+# The scratch stacks below use the installer's own control flags and the real probe in `after`
+# mode. pam_check.py answers every prompt with an empty password: only a module that needs no
+# input (here: pam_permit) can say yes.
+AC="$(sed -n "s/^AFTER_CONTROL='\(.*\)'\$/\1/p" "$I")"
+hook_stack() {   # $1 = line before the hook, $2 = the hook's control, $3 = line after; prints granted|refused
+  { echo "#%PAM-1.0"; echo "auth $1"; echo "auth $2 pam_exec.so quiet /usr/local/sbin/sudostamp-probe after phone=$EVPHONE keys=/etc/authorized_keys"
+    echo "auth $3"; echo "account required pam_permit.so"; } > /etc/pam.d/sudostamp-hookcheck
+  if python3 "$W/tools/pam_check.py" sudostamp-hookcheck "$U" >/dev/null 2>&1; then echo granted; else echo refused; fi
+}
+check "a hook after a failing module cannot grant: the stack still refuses" test "$(hook_stack 'sufficient pam_deny.so' "$AC" 'required pam_deny.so')" = refused
+check "a hook after a granting module cannot take it back" test "$(hook_stack 'required pam_permit.so' "$AC" 'sufficient pam_permit.so')" = granted
+check "(the hook line itself succeeds: exit 0)" bash -c "PAM_USER=$U sh /usr/local/sbin/sudostamp-probe after phone=$EVPHONE keys=/etc/authorized_keys"
+{ echo "#%PAM-1.0"; echo "auth required pam_permit.so"
+  echo "auth $AC pam_exec.so quiet /usr/local/sbin/sudostamp-probe after bogus"
+  echo "account required pam_permit.so"; } > /etc/pam.d/sudostamp-hookcheck
+check "a hook that FAILS (bad arguments, exit 1) after a granting module changes nothing" \
+  bash -c "python3 '$W/tools/pam_check.py' sudostamp-hookcheck '$U' >/dev/null 2>&1"
+# The test can tell: a hook whose control were [success=done] WOULD authenticate.
+check "(and a hook with a granting control would: the check can fail)" test "$(hook_stack 'sufficient pam_deny.so' '[success=done default=ignore]' 'required pam_deny.so')" = granted
+rm -f /etc/pam.d/sudostamp-hookcheck
+
+step "12h. an older block is reported, and apply brings it up to date"
+cp "$TARGET" /tmp/pam.cur
+grep -v ' after phone=' /tmp/pam.cur > "$TARGET"       # what 1.5 wrote
+check "status says the block is from an older version" bash -c "bash '$I' status | grep -q 'block from an older version'"
+bash "$I" doctor > /tmp/doctor-old.log 2>&1; rc=$?
+check "doctor says so too: a WARN with the apply command, exit 2 (not a FAIL)" \
+  bash -c "[ $rc = 2 ] && grep -q 'WARN.*PAM block: written by an older version' /tmp/doctor-old.log && grep -q 'fix: sudo .* apply' /tmp/doctor-old.log"
+bash "$I" apply --phone "$EVPHONE" > /tmp/apply-new.log 2>&1
+check "apply writes the hook back, and the block is exactly what a fresh install writes" bash -c "[ \"\$(cksum < /tmp/pam.cur)\" = \"\$(cksum < '$TARGET')\" ]"
+check "still exactly one block" bash -c "[ \"\$(grep -c '^# >>> SudoStamp >>>' '$TARGET')\" = 1 ]"
+check "sudo works via the phone" as_user_sudo ""
+
+step "12i. with the phone gone the desktop hears skipped (away)"
+stop_listener; start_listener
+pkill -f -- "--port 7811 " 2>/dev/null; sleep 0.5
+ev_reset
+sudo_marker /tmp/e2e.pw m-away; rc=$?
+ev_wait 2
+check "no phone: the password works" test "$rc" = 0
+check "and the desktop hears skipped (away), then not-approved" ev_is --events skipped,not-approved --reason away --pid "$(cat /tmp/ev.pid)" --command "echo m-away"
+stop_listener
+rm -rf "/run/user/$UID_T" /tmp/ev.* /tmp/e2e.pw /tmp/e2e.empty /tmp/rootflag
+
 step "13. doctor"
 pairing_phone 7801
 type_code_from /tmp/p7801.code | bash "$I" setup --phone 127.0.0.1:7801 > /tmp/setup-doc.log 2>&1
@@ -447,12 +758,33 @@ doc() {   # $1 = log name; sets rc, and fails the run if doctor changed anything
     grep -vxFf "/tmp/doctor-$1.after" "/tmp/doctor-$1.before" | sed 's/^/    - /'
     grep -vxFf "/tmp/doctor-$1.before" "/tmp/doctor-$1.after" | sed 's/^/    + /'
   fi
+  # The same run as JSON (docs/DESKTOP.md): same exit code, the same checks, valid, read-only too.
+  bash "$I" doctor --json > "/tmp/doctor-$1.json" 2>/dev/null; jrc=$?
+  snap > "/tmp/doctor-$1.after-json"
+  if [ "$jrc" = "$rc" ] && python3 "$W/tools/test/check_doctor_json.py" "/tmp/doctor-$1.json" --exit "$rc" --plain "/tmp/doctor-$1.log"; then
+    pass "doctor --json ($1): valid, exit $rc, the same checks as plain"
+  else
+    fail "doctor --json ($1): exit $jrc (plain $rc), or invalid"
+  fi
+  if [ "$(cksum < "/tmp/doctor-$1.before")" = "$(cksum < "/tmp/doctor-$1.after-json")" ]; then pass "doctor --json ($1) changed nothing"
+  else fail "doctor --json ($1) changed something"; fi
 }
 doc healthy
 check "doctor on a healthy install exits 0" test "$rc" = 0
 check "and prints no FAIL or WARN" bash -c "! grep -qE 'FAIL|WARN' /tmp/doctor-healthy.log"
 check "and says pam_rssh is patched" grep -q "pam_rssh: patched (timeouts)" /tmp/doctor-healthy.log
 check "and that the phone offers the pinned key" grep -q "offers $U's pinned key" /tmp/doctor-healthy.log
+check "the JSON of a healthy install: no warn, no fail, the stable ids" \
+  bash -c "! grep -qE '\"status\":\"(warn|fail)\"' /tmp/doctor-healthy.json && grep -q '\"id\":\"helper-probe\"' /tmp/doctor-healthy.json && grep -q '\"id\":\"local-reader\"' /tmp/doctor-healthy.json"
+# Without root: everything a user can read is checked; what needs root says so (a WARN), not FAIL.
+snap > /tmp/doctor-user.before
+su "$U" -c "env SUDOSTAMP_USER=$U bash '$I' doctor --json" > /tmp/doctor-user.json 2>/dev/null; urc=$?
+su "$U" -c "env SUDOSTAMP_USER=$U bash '$I' doctor" > /tmp/doctor-user.log 2>&1; uprc=$?
+snap > /tmp/doctor-user.after
+check "doctor --json as the test user: valid, a 'needs root' WARN, no FAIL, exit 2" \
+  bash -c "[ $urc = 2 ] && python3 '$W/tools/test/check_doctor_json.py' /tmp/doctor-user.json --exit $urc --needs-root --plain /tmp/doctor-user.log"
+check "and plain doctor as the user exits the same way" test "$uprc" = "$urc"
+check "and the user's run changed nothing" bash -c "[ \"\$(cksum < /tmp/doctor-user.before)\" = \"\$(cksum < /tmp/doctor-user.after)\" ]"
 
 # Something answers at the phone's address, but it is not the paired phone.
 pkill -f -- "--port 7801 " 2>/dev/null; sleep 0.5
@@ -487,6 +819,41 @@ mv /tmp/marker.hold "$MARK"
 check "an unpatched module: WARN with a fix" \
   bash -c "grep -q 'WARN.*NOT patched' /tmp/doctor-unpatched.log && grep -q 'fix: sudo .* apply' /tmp/doctor-unpatched.log"
 check "the single-file installer has doctor too" bash -c "bash '$W/dist/sudostamp-setup.sh' doctor 2>&1 | grep -q '=== doctor'"
+
+step "15. setup --json: the same setup, driven the way the desktop app does it"
+# stdout is JSON lines (the driver parses every one and checks the protocol), human text goes to
+# stderr, the answers come on stdin. First a WRONG code: done:false, and nothing may change.
+pairing_phone 7822
+cp "/etc/authorized_keys/$U.keys" /tmp/keys.before
+cp "/etc/authorized_keys/$U.attestation" /tmp/attest.before
+state0="$(stack_state)"
+python3 "$W/tools/test/drive_setup.py" "$I" 127.0.0.1:7822 /tmp/p7822.code /tmp/setupj-wrong.out --wrong-code > /tmp/setupj-wrong.res 2>&1
+sed 's/^/    | /' /tmp/setupj-wrong.res /tmp/setupj-wrong.out
+check "a wrong code: the protocol held and the last word is done:false" grep -q '^RESULT done=false' /tmp/setupj-wrong.res
+check "it asked for the code, and the pairing step failed" \
+  bash -c "grep -q 'asked=code ' /tmp/setupj-wrong.res && grep -q '\"step\":\"pairing\",\"status\":\"fail\"' /tmp/setupj-wrong.out && grep -q 'NOTHING was pinned' /tmp/setupj-wrong.out"
+check "no later step ran" bash -c "! grep -q '\"step\":\"install\"' /tmp/setupj-wrong.out"
+check "nothing pinned: the key file, its attestation record and the PAM stack are unchanged" \
+  bash -c "[ \"\$(cksum < /tmp/keys.before)\" = \"\$(cksum < /etc/authorized_keys/$U.keys)\" ] && [ \"\$(cksum < /tmp/attest.before)\" = \"\$(cksum < /etc/authorized_keys/$U.attestation)\" ] && [ '$state0' = \"\$($(declare -f stack_state); TARGET='$TARGET'; stack_state)\" ]"
+check "the refused phone's key is nowhere" bash -c "! grep -qF \"\$(awk '{print \$2}' /tmp/p7822.pub)\" /etc/authorized_keys/$U.keys"
+
+pairing_phone 7821
+python3 "$W/tools/test/drive_setup.py" "$I" 127.0.0.1:7821 /tmp/p7821.code /tmp/setupj-ok.out > /tmp/setupj-ok.res 2>&1
+sed 's/^/    | /' /tmp/setupj-ok.res /tmp/setupj-ok.out
+check "setup --json: the protocol held and it ended with done:true and the key's attestation line" \
+  grep -q '^RESULT done=true attestation=Key NOT hardware-attested' /tmp/setupj-ok.res
+check "it asked for the code once, and every step started and finished in order" \
+  grep -q 'asked=code steps=pairing:start,pairing:ok,install:start,install:ok,test:start,test:ok,apply:start,apply:ok$' /tmp/setupj-ok.res
+check "the final event names the phone" grep -q "\"done\":true.*\"phone\":\"127.0.0.1:7821\"" /tmp/setupj-ok.out
+check "the human text went to stderr, as the interactive run prints it" grep -q "Done. Every sudo now asks your phone first" /tmp/setupj-ok.out.stderr
+check "and none of it is on stdout" bash -c "! grep -q 'Done. Every sudo' /tmp/setupj-ok.out"
+check "the paired phone's key is the one pinned" \
+  bash -c "[ \"\$(awk '{print \$2}' /etc/authorized_keys/$U.keys)\" = \"\$(awk '{print \$2}' /tmp/p7821.pub)\" ]"
+check "exactly one block, pointing at that phone, with the hook" \
+  bash -c "[ \"\$(grep -c '^# >>> SudoStamp >>>' '$TARGET')\" = 1 ] && grep -q 'ssh_agent_addr=127.0.0.1:7821' '$TARGET' && grep -q ' after phone=127.0.0.1:7821' '$TARGET'"
+check "sudo works via the phone with NO password" as_user_sudo ""
+check "--json is refused on the commands that have no JSON form" bash -c "bash '$I' status --json >/dev/null 2>&1; [ \$? = 2 ]"
+pkill -f -- "--port 7821 " 2>/dev/null; pkill -f -- "--port 7822 " 2>/dev/null; sleep 0.5
 
 step "14. uninstall"
 # A foreign key in the user's file, and a second user's file that is only SudoStamp's.

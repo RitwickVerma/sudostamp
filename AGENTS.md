@@ -24,7 +24,8 @@ tools/verify.sh                                           # four gates; needs JA
   `ship X.Y.Z` after the release MR is merged: tag, publish, AUR (`scripts/publish-aur.sh`), Play
   (`tools/play_publish.py`), then `scripts/check-channels.sh`. **Merging is the owner's action.**
   CI never signs and never holds a key; the keys are never decrypted outside tmpfs.
-- Host side: `tools/install.sh {setup|stage|test|apply|rollback|status|doctor|uninstall}`, configured by
+- Host side: `tools/install.sh {setup|stage|test|apply|rollback|status|doctor|uninstall}` (`doctor --json`
+  and `setup --json` are for the desktop app, docs/DESKTOP.md), configured by
   `--phone <ip>:7777` (or `SUDOSTAMP_PHONE`), run with plain `sudo`, never `sudo -E`. **Never run `apply` or `rollback` unless asked**:
   they replace `/etc/pam.d/sudo`. `stage` and `test` leave it alone.
 
@@ -90,9 +91,13 @@ published APK) and `run-ci-job.sh` (play a manual CI job and wait: `ship` uses i
 `tools/`: `install.sh` (host installer, every platform; `setup` is the one-command path; `doctor` is read-only, `uninstall` removes only what it installed), `patches/pam_rssh-timeouts.patch` (applied to the pinned pam_rssh checkout, hash pinned in `install.sh`), `pair.py` (pairing + mDNS discovery, used by install.sh), `pam_check.py` (authenticates one PAM
 service via libpam; replaces pamtester), `sudostamp-is-local.sh` (PAM gate: exit 1 under
 sshd/sshd-session/mosh-server), `sudostamp-probe.sh` (PAM check before pam_rssh: the phone must
-answer with this user's key within 4 s, else skip), device probes, `verify.sh`, `verify_ssh_sig.py`,
+answer with this user's key within 4 s, else skip; also the pause flag and the datagrams for the
+desktop app, and with the word `after` the hook line after pam_rssh, with `check` the bare check
+for `doctor`; docs/DESKTOP.md), device probes, `verify.sh`, `verify_ssh_sig.py`,
 `check-secrets.py`. `attest.py` (verifies the attestation chain pair.py gets from the phone: embedded Google roots pinned by SHA-256, signatures through the system `openssl`; stdlib only). `tools/test/`: `test_attest.py` + `attest/` (REAL hardware chains published by Google, with provenance) + `attest_fixture.py` (throwaway-root chains, tests only), `mock_agent.py` (software-key stand-in for the phone,
-loopback only, tests only) and `e2e.sh` (the host side end to end in a throwaway container).
+loopback only, tests only), `event_sink.py` (the desktop app's datagram socket, a root socket, a full
+one), `check_event.py` / `check_doctor_json.py` (the schemas of docs/DESKTOP.md), `drive_setup.py`
+(drives `setup --json` like the app does) and `e2e.sh` (the host side end to end in a throwaway container).
 
 Host side, per distribution, without a phone:
 
@@ -214,3 +219,22 @@ installer built: `uninstall` removes only that, `doctor` reads the patch state f
     Use a variable, not `grep | grep -q`, when the first command's output matters under `pipefail`.
 27. Arch: `pacman -Sy` + `-S` on a stale image is a partial upgrade (openssl moves under curl). The e2e
     uses `-Syu`; refresh a local image with `podman pull archlinux:latest` before trusting a failure.
+28. `pam_exec` runs its command with the caller's REAL uid unless given `seteuid`, and sudo's real
+    uid is the user's: under sudo the probe is the user, with no privilege (`id` in a probe
+    shows it). So `setpriv --init-groups` there fails (EPERM) and nothing was sent: the probe runs
+    its helpers as it is when `id -u` is the PAM user's, and drops with `setpriv` only from root.
+    Test both: the sudo flow (user) and the probe run directly as root (the drop, and a symlink in
+    the user's directory that must reach nothing of root's).
+29. Anything under `/run/user/<uid>/sudostamp/` is the user's: only ever opened by the user's uid,
+    never a FIFO-blocking read (regular files only; the sender has a 30 ms send timeout and a 70 ms
+    alarm, and `timeout -s KILL 0.25` around each helper), never a decision that can make a sudo succeed. The probe's exit status and its 4 s phone
+    check must stay what they were whatever happens there; the e2e compares them and times the probe
+    (fastest of 9 runs against the bare `check`, under the 500 ms cap). A timing test that uses one
+    run, or asserts a speed instead of the cap the code enforces, is a flaky test: CI runners
+    took 85-140 ms just to start python.
+30. `--json` keeps stdout for JSON only. `setup --json` moves fd 1 to stderr (`exec 3>&1 1>&2`) and
+    writes events to fd 3; pair.py's own stdout is the key line captured by `$(...)`, so its question
+    goes to fd 3 too (`--json-fd`) and its failure reason to a file (`--fail-out`). JSON strings are
+    made in bash, not python3 (setup runs before python3 may exist; doctor must stay self-contained):
+    printable ASCII only. Every doctor check carries a stable id: renaming one breaks the app.
+    `doctor` as non-root says "needs root" (WARN) for what only root can read, in both forms.
