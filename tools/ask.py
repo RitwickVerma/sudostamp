@@ -153,10 +153,13 @@ def build(args):
 def run(argv, body, approval_s, total_s, capture, sink, out_sink=None):
     """sudo with no controlling terminal (a new session), the script on stdin. Returns
     (approved, returncode, stdout, stderr lines, timed out). stdout is the script's alone: sudo
-    prints PAM messages (pam_rssh's cue) on stdout too, so everything before the runner's
-    "output" line goes to [sink] (stderr), never into what the agent reads as the result."""
+    prints PAM messages (pam_rssh's cue) on stdout too, buffered until it exits, so only what lies
+    between the runner's "output" and "end" lines is the script's; the rest goes to [sink]
+    (stderr), never into what the agent reads as the result."""
     out_sink = out_sink or sys.stdout.buffer
-    marker = ("sudostamp-run: output %s\n" % argv[4]).encode() if len(argv) > 4 else None
+    sha = argv[4] if len(argv) > 4 else ""
+    begin = ("sudostamp-run: output %s\n" % sha).encode()
+    end = ("sudostamp-run: end %s\n" % sha).encode()
     p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, start_new_session=True)
     approved = threading.Event()
@@ -207,30 +210,56 @@ def run(argv, body, approval_s, total_s, capture, sink, out_sink=None):
                 sink.flush()
 
     def read_out():
-        pre, kept, began = b"", 0, marker is None
+        # Three parts: before "output" (sudo), the script, after "end" (sudo again). A marker can
+        # be split across reads, so the tail that could still be the start of one is held back.
+        state, buf, kept = "before", b"", [0]
+
+        def to_sink(b):
+            if b:
+                sink.write(b.decode("utf-8", "replace"))
+                sink.flush()
+
+        def to_out(b):
+            if not b:
+                return
+            if capture:
+                room = 4 * MAX - kept[0]
+                if room > 0:
+                    out.append(b[:room])
+                    kept[0] += len(out[-1])
+            else:
+                out_sink.write(b)
+                out_sink.flush()
+
         while True:
             chunk = p.stdout.read1(65536) if hasattr(p.stdout, "read1") else p.stdout.read(65536)
             if not chunk:
                 break
-            if not began:
-                pre += chunk
-                i = pre.find(marker)
-                if i < 0:
-                    continue
-                if pre[:i]:
-                    sink.write(pre[:i].decode("utf-8", "replace"))
-                    sink.flush()
-                chunk, began = pre[i + len(marker):], True
-            if capture:
-                if kept < 4 * MAX:
-                    out.append(chunk[:4 * MAX - kept])
-                    kept += len(out[-1])
-            else:
-                out_sink.write(chunk)
-                out_sink.flush()
-        if not began and pre:                   # never reached the script: all of it was sudo
-            sink.write(pre.decode("utf-8", "replace"))
-            sink.flush()
+            buf += chunk
+            while True:
+                if state == "before":
+                    i = buf.find(begin)
+                    if i < 0:
+                        to_sink(buf[:max(0, len(buf) - len(begin) + 1)])
+                        buf = buf[max(0, len(buf) - len(begin) + 1):]
+                        break
+                    to_sink(buf[:i])
+                    buf, state = buf[i + len(begin):], "script"
+                elif state == "script":
+                    i = buf.find(end)
+                    if i < 0:
+                        to_out(buf[:max(0, len(buf) - len(end) + 1)])
+                        buf = buf[max(0, len(buf) - len(end) + 1):]
+                        break
+                    to_out(buf[:i])
+                    buf, state = buf[i + len(end):], "after"
+                else:
+                    to_sink(buf)
+                    buf = b""
+                    break
+        # The stream ended: what is held back belongs where the state says (a script killed before
+        # "end" keeps its last bytes; sudo's own text never becomes output).
+        (to_out if state == "script" else to_sink)(buf)
 
     threads = [threading.Thread(target=read_err, daemon=True), threading.Thread(target=read_out, daemon=True)]
     for t in threads:

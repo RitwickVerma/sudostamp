@@ -105,15 +105,18 @@ def stop(sig, _):
         child.send_signal(sig)
 for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
     signal.signal(s, stop)
-# Everything on stdout before this line is sudo talking (it prints PAM messages there, the cue of
-# pam_rssh among them); everything after it is the script. sudostamp ask splits the stream here, so an
-# agent reads only what its script printed.
+# The script output is framed by two lines on stdout. sudo prints PAM messages there too (the cue of
+# pam_rssh among them), through a buffer it flushes when it exits, so they land before the first line
+# or after the second, never between: sudostamp ask keeps only what is between, and an agent reads
+# only what its script printed.
 sys.stdout.write("sudostamp-run: output %s\n" % sha)
 sys.stdout.flush()
 try:
     child = subprocess.Popen(["bash", "--noprofile", "--norc", script], stdin=subprocess.DEVNULL,
                              env=env, cwd="/")
     rc = child.wait()
+    sys.stdout.write("sudostamp-run: end %s\n" % sha)
+    sys.stdout.flush()
 finally:
     try:
         os.unlink(script)

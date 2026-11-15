@@ -87,7 +87,8 @@ class Output(unittest.TestCase):
     FAKE = ("printf 'SudoStamp-approve-on-your-phone-(up-to-60s)\\n'; "
             "echo 'sudostamp-run: waiting {sha}' >&2; cat > /dev/null; "
             "echo 'sudostamp-run: approved {sha}' >&2; "
-            "printf 'sudostamp-run: output {sha}\\n'; printf 'real output\\n'; exit 3")
+            "printf 'sudostamp-run: output {sha}\\n'; printf 'real output\\n'; "
+            "printf 'sudostamp-run: end {sha}\\n'; printf 'late cue\\n'; exit 3")
 
     def go(self, capture):
         import io
@@ -98,6 +99,7 @@ class Output(unittest.TestCase):
         self.assertFalse(timed_out)
         self.assertEqual(rc, 3)
         self.assertIn("approve-on-your-phone", se.getvalue())
+        self.assertIn("late cue", se.getvalue())        # what sudo flushes at exit
         return out, so.getvalue()
 
     def test_streamed_output_is_the_scripts_alone(self):
@@ -107,6 +109,31 @@ class Output(unittest.TestCase):
     def test_captured_output_is_the_scripts_alone(self):
         out, streamed = self.go(True)
         self.assertEqual((out, streamed), (b"real output\n", b""))
+
+
+class Split(unittest.TestCase):
+    """The framing, byte by byte: markers split across reads, nothing lost or misplaced."""
+
+    def test_every_split_point(self):
+        import io
+        sha = "cd" * 32
+        stream = (b"cue one\n" + b"sudostamp-run: output " + sha.encode() + b"\n" + b"line 1\nline 2"
+                  + b"sudostamp-run: end " + sha.encode() + b"\n" + b"cue two\n")
+        d = tempfile.mkdtemp()
+        data, emit = os.path.join(d, "data"), os.path.join(d, "emit.py")
+        with open(data, "wb") as f:
+            f.write(stream)
+        for size in (1, 2, 3, 7, 64, 4096):
+            with open(emit, "w") as f:
+                f.write("import sys, time\nd = open(%r, 'rb').read()\n"
+                        "for i in range(0, len(d), %d):\n"
+                        "    sys.stdout.buffer.write(d[i:i + %d]); sys.stdout.flush(); time.sleep(0.001)\n"
+                        % (data, size, size))
+            argv = ["sh", "-c", "echo 'sudostamp-run: approved x' >&2; python3 %s" % emit, "sh", sha]
+            so, se = io.BytesIO(), io.StringIO()
+            ask.run(argv, b"", 20, 20, False, se, so)
+            self.assertEqual(so.getvalue(), b"line 1\nline 2", size)
+            self.assertEqual(se.getvalue(), "cue one\ncue two\n", size)
 
 
 class Runner(unittest.TestCase):

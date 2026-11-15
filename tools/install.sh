@@ -1333,7 +1333,9 @@ cmd_uninstall() {
   fi
   # Last, and only once the stack is proven: the backups are what would repair it.
   rm -f "$(backup_dir)"/*.bak-* 2>/dev/null
-  rmdir "$(backup_dir)" "$(state_dir)" 2>/dev/null
+  # The copies of what agents ran (sudostamp-run): only the runner's own names, then the directory.
+  rm -f "$(state_dir)"/runs/[0-9]*T[0-9]*Z-*.sh 2>/dev/null
+  rmdir "$(backup_dir)" "$(state_dir)/runs" "$(state_dir)" 2>/dev/null
   [ -d "$(state_dir)" ] && warn "$(state_dir) holds files that are not SudoStamp's backups: left in place"
   ok "SudoStamp is removed. Check:   sudo -k && sudo true   (it asks for your password)"
 }
