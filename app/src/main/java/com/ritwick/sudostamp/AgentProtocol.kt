@@ -7,6 +7,9 @@ import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.CodingErrorAction
 
 /**
  * The MINIMAL ssh-agent protocol. Two request types, nothing else.
@@ -34,6 +37,16 @@ object AgentProtocol {
     const val SSH2_AGENT_SUCCESS = 6
     const val SSH2_AGENT_IDENTITIES_ANSWER = 12
     const val SSH2_AGENT_SIGN_RESPONSE = 14
+
+    /** The extension name (SSH string) a computer sends to say what a sudo is for. Advisory: see
+     *  [parseContext] and docs/DESIGN.md. */
+    const val EXT_CONTEXT = "context-v1@sudostamp"
+
+    /** The longest description payload accepted, in bytes. sudo's argv is short; more is not a description. */
+    const val MAX_CONTEXT_BYTES = 2048
+
+    /** The most code points of a description that are kept (the ellipsis included). */
+    const val MAX_CONTEXT_CODE_POINTS = 512
 
     /** Refuse absurd frames: a real client never sends more than a few KB. */
     private const val MAX_FRAME = 64 * 1024
@@ -123,6 +136,64 @@ object AgentProtocol {
         else -> null
     }
 
+    /**
+     * The description a computer sends before pam_rssh ([EXT_CONTEXT]): ONE SSH string, the
+     * name having been consumed by the caller. Returns the text to show, or null for anything
+     * that is not exactly that: trailing bytes, more than [MAX_CONTEXT_BYTES], malformed UTF-8
+     * (a strict decoder: String(bytes) would silently turn it into U+FFFD), nothing left after
+     * trimming. Never throws.
+     *
+     * WHY THE SCRUBBING: the text comes from a program on the LAN and is shown on a screen the
+     * user trusts with a fingerprint. See [sanitize] for what is replaced and why.
+     */
+    fun parseContext(r: Reader): String? {
+        val raw = try {
+            val b = r.blob()
+            if (!r.atEnd() || b.size > MAX_CONTEXT_BYTES) return null
+            b
+        } catch (e: IOException) {
+            return null
+        }
+        val text = try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(raw)).toString()
+        } catch (e: CharacterCodingException) {
+            return null
+        }
+        return sanitize(text, MAX_CONTEXT_CODE_POINTS)
+    }
+
+    /**
+     * Makes [s] safe to put in front of the user: every C0 and C1 control, DEL and the invisible
+     * and bidirectional format characters become '?', so the text shown is what the bytes are
+     * ("trojan source": a right-to-left override can make `rm -rf /tmp/x` read as something
+     * else; a line break or ESC could fake a second line). Nothing else is changed: no collapsing
+     * of spaces. Trimmed, then cut to [maxCodePoints] code points in all, the last being '…'
+     * when something was cut. Null when nothing is left. Idempotent.
+     */
+    fun sanitize(s: String, maxCodePoints: Int): String? {
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val cp = s.codePointAt(i)
+            i += Character.charCount(cp)
+            sb.appendCodePoint(if (invisible(cp)) '?'.code else cp)
+        }
+        val t = sb.toString().trim()
+        if (t.isEmpty()) return null
+        if (t.codePointCount(0, t.length) <= maxCodePoints) return t
+        return t.substring(0, t.offsetByCodePoints(0, maxCodePoints - 1)) + "…"
+    }
+
+    private fun invisible(cp: Int): Boolean =
+        cp <= 0x1F || cp in 0x7F..0x9F ||                  // C0, DEL, C1
+            cp in 0x200B..0x200F ||                         // zero-width space/joiners, LRM, RLM
+            cp in 0x2028..0x202E ||                         // line/paragraph separator, embeddings, overrides
+            cp in 0x2060..0x2069 ||                         // word joiner, invisible operators, isolates
+            cp == 0x061C || cp == 0xFEFF                    // Arabic letter mark, BOM / zero-width no-break space
+
     /** IDENTITIES_ANSWER listing [keyBlobs]: one key per paired computer. pam_rssh uses the
      *  one its computer pinned. */
     fun identitiesAnswer(keyBlobs: List<ByteArray>, comment: String): ByteArray {
@@ -164,6 +235,9 @@ object AgentProtocol {
         fun type(): Int = buf[0].toInt() and 0xFF
 
         fun skipType() { pos = 1 }
+
+        /** True when every byte has been read. */
+        fun atEnd(): Boolean = pos == buf.size
 
         @Throws(IOException::class)
         fun blob(): ByteArray {

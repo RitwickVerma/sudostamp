@@ -130,19 +130,22 @@ object HistoryScreen {
             }, matchWrap())
             addView(ctx.text(name, Type.LABEL), matchWrap(top = ctx.dp(8)))
             addView(ctx.text(ctx.getString(R.string.history_peer, e.peer.ifEmpty { "?" }), Type.CODE_SMALL, Ui.MUTED), matchWrap(top = ctx.dp(2)))
+            // What the computer said the request was for: its own words, so muted like the peer.
+            if (e.command != null) addView(ctx.text(e.command, Type.CODE_SMALL, Ui.MUTED), matchWrap(top = ctx.dp(4)))
             if (repeats != null) addView(ctx.text(repeats, Type.CAPTION, Ui.DANGER), matchWrap(top = ctx.dp(2)))
             addView(ctx.text(detail, Type.CAPTION, if (refused) Ui.FG else Ui.MUTED), matchWrap(top = ctx.dp(6)))
         }
         // One stop for a screen reader, in reading order, instead of six.
         box.contentDescription = listOfNotNull(
-            "$verdict, $name, ${e.peer}, $at", repeats, detail
+            "$verdict, $name, ${e.peer}, $at", e.command?.let { ctx.getString(R.string.history_command_a11y, it) },
+            repeats, detail
         ).joinToString(". ")
         box.isScreenReaderFocusable = true
         hideChildren(box)
         return box
     }
 
-    private fun hideChildren(v: ViewGroup) {
+    internal fun hideChildren(v: ViewGroup) {
         for (i in 0 until v.childCount) {
             val c = v.getChildAt(i)
             c.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO

@@ -65,6 +65,9 @@ data class HistoryEntry(
     val label: String,
     val peer: String,
     val count: Int = 1,
+    /** What the computer said the sudo was for, as the approval showed it (agent: why, or the
+     *  command), or null. Advisory text from the computer, never verified. */
+    val command: String? = null,
 )
 
 /**
@@ -81,7 +84,9 @@ data class HistoryEntry(
  *
  * Format v1, text, newline-separated: a header `sudostamp-history 1`, then one entry per line,
  * tab-separated: at, verdict code, refusal code or `-`, count, then Base64 of host id, label and
- * peer (so no text can break a line). A line that does not parse is skipped; a missing, oversized
+ * peer (so no text can break a line), and, only for an entry that has one, Base64 of the
+ * description as an eighth field (so history written before it, and entries without one, are
+ * byte-identical to v1 and still load). A line that does not parse is skipped; a missing, oversized
  * or newer-versioned file reads as empty.
  */
 class History(private val file: File? = null, private val max: Int = MAX) {
@@ -95,6 +100,8 @@ class History(private val file: File? = null, private val max: Int = MAX) {
         private const val MAX_FILE_BYTES = 256 * 1024
         private const val MAX_LABEL = 80
         private const val MAX_PEER = 64
+        /** Code points of a description kept: 100 entries of at most this stay far under [MAX_FILE_BYTES]. */
+        private const val MAX_COMMAND = 200
 
         /** Identical refusals this close together become one entry with a count, so a client
          *  hammering the port cannot push everything real out of the last 100. */
@@ -105,11 +112,12 @@ class History(private val file: File? = null, private val max: Int = MAX) {
 
         fun encode(list: List<HistoryEntry>): String =
             (listOf("$HEADER $VERSION") + list.map { e ->
-                listOf(
+                listOfNotNull(
                     e.at.toString(), e.verdict.code, e.refusal?.code ?: "-", e.count.toString(),
                     b64e.encodeToString((e.hostId ?: "").toByteArray()),
                     b64e.encodeToString(e.label.toByteArray()),
                     b64e.encodeToString(e.peer.toByteArray()),
+                    e.command?.let { b64e.encodeToString(it.toByteArray()) },
                 ).joinToString("\t")
             }).joinToString("\n") + "\n"
 
@@ -126,7 +134,7 @@ class History(private val file: File? = null, private val max: Int = MAX) {
 
         private fun parse(line: String): HistoryEntry? = runCatching {
             val f = line.split('\t')
-            if (f.size != 7) return null
+            if (f.size != 7 && f.size != 8) return null
             val at = f[0].toLong()
             val verdict = Verdict.entries.firstOrNull { it.code == f[1] } ?: return null
             val refusal = if (f[2] == "-") null else Refusal.entries.firstOrNull { it.code == f[2] } ?: return null
@@ -136,14 +144,18 @@ class History(private val file: File? = null, private val max: Int = MAX) {
             if (at <= 0 || count < 1) return null
             val host = String(b64d.decode(f[4])).ifEmpty { null }
             if (host != null && !Hosts.validId(host)) return null
+            val command = if (f.size == 8) cleanCommand(String(b64d.decode(f[7]))) else null
             HistoryEntry(at, verdict, refusal, host, clean(String(b64d.decode(f[5])), MAX_LABEL),
-                clean(String(b64d.decode(f[6])), MAX_PEER), count)
+                clean(String(b64d.decode(f[6])), MAX_PEER), count, command)
         }.getOrNull()
 
         /** Control characters become spaces and the length is bounded: both come off the
          *  network (a computer chooses its own label when pairing). */
         fun clean(s: String, limit: Int): String =
             s.take(limit).map { if (it.isISOControl()) ' ' else it }.joinToString("").trim()
+
+        /** A description off the network gets the same scrubbing as on arrival, and is shortened. */
+        fun cleanCommand(s: String?): String? = s?.let { AgentProtocol.sanitize(it, MAX_COMMAND) }
 
         /** Consecutive entries on the same local calendar day, in the order given. */
         fun groupByDay(entries: List<HistoryEntry>, zone: ZoneId): List<Pair<LocalDate, List<HistoryEntry>>> {
@@ -170,7 +182,8 @@ class History(private val file: File? = null, private val max: Int = MAX) {
      */
     @Synchronized
     fun record(e: HistoryEntry) {
-        val entry = e.copy(label = clean(e.label, MAX_LABEL), peer = clean(e.peer, MAX_PEER))
+        val entry = e.copy(label = clean(e.label, MAX_LABEL), peer = clean(e.peer, MAX_PEER),
+            command = cleanCommand(e.command))
         val top = list.firstOrNull()
         list = if (top != null && mergeable(top, entry)) {
             listOf(entry.copy(count = top.count + entry.count)) + list.drop(1)

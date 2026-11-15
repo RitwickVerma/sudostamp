@@ -76,6 +76,7 @@ cd desktop && cargo fmt --check && cargo clippy --all-targets --locked -- -D war
 |---|---|
 | `AgentProtocol.kt` | ssh-agent framing; only REQUEST_IDENTITIES and SIGN_REQUEST (+ pairing extensions); `refusal()` = sign policy (a paired computer's key, exactly 32 bytes) |
 | `AgentService.kt` | Foreground service: serial TCP listener on 7777, peers on the Wi-Fi/Ethernet subnet only, per-connection budget, key lookup per computer, `Limiter`, parks one `Approval`, wake lock while pending, notifications tied to one request |
+| `Context.kt` | What a computer says its next sudo is for (`context-v1@sudostamp`): `ContextBox` (per client, 15 s, single use, conflict if two texts differ), `parseRun` (the host tool's script-run command line). Advisory: never decides anything. Parsing is `AgentProtocol.parseContext` |
 | `Approval.kt` | One pending request (with its computer); resolves exactly once (approve/deny/timeout) |
 | `Hosts.kt` | Paired computers, one Keystore key each; pending until first approved; reconciled with the Keystore |
 | `Keys.kt` | Keystore EC P-256 keys (one per computer), fresh strong biometric per use, secure-hardware check, invalidation detection |
