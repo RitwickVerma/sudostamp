@@ -1011,6 +1011,8 @@ class MainActivity : Activity() {
             }, matchWrap())
             addView(left, matchWrap(top = dp(6)))
 
+            val asked = askedToRun(p, name)
+            if (asked != null) addView(asked, matchWrap(top = dp(24)))
             addView(card().apply {
                 addView(field(getString(R.string.approval_from), p.client, mono = true))
                 addView(text(
@@ -1036,7 +1038,7 @@ class MainActivity : Activity() {
                         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                     }, matchWrap(top = dp(14)))
                 }
-            }, matchWrap(top = dp(24)))
+            }, matchWrap(top = dp(if (asked != null) 12 else 24)))
 
             addView(button(getString(R.string.approval_approve), Kind.PRIMARY, R.drawable.ic_lock) {
                 if (promptFor == null && !p.isResolved && resumed) prompt(p)
@@ -1059,6 +1061,50 @@ class MainActivity : Activity() {
             }
         }
         update.run()
+    }
+
+    /**
+     * What the computer says this sudo is for, above "Request from"; null when it said nothing.
+     * ADVISORY, and the screen says so: a program running as the user there can report anything,
+     * so this is never a reason to approve, only a way to spot a mismatch. Two different
+     * descriptions are shown as a warning and no text at all.
+     */
+    private fun askedToRun(p: Approval, name: String): View? {
+        if (p.contextConflicted) {
+            val msg = getString(R.string.approval_ctx_conflict)
+            return row().apply {
+                gravity = Gravity.TOP
+                background = Ui.rounded(Ui.WARN_DIM, dpf(20f))
+                setPadding(dp(20), dp(16), dp(20), dp(16))
+                addView(icon(R.drawable.ic_warning, Ui.WARN, 18))
+                addView(text(msg, Type.CAPTION, Ui.WARN).apply { setPadding(dp(10), 0, 0, 0) },
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                contentDescription = msg
+                isScreenReaderFocusable = true
+                HistoryScreen.hideChildren(this)
+            }
+        }
+        val command = p.context ?: return null
+        val run = parseRun(command)
+        val advisory = getString(R.string.approval_ctx_advisory, name)
+        val said = if (run != null) "${getString(R.string.approval_ctx_agent, run.agent)}. ${run.why}. " +
+            getString(R.string.approval_ctx_script, run.shortSha) else command
+        return card().apply {
+            addView(text(getString(R.string.approval_ctx_overline), Type.OVERLINE, Ui.FAINT))
+            if (run != null) {
+                addView(text(getString(R.string.approval_ctx_agent, run.agent), Type.TITLE), matchWrap(top = dp(8)))
+                addView(text(run.why, Type.BODY), matchWrap(top = dp(6)))
+                addView(text(getString(R.string.approval_ctx_script, run.shortSha), Type.CODE, Ui.MUTED), matchWrap(top = dp(10)))
+            } else {
+                addView(text(command, Type.CODE).apply {
+                    breakStrategy = android.graphics.text.LineBreaker.BREAK_STRATEGY_SIMPLE
+                }, matchWrap(top = dp(8)))
+            }
+            addView(text(advisory, Type.CAPTION, Ui.MUTED), matchWrap(top = dp(12)))
+            contentDescription = getString(R.string.a11y_approval_ctx, said, advisory)
+            isScreenReaderFocusable = true
+            HistoryScreen.hideChildren(this)
+        }
     }
 
     // ------------------------------------------------------------------ result
