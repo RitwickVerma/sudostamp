@@ -20,8 +20,8 @@ class HistoryTest {
 
     private fun entry(
         v: Verdict = Verdict.APPROVED, r: Refusal? = null, id: String? = host,
-        label: String = "edith", peer: String = "192.0.2.7", at: Long = t++,
-    ) = HistoryEntry(at, v, r, id, label, peer)
+        label: String = "edith", peer: String = "192.0.2.7", at: Long = t++, command: String? = null,
+    ) = HistoryEntry(at, v, r, id, label, peer, command = command)
 
     private fun refused(r: Refusal, id: String? = host, peer: String = "192.0.2.7", at: Long = t++) =
         entry(Verdict.REFUSED, r, id, if (id == null) "" else "edith", peer, at)
@@ -213,5 +213,58 @@ class HistoryTest {
         assertEquals(2, text.trim().lines().size)
         assertEquals("sudostamp-history 1", text.lines().first())
         assertEquals(7, text.lines()[1].split('\t').size)
+    }
+
+    // ---- the description of what a request was for (context-v1@sudostamp)
+
+    private fun b64(s: String) = java.util.Base64.getEncoder().encodeToString(s.toByteArray())
+
+    @Test
+    fun `an entry written before descriptions existed still loads, without one`() {
+        // Seven fields, exactly as 1.x wrote them (at, verdict, refusal, count, host, label, peer).
+        val line = listOf("1700000000000", "a", "-", "1", b64(host), b64("edith"), b64("192.0.2.7")).joinToString("\t")
+        val f = File(tmp.root, "old.txt").apply { writeText("sudostamp-history 1\n$line\n") }
+        val e = History(f).entries().single()
+        assertNull(e.command)
+        assertEquals(Verdict.APPROVED, e.verdict)
+        assertEquals("edith", e.label)
+    }
+
+    @Test
+    fun `a description round trips and an entry without one stays seven fields`() {
+        val f = File(tmp.root, "c.txt")
+        val h = History(f)
+        h.record(entry(command = "claude: update the packages \u00e9\u4e2d\uD83D\uDE00"))
+        h.record(entry())
+        val back = History(f).entries()
+        assertEquals(h.entries(), back)
+        assertNull(back.first().command)
+        assertEquals("claude: update the packages \u00e9\u4e2d\uD83D\uDE00", back.last().command)
+        val lines = History.encode(back).trim().lines().drop(1)
+        assertEquals(7, lines[0].split('\t').size)
+        assertEquals(8, lines[1].split('\t').size)
+    }
+
+    @Test
+    fun `a stored description is scrubbed and shortened on the way in and on the way out`() {
+        val h = History()
+        h.record(entry(command = "sudo \u202Ex/pmt/ fr- mr"))
+        assertEquals("sudo ?x/pmt/ fr- mr", h.entries().single().command)
+        h.record(entry(command = "x".repeat(900)))
+        val cut = h.entries().first().command!!
+        assertEquals(200, cut.codePointCount(0, cut.length))
+        assertTrue(cut.endsWith("\u2026"))
+        // A file written by something else gets the same treatment when it is read.
+        val line = listOf("1700000000000", "a", "-", "1", b64(host), b64("edith"), b64("p"), b64("a\u001B[31mb\u202Ec")).joinToString("\t")
+        val e = History.decode("sudostamp-history 1\n$line\n").single()
+        assertEquals("a?[31mb?c", e.command)
+        val blank = listOf("1700000000000", "a", "-", "1", b64(host), b64("edith"), b64("p"), b64(" \u00a0 ")).joinToString("\t")
+        assertNull(History.decode("sudostamp-history 1\n$blank\n").single().command)
+    }
+
+    @Test
+    fun `a line with nine fields is skipped`() {
+        val line = listOf("1700000000000", "a", "-", "1", b64(host), b64("e"), b64("p"), b64("x"), b64("y")).joinToString("\t")
+        assertTrue(History.decode("sudostamp-history 1\n$line\n").isEmpty())
     }
 }

@@ -29,6 +29,11 @@ class Approval(
     val client: String,
     /** When the request arrived (epoch ms). */
     val arrivedAt: Long,
+    /** What the computer said this sudo is for ([ContextBox]); null when it said nothing or
+     *  said two different things. ADVISORY: nothing about approving may depend on it. */
+    val context: String? = null,
+    /** The computer sent two different descriptions for this request: shown as a warning. */
+    val contextConflicted: Boolean = false,
 ) {
     /** How a request ended, for the history. Resolving is still once: only the first counts. */
     enum class How { APPROVED, DENIED_IN_APP, DENIED_FROM_NOTIFICATION, TIMED_OUT, CANCELLED }

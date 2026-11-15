@@ -89,6 +89,9 @@ class AgentService : Service() {
          *  Process-wide, like the listener. */
         private val limiter = Limiter()
 
+        /** What each computer said its next sudo is for. Advisory; see [ContextBox]. */
+        private val contextBox = ContextBox()
+
         /** Numbers requests, so a notification acts only on the request it announced. */
         private val requestIds = java.util.concurrent.atomic.AtomicLong()
 
@@ -411,13 +414,17 @@ class AgentService : Service() {
                 val keyBlob = r.blob()          // which computer's key
                 val data = r.blob()             // what to sign
                 r.int32()                       // flags
+                // Taken here, once, whatever happens next: a refused request consumes the
+                // description too, so it can never wait for a later one. What the request
+                // is for is advisory and must not change whether it is refused or approved.
+                val seen = contextBox.take(client, SystemClock.elapsedRealtime())
 
                 val host = Hosts.all(this).firstOrNull { Keys.blob(Keys.aliasFor(it.id))?.contentEquals(keyBlob) == true }
                 val why = AgentProtocol.refusalKind(host != null, data) ?: limiter.check(host!!.id)
                 if (why != null) {
                     Log.w(TAG, "${AgentProtocol.refusal(host != null, data) ?: limiter.refusal(host!!.id) ?: why} (from $client)")
                     // Refused unprompted: the user never saw it, so the history is where it shows.
-                    remember(Verdict.REFUSED, why, host?.id, host?.label ?: "", client)
+                    remember(Verdict.REFUSED, why, host?.id, host?.label ?: "", client, seen?.text)
                     AgentProtocol.writeFrame(out, AgentProtocol.failure())
                     return 0
                 }
@@ -427,6 +434,7 @@ class AgentService : Service() {
                 val p = Approval(
                     requestIds.incrementAndGet(), Keys.newSigner(Keys.aliasFor(host.id)), data,
                     host.id, host.label, host.confirmed, client, System.currentTimeMillis(),
+                    seen?.text, seen?.conflicted == true,
                 )
                 current = p
                 notifyApprovalNeeded(p)
@@ -455,7 +463,7 @@ class AgentService : Service() {
                     resetNotification()
                     changed()
                 }
-                remember(p.resolution.toVerdict(), null, host.id, host.label, client)
+                remember(p.resolution.toVerdict(), null, host.id, host.label, client, p.context)
                 val waited = SystemClock.elapsedRealtimeNanos() - waitStart
                 if (der == null) {
                     limiter.unapproved(host.id, host.confirmed)
@@ -473,7 +481,17 @@ class AgentService : Service() {
 
             AgentProtocol.SSH2_AGENTC_EXTENSION -> {
                 r.skipType()
-                AgentProtocol.writeFrame(out, pair(String(r.blob(), Charsets.US_ASCII), r, conn))
+                val name = String(r.blob(), Charsets.US_ASCII)
+                if (name == AgentProtocol.EXT_CONTEXT) {
+                    // Not pairing: no pair(), no discardAbandoned. Stored for this client's next
+                    // sign request; FAILURE (which an old phone also answers) when malformed.
+                    val text = AgentProtocol.parseContext(r)
+                    if (text != null) contextBox.put(client, text, SystemClock.elapsedRealtime())
+                    AgentProtocol.writeFrame(out,
+                        if (text != null) byteArrayOf(AgentProtocol.SSH2_AGENT_SUCCESS.toByte()) else AgentProtocol.failure())
+                    return 0
+                }
+                AgentProtocol.writeFrame(out, pair(name, r, conn))
                 discardAbandoned(this)
                 changed()
             }
@@ -599,17 +617,27 @@ class AgentService : Service() {
         // Separate ID and channel from the persistent notice: the foreground
         // notification must stay put, and the approval must be allowed to be loud.
         // No time in the text: the shade already shows when it arrived (setWhen below).
+        val title = getString(R.string.notif_approval_title, Ui.hostName(this, p.hostId, p.label))
+        // An unexpected request should be one tap to reject, without opening anything.
+        val denyAction = Notification.Action.Builder(
+            Icon.createWithResource(this, R.drawable.ic_error), getString(R.string.deny), deny
+        ).build()
+        val generic = notificationBuilder(
+            title,
+            getString(if (p.trusted) R.string.notif_approval_text else R.string.notif_approval_text_new, p.client),
+            CHANNEL_APPROVAL, pi, denyAction
+        )
+        val described = p.context?.let(::describeContext)
         mgr().notify(
             APPROVAL_NOTIF_ID,
-            buildNotification(
-                getString(R.string.notif_approval_title, Ui.hostName(this, p.hostId, p.label)),
-                getString(if (p.trusted) R.string.notif_approval_text else R.string.notif_approval_text_new, p.client),
-                CHANNEL_APPROVAL, pi,
-                // An unexpected request should be one tap to reject, without opening anything.
-                Notification.Action.Builder(
-                    Icon.createWithResource(this, R.drawable.ic_error), getString(R.string.deny), deny
-                ).build()
-            )
+            if (described == null) generic.build()
+            else notificationBuilder(title, described, CHANNEL_APPROVAL, pi, denyAction)
+                .setStyle(Notification.BigTextStyle().bigText(described))
+                // What the computer says it is running stays off a locked screen: that shows
+                // only the generic text. (The conflict case never gets here: no text.)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+                .setPublicVersion(generic.build())
+                .build()
         )
     }
 
@@ -640,9 +668,14 @@ class AgentService : Service() {
     }
 
     /** Records one decision in the history (best-effort: never on the request's critical path). */
-    private fun remember(verdict: Verdict, refusal: Refusal?, hostId: String?, label: String, peer: String) {
+    private fun remember(
+        verdict: Verdict, refusal: Refusal?, hostId: String?, label: String, peer: String, command: String? = null,
+    ) {
         runCatching {
-            HistoryStore.get(this).record(HistoryEntry(System.currentTimeMillis(), verdict, refusal, hostId, label, peer))
+            HistoryStore.get(this).record(HistoryEntry(
+                System.currentTimeMillis(), verdict, refusal, hostId, label, peer,
+                command = command?.let(::describeContext),
+            ))
         }.onFailure { Log.w(TAG, "history: ${it.message}") }
         changed()
     }
@@ -657,7 +690,15 @@ class AgentService : Service() {
         channelId: String,
         pi: PendingIntent? = null,
         vararg actions: Notification.Action
-    ): Notification {
+    ): Notification = notificationBuilder(title, text, channelId, pi, *actions).build()
+
+    private fun notificationBuilder(
+        title: String,
+        text: String?,
+        channelId: String,
+        pi: PendingIntent? = null,
+        vararg actions: Notification.Action
+    ): Notification.Builder {
         val important = channelId == CHANNEL_APPROVAL
         val b = Notification.Builder(this, channelId)
         b.setContentTitle(title)
@@ -686,7 +727,7 @@ class AgentService : Service() {
         }
         if (pi != null) b.setContentIntent(pi)
         actions.forEach { b.addAction(it) }
-        return b.build()
+        return b
     }
 
     private fun mgr() = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
