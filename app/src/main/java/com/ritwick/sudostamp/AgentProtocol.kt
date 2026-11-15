@@ -181,7 +181,7 @@ object AgentProtocol {
             i += Character.charCount(cp)
             sb.appendCodePoint(if (invisible(cp)) '?'.code else cp)
         }
-        val t = sb.toString().trim { it.isWhitespace() }
+        val t = sb.toString().trim()
         if (t.isEmpty()) return null
         if (t.codePointCount(0, t.length) <= maxCodePoints) return t
         return t.substring(0, t.offsetByCodePoints(0, maxCodePoints - 1)) + "…"
