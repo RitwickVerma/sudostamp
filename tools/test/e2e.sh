@@ -755,8 +755,9 @@ check "a phone with another key: exit 75, the reason says so, and no approval wa
 echo approve > /tmp/mode; i0=$(ids)
 flag ': > paused'
 ask_u "--why 'e2e: paused' -- touch /tmp/ask-denied" >/dev/null 2>/tmp/ask5.err; rc=$?
+i1=$(ids)
 check "paused: exit 75, says paused, and the phone was not even dialled" \
-  bash -c "[ $rc = 75 ] && grep -q paused /tmp/ask5.err && [ \$(ids) = $i0 ] && [ ! -e /tmp/ask-denied ]"
+  bash -c "[ $rc = 75 ] && grep -q paused /tmp/ask5.err && [ $i1 = $i0 ] && [ ! -e /tmp/ask-denied ]"
 flag 'true'
 echo slow > /tmp/mode; rm -f /tmp/ask-late
 ask_u "--approval-timeout 3 --why 'e2e: late' -- touch /tmp/ask-late" >/dev/null 2>/tmp/ask6.err; rc=$?
@@ -778,7 +779,7 @@ R=/usr/local/sbin/sudostamp-run
 printf 'touch /tmp/run-ran\n' > /tmp/run.sh; RS="$(sha256sum < /tmp/run.sh | cut -d' ' -f1)"
 printf 'touch /tmp/run-ran\n# changed after the approval\n' | "$R" "$RS" e2e -- tampered >/dev/null 2>/tmp/run1.err; rc=$?
 check "runner: a script that does not match the approved hash: exit 65, refused, nothing ran" \
-  bash -c "[ $rc = 65 ] && grep -q 'does not match' /tmp/run1.err && ! grep -q approved /tmp/run1.err && [ ! -e /tmp/run-ran ]"
+  bash -c "[ $rc = 65 ] && grep -q 'does not match' /tmp/run1.err && ! grep -q 'run: approved ' /tmp/run1.err && [ ! -e /tmp/run-ran ]"
 head -c 1048577 /dev/zero | "$R" "$(head -c 1048577 /dev/zero | sha256sum | cut -d' ' -f1)" e2e -- big >/dev/null 2>&1; rc=$?
 check "runner: over 1 MiB: exit 65" test "$rc" = 65
 "$R" "$RS" 'Bad Agent' -- x < /tmp/run.sh >/dev/null 2>&1; rc=$?

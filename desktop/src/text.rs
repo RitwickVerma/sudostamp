@@ -22,7 +22,7 @@ pub fn clean(s: &str, max: usize) -> String {
 
 /// An agent's run (`sudostamp ask`, docs/AGENTS-SUDO.md) is sudo's command line
 /// `sudo -k -- /usr/local/sbin/sudostamp-run <sha256> <agent> -- <why>`: shown as
-/// `<agent>: <why> (script <first 12 of the hash>)`, what a person can check against the agent's
+/// `<agent>: <why> (script <first 16 of the hash>)`, the same 16 `sudostamp ask` prints and the phone shows, what a person can check against the agent's
 /// own words. Anything else, unchanged.
 pub fn describe(command: &str) -> String {
     describe_run(command).unwrap_or_else(|| command.to_string())
@@ -65,7 +65,7 @@ fn describe_run(command: &str) -> Option<String> {
     if why.is_empty() {
         return None;
     }
-    Some(format!("{agent}: {why} (script {})", &sha[..12]))
+    Some(format!("{agent}: {why} (script {}…)", &sha[..16]))
 }
 
 /// For notification bodies and tooltips, which accept a subset of HTML: the command is data.
@@ -117,10 +117,10 @@ mod tests {
         );
         assert_eq!(
             describe(&c),
-            "hermes: rebuild pam_rssh now (script a3f9a3f9a3f9)"
+            "hermes: rebuild pam_rssh now (script a3f9a3f9a3f9a3f9…)"
         );
         let plain = format!("sudo /usr/local/sbin/sudostamp-run {sha} claude-code -- x");
-        assert_eq!(describe(&plain), "claude-code: x (script a3f9a3f9a3f9)");
+        assert_eq!(describe(&plain), "claude-code: x (script a3f9a3f9a3f9a3f9…)");
         for bad in [
             format!(
                 "sudo -k -- /usr/local/sbin/sudostamp-run {} hermes -- x",

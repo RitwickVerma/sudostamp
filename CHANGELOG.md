@@ -14,7 +14,7 @@ SudoStamp on the desktop, and a safe way for agents to ask for root.
   exactly the script whose SHA-256 the approval named: the root runner `sudostamp-run` takes it only
   on stdin, checks the hash, and keeps a root-only copy of what ran. `--json` for programs.
 - **The agent, the reason and the script's hash are in sudo's own command line**, so sudo's log, the
-  desktop notification ("hermes: rebuild pam_rssh (script a3f9c2d1e0b7)") and the phone all show them.
+  desktop notification ("hermes: rebuild pam_rssh (script a3f9c2d1e0b7a44c…)") and the phone all show them.
 - docs/AGENTS-SUDO.md: how to use it, exit codes, and what the description does and does not guarantee.
 
 ### Desktop (new, Linux)

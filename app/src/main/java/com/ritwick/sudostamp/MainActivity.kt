@@ -997,7 +997,11 @@ class MainActivity : Activity() {
         tick.removeCallbacksAndMessages(null)
         val name = Ui.hostName(this, p.hostId, p.label)
         val left = text("", Type.CODE_SMALL, Ui.MUTED, center = true)
-        val ring = mark(200, top = dp(16), bottom = dp(8), describe = getString(R.string.a11y_approval_mark))
+        // A smaller mark when the computer says what this is for: the description and both
+        // buttons must stay in reach without scrolling.
+        val described = p.context != null || p.contextConflicted
+        val ring = mark(if (described) 132 else 200, top = dp(if (described) 8 else 16), bottom = dp(8),
+            describe = getString(R.string.a11y_approval_mark))
 
         show(frame(centered = true) {
             addView(text(getString(R.string.approval_overline), Type.OVERLINE, Ui.ACCENT, center = true), matchWrap())
@@ -1012,7 +1016,7 @@ class MainActivity : Activity() {
             addView(left, matchWrap(top = dp(6)))
 
             val asked = askedToRun(p, name)
-            if (asked != null) addView(asked, matchWrap(top = dp(24)))
+            if (asked != null) addView(asked, matchWrap(top = dp(18)))
             addView(card().apply {
                 addView(field(getString(R.string.approval_from), p.client, mono = true))
                 addView(text(
@@ -1072,12 +1076,14 @@ class MainActivity : Activity() {
     private fun askedToRun(p: Approval, name: String): View? {
         if (p.contextConflicted) {
             val msg = getString(R.string.approval_ctx_conflict)
+            // Red, not the amber of the first-request note: two stories for one request means
+            // something on that computer is lying about it.
             return row().apply {
                 gravity = Gravity.TOP
-                background = Ui.rounded(Ui.WARN_DIM, dpf(20f))
+                background = Ui.rounded(Ui.DANGER_DIM, dpf(20f))
                 setPadding(dp(20), dp(16), dp(20), dp(16))
-                addView(icon(R.drawable.ic_warning, Ui.WARN, 18))
-                addView(text(msg, Type.CAPTION, Ui.WARN).apply { setPadding(dp(10), 0, 0, 0) },
+                addView(icon(R.drawable.ic_warning, Ui.DANGER, 18))
+                addView(text(msg, Type.LABEL, Ui.DANGER).apply { setPadding(dp(10), 0, 0, 0) },
                     LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 contentDescription = msg
                 isScreenReaderFocusable = true
@@ -1090,17 +1096,18 @@ class MainActivity : Activity() {
         val said = if (run != null) "${getString(R.string.approval_ctx_agent, run.agent)}. ${run.why}. " +
             getString(R.string.approval_ctx_script, run.shortSha) else command
         return card().apply {
-            addView(text(getString(R.string.approval_ctx_overline), Type.OVERLINE, Ui.FAINT))
+            addView(text(getString(R.string.approval_ctx_overline), Type.OVERLINE, Ui.MUTED))
             if (run != null) {
-                addView(text(getString(R.string.approval_ctx_agent, run.agent), Type.TITLE), matchWrap(top = dp(8)))
-                addView(text(run.why, Type.BODY), matchWrap(top = dp(6)))
-                addView(text(getString(R.string.approval_ctx_script, run.shortSha), Type.CODE, Ui.MUTED), matchWrap(top = dp(10)))
+                // Who and why on one line; then the one thing that can be checked against what the
+                // agent said it ran, the script's hash, at full contrast.
+                addView(text(getString(R.string.approval_ctx_run, run.agent, run.why), Type.LABEL), matchWrap(top = dp(8)))
+                addView(text(getString(R.string.approval_ctx_script, run.shortSha), Type.CODE), matchWrap(top = dp(8)))
             } else {
                 addView(text(command, Type.CODE).apply {
                     breakStrategy = android.graphics.text.LineBreaker.BREAK_STRATEGY_SIMPLE
                 }, matchWrap(top = dp(8)))
             }
-            addView(text(advisory, Type.CAPTION, Ui.MUTED), matchWrap(top = dp(12)))
+            addView(text(advisory, Type.CAPTION, Ui.MUTED), matchWrap(top = dp(10)))
             contentDescription = getString(R.string.a11y_approval_ctx, said, advisory)
             isScreenReaderFocusable = true
             HistoryScreen.hideChildren(this)

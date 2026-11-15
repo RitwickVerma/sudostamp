@@ -48,11 +48,11 @@ shows or records sudo shows them, with no new channel to trust:
 
 - **sudo's log**, which `journalctl` shows: `COMMAND=/usr/local/sbin/sudostamp-run <sha> hermes -- rebuild ...`.
 - **The desktop app** (`sudostamp-desktop`): the notification and history read
-  `hermes: rebuild pam_rssh (script a3f9c2d1e0b7)`.
+  `hermes: rebuild pam_rssh (script a3f9c2d1e0b7a44c…)`.
 - **The phone (1.6)**: the probe already connects to the phone right before pam_rssh does. When the
   phone offers your key, the probe sends the command line on that connection as the extension
   `context-v1@sudostamp`, and the approval screen shows *hermes wants to run a script: rebuild
-  pam_rssh, Script a3f9 c2d1 e0b7 …*. A phone older than 1.6 answers FAILURE and the approval looks
+  pam_rssh, SHA-256 a3f9 c2d1 e0b7 a44c …*. A phone older than 1.6 answers FAILURE and the approval looks
   as before. Nothing about the probe's result depends on the answer.
 
 ## What the description is and is not
