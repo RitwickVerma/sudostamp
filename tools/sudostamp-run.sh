@@ -105,6 +105,11 @@ def stop(sig, _):
         child.send_signal(sig)
 for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
     signal.signal(s, stop)
+# Everything on stdout before this line is sudo talking (it prints PAM messages there, the cue of
+# pam_rssh among them); everything after it is the script. sudostamp ask splits the stream here, so an
+# agent reads only what its script printed.
+sys.stdout.write("sudostamp-run: output %s\n" % sha)
+sys.stdout.flush()
 try:
     child = subprocess.Popen(["bash", "--noprofile", "--norc", script], stdin=subprocess.DEVNULL,
                              env=env, cwd="/")

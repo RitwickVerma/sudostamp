@@ -150,10 +150,14 @@ def build(args):
     return body
 
 
-def run(argv, body, approval_s, total_s, capture, sink):
+def run(argv, body, approval_s, total_s, capture, sink, out_sink=None):
     """sudo with no controlling terminal (a new session), the script on stdin. Returns
-    (approved, returncode, stdout, stderr lines, timed out)."""
-    p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE if capture else None,
+    (approved, returncode, stdout, stderr lines, timed out). stdout is the script's alone: sudo
+    prints PAM messages (pam_rssh's cue) on stdout too, so everything before the runner's
+    "output" line goes to [sink] (stderr), never into what the agent reads as the result."""
+    out_sink = out_sink or sys.stdout.buffer
+    marker = ("sudostamp-run: output %s\n" % argv[4]).encode() if len(argv) > 4 else None
+    p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, start_new_session=True)
     approved = threading.Event()
     lock = threading.Lock()
@@ -203,11 +207,32 @@ def run(argv, body, approval_s, total_s, capture, sink):
                 sink.flush()
 
     def read_out():
-        out.append(p.stdout.read(4 * MAX))
+        pre, kept, began = b"", 0, marker is None
+        while True:
+            chunk = p.stdout.read1(65536) if hasattr(p.stdout, "read1") else p.stdout.read(65536)
+            if not chunk:
+                break
+            if not began:
+                pre += chunk
+                i = pre.find(marker)
+                if i < 0:
+                    continue
+                if pre[:i]:
+                    sink.write(pre[:i].decode("utf-8", "replace"))
+                    sink.flush()
+                chunk, began = pre[i + len(marker):], True
+            if capture:
+                if kept < 4 * MAX:
+                    out.append(chunk[:4 * MAX - kept])
+                    kept += len(out[-1])
+            else:
+                out_sink.write(chunk)
+                out_sink.flush()
+        if not began and pre:                   # never reached the script: all of it was sudo
+            sink.write(pre.decode("utf-8", "replace"))
+            sink.flush()
 
-    threads = [threading.Thread(target=read_err, daemon=True)]
-    if capture:
-        threads.append(threading.Thread(target=read_out, daemon=True))
+    threads = [threading.Thread(target=read_err, daemon=True), threading.Thread(target=read_out, daemon=True)]
     for t in threads:
         t.start()
 

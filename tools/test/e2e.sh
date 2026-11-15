@@ -32,7 +32,8 @@ PASS=0; FAIL=0
 pass() { printf '  \033[32mPASS\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 step() { printf '\n=== %s ===\n' "$*"; }
-check() { local name="$1"; shift; if "$@"; then pass "$name"; else fail "$name"; fi; }
+# Returns 1 on a failure (nothing here runs under -e), so `check ... || <show why>` works.
+check() { local name="$1"; shift; if "$@"; then pass "$name"; else fail "$name"; return 1; fi; }
 # Byte comparison with coreutils only: minimal images lack diffutils (cmp, diff), and a
 # missing cmp once read as "the stack changed" on Fedora.
 
@@ -731,18 +732,26 @@ ids() { grep -c '^identities:' /tmp/p7811.log; }
 check "the runner is installed, root-owned, mode 0755" \
   bash -c "[ \"\$(stat -c '%U %a' /usr/local/sbin/sudostamp-run)\" = 'root 755' ]"
 echo approve > /tmp/mode
+# On failure, what ask said: CI keeps only this log.
+said() { echo "    rc=$rc stdout=$(printf %q "$1")"; sed 's/^/    | /' "$2" 2>/dev/null | tail -8; }
 out="$(ask_u "--why 'e2e: who am I' -- id -u" 2>/tmp/ask1.err)"; rc=$?
-check "approve: the command runs as root and its output comes back" bash -c "[ $rc = 0 ] && [ '$out' = 0 ]"
+check "approve: the command runs as root, and stdout is exactly its output (sudo's cue went to stderr)" \
+  bash -c "[ $rc = 0 ] && [ '$out' = 0 ]" || said "$out" /tmp/ask1.err
 SHA1="$(printf 'exec id -u\n' | sha256sum | cut -d' ' -f1)"
 check "the phone was told what it is for: sudo -k, the runner, the script's hash, the agent, the reason" \
   grep -qF "context: sudo -k -- /usr/local/sbin/sudostamp-run $SHA1 e2e -- e2e: who am I" /tmp/p7811.log
 check "root kept a copy of what it ran (0600, with who asked and why)" \
   bash -c "f=\$(ls /var/lib/sudostamp/runs/*-e2e-${SHA1:0:12}.sh) && [ \"\$(stat -c '%U %a' \$f)\" = 'root 600' ] && grep -qx '# why: e2e: who am I' \$f && grep -qx 'exec id -u' \$f"
 printf 'echo from-stdin\nexit 3\n' > /tmp/ask-script; chmod 0644 /tmp/ask-script
-ask_u "--json --why 'e2e: a script on stdin' --script - < /tmp/ask-script" > /tmp/ask2.json 2>/dev/null; rc=$?
-check "--json, a script on stdin: its exit status and output, in one object" bash -c "[ $rc = 3 ] && python3 -c '
-import json, sys; d = json.load(open(\"/tmp/ask2.json\"))
-sys.exit(0 if (d[\"exit\"], d[\"ok\"], d[\"stage\"], d[\"stdout\"]) == (3, False, \"run\", \"from-stdin\\n\") and len(d[\"sha256\"]) == 64 else 1)'"
+ask_u "--json --why 'e2e: a script on stdin' --script - < /tmp/ask-script" > /tmp/ask2.json 2>/tmp/ask2.err; rc=$?
+cat > /tmp/ask-json-check.py <<'PY'
+import json, sys
+d = json.load(open("/tmp/ask2.json"))
+ok = (d["exit"], d["ok"], d["stage"], d["stdout"]) == (3, False, "run", "from-stdin\n") and len(d["sha256"]) == 64
+sys.exit(0 if ok else 1)
+PY
+check "--json, a script on stdin: its exit status and output, in one object" \
+  bash -c "[ $rc = 3 ] && python3 /tmp/ask-json-check.py" || said "$(cat /tmp/ask2.json)" /tmp/ask2.err
 check "--check says ready" ask_u "--check"
 echo deny > /tmp/mode; rm -f /tmp/ask-denied; s0=$(date +%s)
 ask_u "--why 'e2e: denied' -- touch /tmp/ask-denied" >/dev/null 2>/tmp/ask3.err; rc=$?
@@ -769,7 +778,7 @@ echo approve > /tmp/mode; s0=$(date +%s)
 ask_u "--timeout 3 --why 'e2e: stopped' -- sleep 41" >/dev/null 2>/tmp/ask7.err; rc=$?
 sleep 2
 check "--timeout: exit 124, and the root script is stopped too" \
-  bash -c "[ $rc = 124 ] && ! pgrep -f 'sleep 41' >/dev/null && [ \$(( \$(date +%s) - $s0 )) -lt 25 ]"
+  bash -c "[ $rc = 124 ] && ! pgrep -f 'slee[p] 41' >/dev/null && [ \$(( \$(date +%s) - $s0 )) -lt 25 ]" || said "" /tmp/ask7.err
 pkill -f 'sleep 41' 2>/dev/null
 echo nocontext > /tmp/mode
 check "a phone older than 1.6 (refuses the description): sudo through the phone still works" as_user_sudo ""
@@ -788,7 +797,7 @@ check "runner: a bad agent name, or no reason: exit 64, nothing ran" bash -c "[ 
 check "runner: the matching script runs" bash -c "[ $rc = 0 ] && [ -e /tmp/run-ran ]"
 python3 -I "$W/tools/ask.py" --why x -- true >/dev/null 2>&1; rc=$?
 check "ask as root refuses (exit 64): it is for a user asking for root" test "$rc" = 64
-rm -f /tmp/run.sh /tmp/run-ran /tmp/ask-script /tmp/ask-denied /tmp/ask*.json
+rm -f /tmp/run.sh /tmp/run-ran /tmp/ask-script /tmp/ask-denied /tmp/ask*.json /tmp/ask-json-check.py
 
 step "12i. with the phone gone the desktop hears skipped (away)"
 stop_listener; start_listener

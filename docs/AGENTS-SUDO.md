@@ -29,7 +29,9 @@ sudostamp ask --check                                                      # wou
    running nothing, if they differ. It keeps a root-only copy in `/var/lib/sudostamp/runs/` (the
    newest 200, each headed with agent, reason, hash and user). It then runs the script with bash in
    a clean environment: no pagers, `TERM=dumb`, cwd `/`, stdin closed.
-5. **The result.** The script's own exit status and output (streamed, or one JSON object with
+5. **The result.** The script's own exit status and output (stdout carries only the script's
+   output: sudo prints PAM messages such as the approval cue on stdout, and `ask` moves them to
+   stderr) (streamed, or one JSON object with
    `--json`: `ok`, `stage`, `exit`, `reason`, `sha256`, `stdout`, `stderr`).
 
 | Exit | Meaning | Anything ran? |

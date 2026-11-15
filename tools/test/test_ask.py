@@ -79,6 +79,46 @@ class Build(unittest.TestCase):
             ask.build(a)
 
 
+class Output(unittest.TestCase):
+    """sudo prints PAM messages (pam_rssh's cue) on stdout: they must never reach what the agent
+    reads as the script's output. A stand-in for sudo and the runner says exactly what they say."""
+
+    SHA = "ab" * 32
+    FAKE = ("printf 'SudoStamp-approve-on-your-phone-(up-to-60s)\\n'; "
+            "echo 'sudostamp-run: waiting {sha}' >&2; cat > /dev/null; "
+            "echo 'sudostamp-run: approved {sha}' >&2; "
+            "printf 'sudostamp-run: output {sha}\\n'; printf 'real output\\n'; exit 3")
+
+    def go(self, capture):
+        import io
+        argv = ["sh", "-c", self.FAKE.format(sha=self.SHA), "sh", self.SHA]
+        so, se = io.BytesIO(), io.StringIO()
+        approved, rc, out, _, timed_out = ask.run(argv, b"echo x\n", 10, 10, capture, se, so)
+        self.assertTrue(approved)
+        self.assertFalse(timed_out)
+        self.assertEqual(rc, 3)
+        self.assertIn("approve-on-your-phone", se.getvalue())
+        return out, so.getvalue()
+
+    def test_streamed_output_is_the_scripts_alone(self):
+        out, streamed = self.go(False)
+        self.assertEqual((out, streamed), (b"", b"real output\n"))
+
+    def test_captured_output_is_the_scripts_alone(self):
+        out, streamed = self.go(True)
+        self.assertEqual((out, streamed), (b"real output\n", b""))
+
+
+class Runner(unittest.TestCase):
+    def test_its_python_has_no_single_quote(self):
+        # sudostamp-run.sh is `exec python3 -I -S -c '<program>'`: one apostrophe in a comment ends
+        # the quoted program and the runner fails to start (it happened).
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sudostamp-run.sh")
+        s = open(path).read()
+        start = s.index("exec python3 -I -S -c '") + len("exec python3 -I -S -c '")
+        self.assertEqual(s[start:s.rindex("' \"$@\"")].count("'"), 0)
+
+
 class Args(unittest.TestCase):
     def test_bad_agent_and_why_are_usage_errors(self):
         if os.geteuid() == 0:

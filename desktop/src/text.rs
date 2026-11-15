@@ -120,7 +120,10 @@ mod tests {
             "hermes: rebuild pam_rssh now (script a3f9a3f9a3f9a3f9…)"
         );
         let plain = format!("sudo /usr/local/sbin/sudostamp-run {sha} claude-code -- x");
-        assert_eq!(describe(&plain), "claude-code: x (script a3f9a3f9a3f9a3f9…)");
+        assert_eq!(
+            describe(&plain),
+            "claude-code: x (script a3f9a3f9a3f9a3f9…)"
+        );
         for bad in [
             format!(
                 "sudo -k -- /usr/local/sbin/sudostamp-run {} hermes -- x",

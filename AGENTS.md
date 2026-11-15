@@ -265,4 +265,6 @@ installer built: `uninstall` removes only that, `doctor` reads the patch state f
     checked against the hash in its argv, before anything runs. sudo's argv is the description the
     desktop, sudo's log and the phone show: its format (`sudostamp-run <sha256> <agent> -- <why>`)
     is parsed in desktop/src/text.rs and the app's Context.kt; change all three together. Root
-    never opens a path the agent names.
+    never opens a path the agent names. The runner is Python inside single quotes in a shell wrapper: no
+    apostrophe anywhere in it (test_ask.py checks). sudo prints PAM messages on stdout, so the
+    runner marks where the script's output starts and ask splits there.
