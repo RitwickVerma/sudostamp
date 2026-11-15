@@ -17,6 +17,15 @@ SudoStamp on the desktop, and a safe way for agents to ask for root.
   desktop notification ("hermes: rebuild pam_rssh (script a3f9c2d1e0b7a44c…)") and the phone all show them.
 - docs/AGENTS-SUDO.md: how to use it, exit codes, and what the description does and does not guarantee.
 
+### Phone
+- **The approval says what a sudo is for** when the computer tells it (`context-v1@sudostamp`, sent
+  by the 1.6 probe): for an agent's run, the agent, its reason and the script's SHA-256; otherwise
+  the command. Always labelled as the computer's own report, since a program running as you there
+  could report something else. Two different descriptions for one request show a red warning and
+  neither text. The notification carries it but keeps it off the lock screen, and the history lists it.
+- A phone with 1.6 works with older computers, and a 1.6 computer with older phones: neither
+  side depends on the description.
+
 ### Desktop (new, Linux)
 - **`sudostamp-desktop`**, a tray app (AUR `sudostamp-desktop`). It runs as you, holds no key and
   is not part of how sudo authenticates: without it, sudo behaves exactly the same.
