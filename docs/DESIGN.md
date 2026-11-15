@@ -37,7 +37,7 @@ sudo on the host
   v   (direct TCP, no bridge: pam_rssh connects to the phone itself)
 Android app (listening on TCP 7777; serves only peers on the Wi-Fi/Ethernet subnet it was reached on)
   |
-  v   (minimal ssh-agent protocol: 2 message types, plus pairing extensions)
+  v   (minimal ssh-agent protocol: 2 message types, plus the pairing and context extensions)
 Android app
   |  SSH2_AGENTC_SIGN_REQUEST  -> refuse unprompted unless: the key of a paired computer
   |                               AND exactly 32 bytes AND not rate-limited
@@ -148,6 +148,37 @@ only a request the app makes.
   for a pam_rssh SudoStamp did not build (FreeBSD's port), and macOS and FreeBSD have no probe
   at all (OpenPAM cannot skip a line). The number is a coupling: change the app's approval window and
   the patch (and its pinned hash in `install.sh`) together.
+
+## What a sudo is for (`context-v1@sudostamp`)
+
+pam_rssh signs an opaque 32-byte challenge, so on its own the phone can say only which computer
+is asking. The host probe (`tools/sudostamp-probe.sh`) already opens its own short connection to
+the phone right before pam_rssh; on it, after `REQUEST_IDENTITIES`, it now also sends one
+extension frame: type 27, the SSH string `context-v1@sudostamp`, then one SSH string, the
+command: sudo's argv joined with spaces. The phone answers `SSH2_AGENT_SUCCESS` when it stored
+it and `SSH2_AGENT_FAILURE` otherwise (an older phone answers FAILURE from its pairing branch,
+and the host ignores that).
+
+- **Parsing** (`AgentProtocol.parseContext`): exactly one string and nothing after it, at most
+  2048 bytes, strict UTF-8 (malformed is refused, not repaired). Every C0 and C1 control, DEL and
+  the invisible or bidirectional format characters (U+200B-200F, U+2028-202E, U+2060-2069,
+  U+061C, U+FEFF) become `?`, so the text shown is what the bytes are (no right-to-left override
+  can make one command read as another). Nothing else is collapsed; the text is trimmed and cut
+  to 512 code points, ending in an ellipsis when cut.
+- **Holding** (`ContextBox`, pure, in `Context.kt`): per client address, for 15 s, **single
+  use**. The first description wins; the same text again changes nothing and does not extend the
+  time; a **different** one while one is pending marks the address **conflicted**. At most 16
+  addresses, the oldest dropped first.
+- **Using**: on the next `SIGN_REQUEST` from that address the service takes the description once,
+  right after reading the frame, so a request that is refused unprompted consumes it too. The
+  approval screen shows it above "Request from", the notification shows it only in its private
+  form (the lock screen keeps the generic text), and the history keeps it. For a conflict the
+  screen shows a warning and no text. A command shaped like the host tool's script run
+  (`sudo [-k] [--] .../sudostamp-run <sha256> <agent> -- <why>`) is shown as the agent, its
+  reason and the first 16 hex digits of the script's hash; any other command is shown as is.
+- **Advisory, always**: a program running as the user on that computer can send any description,
+  and the screen says so under it. Nothing about whether a request is refused, rate-limited or
+  approved depends on it: it is only handed on to the prompt, the notification and the history.
 
 ## Pairing, version 2
 
