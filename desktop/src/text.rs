@@ -20,6 +20,54 @@ pub fn clean(s: &str, max: usize) -> String {
         .collect()
 }
 
+/// An agent's run (`sudostamp ask`, docs/AGENTS-SUDO.md) is sudo's command line
+/// `sudo -k -- /usr/local/sbin/sudostamp-run <sha256> <agent> -- <why>`: shown as
+/// `<agent>: <why> (script <first 12 of the hash>)`, what a person can check against the agent's
+/// own words. Anything else, unchanged.
+pub fn describe(command: &str) -> String {
+    describe_run(command).unwrap_or_else(|| command.to_string())
+}
+
+fn describe_run(command: &str) -> Option<String> {
+    let mut w = command.split(' ');
+    if w.next()?.rsplit('/').next()? != "sudo" {
+        return None;
+    }
+    let mut t = w.next()?;
+    if t == "-k" {
+        t = w.next()?;
+    }
+    if t == "--" {
+        t = w.next()?;
+    }
+    if t.rsplit('/').next()? != "sudostamp-run" {
+        return None;
+    }
+    let sha = w.next()?;
+    let agent = w.next()?;
+    let ok_sha = sha.len() == 64
+        && sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let ok_agent = !agent.is_empty()
+        && agent.len() <= 32
+        && agent
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && agent
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b));
+    if !ok_sha || !ok_agent || w.next()? != "--" {
+        return None;
+    }
+    let why = w.filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+    if why.is_empty() {
+        return None;
+    }
+    Some(format!("{agent}: {why} (script {})", &sha[..12]))
+}
+
 /// For notification bodies and tooltips, which accept a subset of HTML: the command is data.
 pub fn escape_markup(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -59,5 +107,37 @@ mod tests {
             escape_markup("<a href=\"x\">&'</a>"),
             "&lt;a href=&quot;x&quot;&gt;&amp;&#39;&lt;/a&gt;"
         );
+    }
+
+    #[test]
+    fn an_agents_run_reads_as_who_why_and_which_script() {
+        let sha = "a3f9".repeat(16);
+        let c = format!(
+            "sudo -k -- /usr/local/sbin/sudostamp-run {sha} hermes -- rebuild pam_rssh now"
+        );
+        assert_eq!(
+            describe(&c),
+            "hermes: rebuild pam_rssh now (script a3f9a3f9a3f9)"
+        );
+        let plain = format!("sudo /usr/local/sbin/sudostamp-run {sha} claude-code -- x");
+        assert_eq!(describe(&plain), "claude-code: x (script a3f9a3f9a3f9)");
+        for bad in [
+            format!(
+                "sudo -k -- /usr/local/sbin/sudostamp-run {} hermes -- x",
+                &sha[..63]
+            ),
+            format!(
+                "sudo -k -- /usr/local/sbin/sudostamp-run {} hermes -- x",
+                sha.to_uppercase()
+            ),
+            format!("sudo -k -- /usr/local/sbin/sudostamp-run {sha} Hermes -- x"),
+            format!("sudo -k -- /usr/local/sbin/sudostamp-run {sha} hermes x"),
+            format!("sudo -k -- /usr/local/sbin/sudostamp-run {sha} hermes --"),
+            format!("doas /usr/local/sbin/sudostamp-run {sha} hermes -- x"),
+            "sudo pacman -Syu".to_string(),
+            String::new(),
+        ] {
+            assert_eq!(describe(&bad), bad, "{bad}");
+        }
     }
 }

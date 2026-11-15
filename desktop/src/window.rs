@@ -127,6 +127,7 @@ fn check_title(c: &Check) -> String {
         "pam-rssh" => "pam_rssh module",
         "helper-probe" => "Phone check helper",
         "helper-is-local" => "Remote-session gate",
+        "helper-run" => "Agents' runner",
         "local-reader" => "Fingerprint reader",
         "pinned-key" => "Pinned key",
         "phone" => "Phone",

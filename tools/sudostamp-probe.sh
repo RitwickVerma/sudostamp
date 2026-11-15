@@ -162,15 +162,42 @@ emit() {
   as_user python3 -I -S -c "$EVENT_PY" "$EV_UID" "$PPID" "$1" "${2:-}" "$PHONE" "${PAM_TTY:-}"
 }
 
-# ----------------------------------------------------------- the phone check (as root)
+# ----------------------------------------------------------- the phone check
 # Exit 0: the phone offers a pinned key. 2: it answers but offers none (the caller turns that
 # into 1; it only picks the notification's reason). Anything else: 1.
+#
+# $1 = a pid whose command line describes this sudo, or empty. When the phone offers the key,
+# that description goes to the phone on the same connection (extension context-v1@sudostamp)
+# so its approval can say what it is for (docs/AGENTS-SUDO.md). It is a courtesy: whatever the
+# phone answers, or fails to, the exit status is the same, and it never adds to the 4 s.
 phone_check() {
-python3 -I - "$PHONE" "$KEYFILE" <<'PY'
+python3 -I - "$PHONE" "$KEYFILE" "${1:-}" <<'PY'
 import base64, socket, struct, sys, time
 
 BUDGET = 4.0                                     # seconds, all of it: connect and answer
 end = time.monotonic() + BUDGET
+
+
+def describe(s, rx, pid):
+    # sudo's command line, as the desktop event has it: NUL-separated argv joined by spaces,
+    # control characters shown as "?", 512 characters. The phone cleans it again (it is input
+    # there too); this only keeps the frame small and honest.
+    if not pid.isdigit():
+        return
+    with open("/proc/%s/cmdline" % pid, "rb") as f:
+        argv = f.read(65536)
+    text = argv.rstrip(b"\0").replace(b"\0", b" ").decode("utf-8", "replace")
+    text = "".join("?" if ord(c) < 32 or 0x7f <= ord(c) < 0xa0 else c for c in text)[:512]
+    if not text:
+        return
+    name, cmd = b"context-v1@sudostamp", text.encode("utf-8")
+    payload = bytes([27]) + struct.pack(">I", len(name)) + name + struct.pack(">I", len(cmd)) + cmd
+    global end
+    end = min(end, time.monotonic() + 0.5)       # the answer may take half a second, no more
+    s.sendall(struct.pack(">I", len(payload)) + payload)
+    rx(struct.unpack(">I", rx(4))[0])            # SUCCESS or FAILURE: either is fine
+
+
 try:
     pinned = set()
     with open(sys.argv[2]) as f:
@@ -206,6 +233,10 @@ try:
         for field in (0, 1):                     # key blob, then comment
             l = struct.unpack(">I", body[o:o + 4])[0]
             if field == 0 and body[o + 4:o + 4 + l] in pinned:
+                try:
+                    describe(s, rx, sys.argv[3])
+                except Exception:
+                    pass                         # old phone, slow phone, no /proc: no matter
                 sys.exit(0)
             o += 4 + l
     sys.exit(2)
@@ -232,7 +263,7 @@ if [ "$CAN_EMIT" = 1 ] && as_user sh -c "$PAUSE_SH" sh "$EV_UID"; then
   exit 1
 fi
 
-phone_check; rc=$?
+phone_check "$PPID"; rc=$?
 case "$rc" in
   0) emit asking ;;
   2) emit skipped wrong-key; rc=1 ;;

@@ -10,6 +10,8 @@ the phone exists to avoid, so this never belongs anywhere near a real host:
     never written anywhere but --pubkey-out;
   - it behaves according to a mode file, so a test can flip it mid-run:
         approve   sign every request for one of its keys
+        nocontext as approve, but refuse context-v1@sudostamp like a phone older than 1.6
+        slow      approve, but only after 8 s (an approval that lands late)
         deny      refuse to sign
         stall     accept connections and never answer (a device squatting on the address)
         signstall list the keys as usual, then never answer a SIGN_REQUEST (a peer that passes
@@ -154,6 +156,13 @@ def main():
 
     def ext(body, conn):
         name, o = P.take(body, 1)
+        if name in (b"context-v1@sudostamp", "context-v1@sudostamp"):
+            # What the probe says this sudo is for (docs/AGENTS-SUDO.md). Logged for the test.
+            if mode() == "nocontext":
+                return bytes([FAILURE])
+            text, _ = P.take(body, o)
+            print("context: %s" % text.decode("utf-8", "replace"), flush=True)
+            return bytes([SUCCESS])
         if name == P.EXT_COMMIT:
             if session:                                     # one exchange per arming
                 session["dead"] = True
@@ -223,7 +232,9 @@ def main():
                         time.sleep(600)
                         return
                     # Same policy as the app: one of our keys, a 32-byte challenge, and approval.
-                    if kb not in keys or len(data) != 32 or m != "approve":
+                    if m == "slow":
+                        time.sleep(8)
+                    if kb not in keys or len(data) != 32 or m not in ("approve", "nocontext", "slow"):
                         out = bytes([FAILURE])
                         print("sign: refused (mode=%s, %d bytes)" % (m, len(data)), flush=True)
                     else:
