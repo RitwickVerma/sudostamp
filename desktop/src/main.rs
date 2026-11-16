@@ -16,6 +16,24 @@ Per-user and unprivileged. It cannot approve anything: the phone is the only aut
 Repairs and pairing run the installer through pkexec, with polkit's own administrator prompt.
 ";
 
+/// The window is what the applications menu opens, and the tray otherwise starts only at login
+/// (autostart): installed mid-session, there was a window and no tray. Start it alongside; a
+/// second tray sees the first one's socket and exits at once ("already running").
+fn start_tray() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let spawned = std::process::Command::new(exe)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn();
+    if let Ok(mut child) = spawned {
+        // Reap it if it exits while the window is open (the already-running case): no zombie.
+        std::thread::spawn(move || child.wait());
+    }
+}
+
 fn main() -> ExitCode {
     let env = |k: &str| std::env::var(k).ok();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -26,7 +44,10 @@ fn main() -> ExitCode {
         .as_slice()
     {
         [] => daemon::run(&env),
-        ["window"] => window::run(&env),
+        ["window"] => {
+            start_tray();
+            window::run(&env)
+        }
         ["--version" | "-V"] => {
             println!("sudostamp-desktop {}", env!("CARGO_PKG_VERSION"));
             0
