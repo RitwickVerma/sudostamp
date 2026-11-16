@@ -28,6 +28,10 @@ SudoStamp on the desktop, and a safe way for agents to ask for root.
   side depends on the description.
 
 ### Desktop (new, Linux)
+- **Set up without a terminal.** Installed but not set up, the tray says "Not set up" and opens
+  the setup by itself the first time: get the phone app (a QR code or a Google Play button), pick the
+  phone (it is found by itself), type the 6-digit code, approve the change with your password in
+  the system's own window. Checks that need root are a button, not a command to type.
 - **`sudostamp-desktop`**, a tray app (AUR `sudostamp-desktop`). It runs as you, holds no key and
   is not part of how sudo authenticates: without it, sudo behaves exactly the same.
 - **A tray icon** that says Ready, Phone away, Paused or Needs attention, from the phone's live
@@ -37,7 +41,7 @@ SudoStamp on the desktop, and a safe way for agents to ask for root.
   cannot show this: pam_rssh sends it only a challenge.
 - **Pause on this computer** from the tray, until resumed or for an hour: sudo goes straight to the
   password and the phone hears nothing. It ends at logout or reboot.
-- **A window** with Health (doctor's checks, a Fix button for each, run through `pkexec` and the
+- **A window** with Status (doctor's checks, a Fix button for each, run through `pkexec` and the
   installer) and Pair a phone (discovery, the 6-digit code, the key's attestation), plus the last
   100 sudo requests on this computer. GNOME shows tray icons only with the AppIndicator extension.
 
