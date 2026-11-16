@@ -11,8 +11,17 @@ Design and interfaces: [docs/DESKTOP.md](../docs/DESKTOP.md).
   learns the command: pam_rssh sends it only a challenge.
 - **Pause** on this computer, until resumed or for an hour: sudo goes straight to the password and
   the phone is not contacted. It lives in `/run/user/<uid>`, so it ends at logout or reboot.
-- **A window** (`sudostamp-desktop window`): Health (doctor's checks, a Fix button for each, and the
+- **A window** (`sudostamp-desktop window`): Status (doctor's checks, a Fix button for each, and the
   last 100 sudo events) and Pair a phone (discovery, the 6-digit code, the key's attestation).
+
+## Getting started (no terminal)
+
+Install `sudostamp-desktop` with your package manager (on Arch from the AUR; it brings `sudostamp`
+along) and open **SudoStamp** from the applications menu, or log in again and it starts by itself.
+On a computer that is not set up yet it shows **Not set up** and walks through it: get the phone
+app (scan the QR code or open Google Play), open it and tap **Pair a computer**, pick the phone
+when it appears, type the 6-digit code it shows, and approve the change with your password in the
+system's own window. From then on the tray icon says **Ready** and each sudo asks the phone.
 
 ## What it is not
 

@@ -327,7 +327,7 @@ shows at the computer what the phone cannot.
 - **Pause** on this computer from the tray, until resumed or for an hour: sudo goes straight to
   the password and the phone hears nothing. It ends at logout or reboot. By hand: an empty
   `/run/user/$(id -u)/sudostamp/paused` pauses, a unix time in it pauses until then.
-- A **window** with Health (doctor's checks, each with a Fix button) and Pair a phone, plus the last
+- A **window** with Status (doctor's checks, each with a Fix button) and Pair a phone, plus the last
   100 sudo requests.
 
 It runs as you, holds no key and is not part of how sudo authenticates: without it, sudo behaves

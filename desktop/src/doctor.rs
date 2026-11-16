@@ -100,6 +100,9 @@ pub enum Fix {
     /// Pairing again is the repair: open the Pair tab (with the phone's address when the fix
     /// names one).
     Pair(Option<SocketAddr>),
+    /// `doctor` itself with root's rights (for checks that need root to read): read-only, run
+    /// through pkexec by a button instead of a command to type.
+    RootCheck,
     /// Anything else (`chown`, `sudoedit`, a package manager): shown to copy, never run.
     Show(String),
 }
@@ -126,6 +129,7 @@ pub fn plan_fix(fix: &str) -> Fix {
             Fix::Pair(addr.parse().ok().filter(|a: &SocketAddr| a.port() != 0))
         }
         [_, "setup", ..] => Fix::Pair(None),
+        [_, "doctor"] => Fix::RootCheck,
         [_, sub @ ("apply" | "stage")] => Fix::Installer(vec![(*sub).to_string()]),
         [_, sub @ ("apply" | "stage"), "--phone", addr] => match addr.parse::<SocketAddr>() {
             Ok(a) if a.port() != 0 => {
@@ -139,6 +143,23 @@ pub fn plan_fix(fix: &str) -> Fix {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_needs_root_note_becomes_a_root_check_button() {
+        assert_eq!(
+            super::plan_fix("sudo sudostamp doctor"),
+            super::Fix::RootCheck
+        );
+        assert_eq!(
+            super::plan_fix("sudo /w/tools/install.sh doctor"),
+            super::Fix::RootCheck
+        );
+        // With arguments it is not the plain read-only run: shown, never run.
+        assert!(matches!(
+            super::plan_fix("sudo sudostamp doctor --x"),
+            super::Fix::Show(_)
+        ));
+    }
+
     use super::*;
 
     const SAMPLE: &str = r#"{"v":1,"checks":[

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------- the phone app's palette (Ui.kt)
 const BG: Color32 = Color32::from_rgb(0x0B, 0x0D, 0x12);
@@ -79,6 +79,8 @@ struct App {
     tx: Sender<Done>,
     rx: Receiver<Done>,
     mark: TextureHandle,
+    /// The Google Play link as QR modules, computed once.
+    play_qr: Vec<Vec<bool>>,
 
     doctor: Option<Result<Report, String>>,
     doctor_busy: bool,
@@ -91,6 +93,7 @@ struct App {
     discovering: bool,
     discover_error: Option<String>,
     discovered_once: bool,
+    last_search: Option<Instant>,
     manual: String,
     code: String,
     run: Option<SetupProc>,
@@ -169,11 +172,25 @@ fn actionable(c: &Check) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Standing {
     Checking,
+    /// Nothing is set up on this computer yet (no SudoStamp block, or no key pinned for this user):
+    /// a first run, greeted as one, not a list of failures.
+    NotSetUp,
     Unavailable,
     Ready,
     PhoneAway,
     Update,
     Attention,
+}
+
+/// A computer where SudoStamp has not been set up: the PAM block or the pinned key is missing, and
+/// what doctor proposes for it is pairing (`setup`), not a repair.
+fn not_set_up(r: &Report) -> bool {
+    r.checks.iter().any(|c| {
+        c.level == Level::Fail
+            && (c.id == "pam-block" || c.id == "pinned-key")
+            && matches!(doctor::plan_fix(&c.fix), Fix::Pair(None))
+            && (c.text.contains("not applied") || c.text.contains("does not exist"))
+    })
 }
 
 fn standing(doctor: Option<&Result<Report, String>>) -> Standing {
@@ -188,7 +205,9 @@ fn standing(doctor: Option<&Result<Report, String>>) -> Standing {
             .iter()
             .any(|c| c.level == Level::Fail && (c.id == "phone") == phone)
     };
-    if fails(false) {
+    if not_set_up(r) {
+        Standing::NotSetUp
+    } else if fails(false) {
         Standing::Attention
     } else if fails(true) {
         Standing::PhoneAway
@@ -211,7 +230,7 @@ fn common_fix(r: &Report) -> Option<Vec<String>> {
                 Some(_) => return None,
             },
             // A failure the installer run does not cover: no single button.
-            Fix::Pair(_) | Fix::Show(_) => return None,
+            Fix::Pair(_) | Fix::Show(_) | Fix::RootCheck => return None,
         }
     }
     found
@@ -402,6 +421,73 @@ fn ghost(text: &str) -> egui::Button<'static> {
         .min_size(vec2(0.0, 30.0))
 }
 
+/// One short instruction, with a dot in the accent colour: steps read better as a list than as
+/// one sentence with three actions in it.
+fn bullet(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal_top(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(14.0, 18.0), Sense::hover());
+        ui.painter().circle_filled(r.center(), 3.0, ACCENT);
+        ui.add(egui::Label::new(RichText::new(text).color(SOFT)).wrap());
+    });
+}
+
+/// The phone app, for a computer whose person does not have it yet.
+const PLAY_URL: &str = "https://play.google.com/store/apps/details?id=com.ritwick.sudostamp";
+
+/// Open a web page in the person's browser (as them, never privileged); a missing xdg-open is
+/// not an error worth a dialog: the QR code next to the button does the same job.
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("/usr/bin/xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// A QR code's modules, drawn dark on a white tile with a quiet zone, as phone cameras expect.
+fn qr(ui: &mut egui::Ui, code: &[Vec<bool>], size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(4), Color32::WHITE);
+    // A quiet zone of four modules on every side, as the QR specification asks.
+    let n = code.len().max(1) as f32 + 8.0;
+    let module = size / n;
+    let quiet = 4.0 * module;
+    for (y, row) in code.iter().enumerate() {
+        for (x, &dark) in row.iter().enumerate() {
+            if dark {
+                let min = rect.min + vec2(quiet + x as f32 * module, quiet + y as f32 * module);
+                p.rect_filled(
+                    egui::Rect::from_min_size(min, Vec2::splat(module + 0.4)),
+                    0.0,
+                    Color32::from_rgb(0x0B, 0x0D, 0x12),
+                );
+            }
+        }
+    }
+}
+
+/// The modules of a QR code for `text` (empty if it cannot be encoded, which a URL this short can).
+fn qr_modules(text: &str) -> Vec<Vec<bool>> {
+    // The lowest error correction: a screen is not a scratched sticker, and fewer modules means
+    // bigger ones, which a phone camera reads from further away.
+    qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::L).map_or_else(
+        |_| Vec::new(),
+        |c| {
+            let w = c.width();
+            let colors = c.to_colors();
+            (0..w)
+                .map(|y| {
+                    (0..w)
+                        .map(|x| colors[y * w + x] == qrcode::Color::Dark)
+                        .collect()
+                })
+                .collect()
+        },
+    )
+}
+
 /// A command to copy: one line in mono on the ground colour, cut with "…" rather than wrapped
 /// (a path broken at its hyphen cannot be checked by eye); egui shows it whole on hover, Copy takes
 /// it whole.
@@ -527,6 +613,20 @@ impl App {
         self.spawn(move || Done::Doctor(exec::doctor(&installer)));
     }
 
+    /// doctor through pkexec: the checks that need root (the sudoers files) are made instead of
+    /// skipped. Read-only, like every doctor run.
+    fn refresh_doctor_as_root(&mut self) {
+        let Some(installer) = self.installer.clone() else {
+            return;
+        };
+        if self.doctor_busy {
+            return;
+        }
+        self.doctor_busy = true;
+        let env = self.env_for_exec();
+        self.spawn(move || Done::Doctor(exec::root_doctor(&installer, &env)));
+    }
+
     fn refresh_history(&mut self) {
         if let Some(p) = &self.history_path {
             self.history = history::read(p);
@@ -535,6 +635,7 @@ impl App {
     }
 
     fn find_phones(&mut self) {
+        self.last_search = Some(Instant::now());
         let Some(script) = self.pair_script.clone() else {
             self.discovered_once = true;
             self.discover_error =
@@ -656,7 +757,7 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             for (tab, name) in
-                                [(Tab::Health, "Health"), (Tab::Pair, "Pair a phone")]
+                                [(Tab::Health, "Status"), (Tab::Pair, "Pair a phone")]
                             {
                                 let on = self.tab == tab;
                                 let b = egui::Button::selectable(
@@ -711,6 +812,13 @@ impl App {
                     ),
                     _ => String::new(),
                 },
+            ),
+            Standing::NotSetUp => (
+                ACCENT,
+                "Not set up yet",
+                "Approve sudo on this computer with your phone's fingerprint, instead of typing \
+                 your password. Setting it up takes about a minute."
+                    .into(),
             ),
             Standing::Ready => (
                 ACCENT,
@@ -768,6 +876,9 @@ impl App {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                if st == Standing::NotSetUp && ui.add(primary("Pair a phone")).clicked() {
+                    self.tab = Tab::Pair;
+                }
                 if let Some(r) = report
                     && st == Standing::Update
                     && let Some(args) = common_fix(r)
@@ -779,9 +890,10 @@ impl App {
                         self.run_fix(args);
                     }
                 }
-                let again = ui
-                    .add_enabled(!self.doctor_busy, secondary("Check again"))
-                    .clicked();
+                let again = st != Standing::NotSetUp
+                    && ui
+                        .add_enabled(!self.doctor_busy, secondary("Check again"))
+                        .clicked();
                 if again {
                     self.refresh_doctor();
                     self.refresh_history();
@@ -840,6 +952,7 @@ impl App {
             .collect();
         let mut go_pair: Option<Option<std::net::SocketAddr>> = None;
         let mut fix: Option<Vec<String>> = None;
+        let mut root_check = false;
 
         if !problems.is_empty() {
             ui.add_space(12.0);
@@ -892,6 +1005,8 @@ impl App {
                                     }
                                 }
                                 Fix::Show(cmd) => command_block(ui, &cmd),
+                                // Only a warning carries it (see the notes below).
+                                Fix::RootCheck => {}
                             }
                         });
                     });
@@ -914,8 +1029,26 @@ impl App {
                         ui.vertical(|ui| {
                             ui.label(title(check_title(c), 14.5));
                             ui.add(egui::Label::new(muted(check_detail(c))).wrap());
-                            if let Fix::Show(cmd) = doctor::plan_fix(&c.fix) {
-                                command_block(ui, &cmd);
+                            match doctor::plan_fix(&c.fix) {
+                                // "Needs root to read": the same read-only check, run with the
+                                // administrator's rights through polkit, no terminal.
+                                Fix::RootCheck => {
+                                    ui.add_space(4.0);
+                                    if ui
+                                        .add_enabled(
+                                            !self.doctor_busy,
+                                            secondary("Check with administrator rights"),
+                                        )
+                                        .on_hover_text(
+                                            "Runs: pkexec sudostamp doctor --json (read-only)",
+                                        )
+                                        .clicked()
+                                    {
+                                        root_check = true;
+                                    }
+                                }
+                                Fix::Show(cmd) => command_block(ui, &cmd),
+                                _ => {}
                             }
                         });
                     });
@@ -961,6 +1094,9 @@ impl App {
         }
         if let Some(args) = fix {
             self.run_fix(args);
+        }
+        if root_check {
+            self.refresh_doctor_as_root();
         }
     }
 
@@ -1026,6 +1162,40 @@ impl App {
 
     fn health_ui(&mut self, ui: &mut egui::Ui) {
         self.hero(ui);
+        // A first run gets the welcome and nothing technical: the checks are all "not yet".
+        if standing(self.doctor.as_ref()) == Standing::NotSetUp {
+            ui.add_space(12.0);
+            card(ui, |ui| {
+                overline(ui, "How it works");
+                ui.add_space(6.0);
+                for (n, head, body) in [
+                    (
+                        "1",
+                        "Get the app",
+                        "SudoStamp for Android, from Google Play.",
+                    ),
+                    (
+                        "2",
+                        "Pair once",
+                        "The phone shows a 6-digit code; you type it on this computer.",
+                    ),
+                    (
+                        "3",
+                        "Approve with your finger",
+                        "Each sudo asks your phone. Your password still works if the phone is away.",
+                    ),
+                ] {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    Self::step_label(ui, n, head);
+                    ui.horizontal(|ui| {
+                        ui.add_space(32.0);
+                        ui.add(egui::Label::new(muted(body)).wrap());
+                    });
+                    ui.add_space(12.0);
+                }
+            });
+            return;
+        }
         self.checks(ui);
         self.activity(ui);
     }
@@ -1052,50 +1222,84 @@ impl App {
             self.progress_ui(ui);
             return;
         }
-        if !self.discovered_once {
+        // Look again every few seconds while no phone is listed: the person is busy with the
+        // phone, and a "Search again" button would be one more thing to find.
+        if !self.discovering
+            && self.phones.is_empty()
+            && self
+                .last_search
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(5))
+        {
             self.find_phones();
         }
         card(ui, |ui| {
-            Self::step_label(ui, "1", "On the phone");
-            ui.add(
-                egui::Label::new(muted(
-                    "Open SudoStamp and tap Pair a computer. Keep that screen open until this \
-                     computer says it is done.",
-                ))
-                .wrap(),
-            );
+            Self::step_label(ui, "1", "Get the app on your phone");
+            ui.add_space(4.0);
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_max_width((ui.available_width() - 216.0).max(180.0));
+                    bullet(
+                        ui,
+                        "Scan the code with your phone's camera to get SudoStamp from Google Play.",
+                    );
+                    bullet(ui, "Open the app and tap Pair a computer.");
+                    bullet(
+                        ui,
+                        "Keep the app's pairing screen open until this window says Paired.",
+                    );
+                    ui.add_space(4.0);
+                    if ui
+                        .add(secondary("Open Google Play here instead"))
+                        .on_hover_text(PLAY_URL)
+                        .clicked()
+                    {
+                        open_url(PLAY_URL);
+                    }
+                });
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    // The code and its caption as one column of the code's width, caption centred.
+                    ui.allocate_ui_with_layout(
+                        vec2(196.0, 230.0),
+                        Layout::top_down(Align::Center),
+                        |ui| {
+                            qr(ui, &self.play_qr, 196.0);
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("Scan to get the app").size(12.5).color(SOFT));
+                        },
+                    );
+                });
+            });
         });
         ui.add_space(10.0);
         let mut chosen = None;
         card(ui, |ui| {
             ui.horizontal(|ui| {
-                Self::step_label(ui, "2", "Pick the phone");
+                Self::step_label(ui, "2", "Choose your phone");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if self.discovering {
                         ui.spinner();
-                    } else if ui.add(ghost("Search again")).clicked() {
+                    } else if ui.add(secondary("Search again")).clicked() {
                         self.find_phones();
                     }
                 });
             });
             ui.add_space(4.0);
-            if self.discovering && self.phones.is_empty() {
-                ui.label(muted("Looking on your network…"));
-            }
+
             if let Some(e) = &self.discover_error {
                 ui.label(RichText::new(e).color(WARN));
             }
-            if !self.discovering
-                && self.discovered_once
-                && self.phones.is_empty()
-                && self.discover_error.is_none()
-            {
-                ui.add(
-                    egui::Label::new(muted(
-                        "No phone found. Is its Pair a computer screen open, on the same network?",
-                    ))
-                    .wrap(),
-                );
+            if self.phones.is_empty() && self.discover_error.is_none() {
+                ui.horizontal_top(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                    ui.put(rect, egui::Spinner::new().size(16.0).color(ACCENT));
+                    ui.add(
+                        egui::Label::new(muted(
+                            "Waiting for your phone. It appears here once its pairing screen is \
+                             open, on the same Wi-Fi as this computer.",
+                        ))
+                        .wrap(),
+                    );
+                });
             }
             for p in &self.phones {
                 // A phone: one row you can press, like a list item on the phone.
@@ -1149,33 +1353,40 @@ impl App {
                 ui.add_space(4.0);
             }
             hairline(ui);
-            let label = ui.label(muted(
-                "Not listed? Type the address its pairing screen shows:",
-            ));
-            ui.horizontal(|ui| {
-                // Named by its label, for screen readers (accesskit) and AT-SPI tools.
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.manual)
-                        .hint_text(RichText::new("e.g. 192.168.1.20:7777").color(FAINT))
-                        .font(TextStyle::Monospace)
-                        .margin(Margin::symmetric(10, 8)),
-                )
-                .labelled_by(label.id);
-                let addr = setup::manual_address(&self.manual);
-                if ui.add_enabled(addr.is_some(), secondary("Pair")).clicked() {
-                    chosen = addr.map(|addr| Phone {
-                        addr,
-                        name: "the phone".into(),
-                    });
-                }
+            egui::CollapsingHeader::new(
+                RichText::new("Enter the phone's address by hand")
+                    .font(medium(13.5))
+                    .color(MUTED),
+            )
+            .id_salt("manual-address")
+            .default_open(!self.manual.is_empty())
+            .show(ui, |ui| {
+                let label = ui.label(muted("The address the phone's pairing screen shows:"));
+                ui.horizontal(|ui| {
+                    // Named by its label, for screen readers (accesskit) and AT-SPI tools.
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.manual)
+                            .hint_text(RichText::new("e.g. 192.168.1.20:7777").color(FAINT))
+                            .font(TextStyle::Monospace)
+                            .margin(Margin::symmetric(10, 8)),
+                    )
+                    .labelled_by(label.id);
+                    let addr = setup::manual_address(&self.manual);
+                    if ui.add_enabled(addr.is_some(), secondary("Pair")).clicked() {
+                        chosen = addr.map(|addr| Phone {
+                            addr,
+                            name: "the phone".into(),
+                        });
+                    }
+                });
             });
             ui.add_space(10.0);
             ui.horizontal_top(|ui| {
                 disc(ui, Glyph::Info, MUTED, 20.0);
                 ui.add(
                     egui::Label::new(muted(
-                        "Your administrator password comes next: pairing changes how sudo signs \
-                         you in, so the installer asks through polkit, never through this window.",
+                        "Next, your computer asks for your password in its own secure window, \
+                         never in this one: pairing changes how sudo signs you in.",
                     ))
                     .wrap(),
                 );
@@ -1505,6 +1716,7 @@ pub fn run(env: Env) -> i32 {
                 tx,
                 rx,
                 mark,
+                play_qr: qr_modules(PLAY_URL),
                 doctor: None,
                 doctor_busy: false,
                 repair_busy: false,
@@ -1515,6 +1727,7 @@ pub fn run(env: Env) -> i32 {
                 discovering: false,
                 discover_error: None,
                 discovered_once: false,
+                last_search: None,
                 manual: String::new(),
                 code: String::new(),
                 run: None,
@@ -1565,6 +1778,42 @@ mod tests {
     }
 
     const APPLY: &str = "sudo sudostamp apply --phone 192.168.1.5:7777";
+
+    #[test]
+    fn a_fresh_install_is_not_set_up_not_a_failure() {
+        let ok = check("platform", Level::Ok, "platform: arch", "");
+        let no_block = check(
+            "pam-block",
+            Level::Fail,
+            "PAM block: not applied: sudo does not ask the phone (/etc/pam.d/sudo)",
+            "sudo sudostamp setup   (or, if paired already: sudo sudostamp apply --phone <phone-ip>:7777)",
+        );
+        let no_key = check(
+            "pinned-key",
+            Level::Fail,
+            "pinned key: /etc/authorized_keys/u.keys does not exist: pam_rssh has nothing to check the phone against",
+            "sudo sudostamp setup",
+        );
+        assert_eq!(
+            standing(Some(&report(vec![ok.clone(), no_block.clone()]))),
+            Standing::NotSetUp
+        );
+        assert_eq!(
+            standing(Some(&report(vec![ok.clone(), no_key]))),
+            Standing::NotSetUp
+        );
+        // A damaged block is a repair, not a first run.
+        let damaged = check(
+            "pam-block",
+            Level::Fail,
+            "PAM block: damaged markers in x",
+            "edit x by hand",
+        );
+        assert_eq!(
+            standing(Some(&report(vec![ok, damaged]))),
+            Standing::Attention
+        );
+    }
 
     #[test]
     fn standing_puts_real_failures_first_and_a_missing_phone_after() {
