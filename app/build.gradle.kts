@@ -15,8 +15,8 @@ android {
         // would be a lie -- and the unguarded call would crash at key-creation time.
         minSdk = 30
         targetSdk = 36
-        versionCode = 11
-        versionName = "1.5.0"
+        versionCode = 12
+        versionName = "1.6.0"
     }
 
     // Release signing comes from the environment, never from the repo: scripts/release.sh, on the
