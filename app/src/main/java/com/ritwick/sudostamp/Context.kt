@@ -110,8 +110,20 @@ fun parseRun(command: String): Run? {
 }
 
 /** One line for a notification or the history: "agent: why" for a script run, else the command. */
-fun describeContext(command: String): String =
-    parseRun(command)?.let { "${it.agent}: ${it.why} (SHA-256 ${it.sha.take(16)}…)" } ?: command
+fun describeContext(command: String): String {
+    val run = parseRun(command) ?: return command
+    // The history keeps HISTORY_TEXT code points and cuts the tail: the hash, the one value a
+    // person can check against the agent, goes at the end, so it is the reason that gets cut.
+    val tail = " (SHA-256 ${run.sha.take(16)}…)"
+    val head = "${run.agent}: "
+    val room = HISTORY_TEXT - head.length - tail.length
+    val why = if (run.why.codePointCount(0, run.why.length) <= room) run.why
+        else run.why.substring(0, run.why.offsetByCodePoints(0, room - 1)) + "…"
+    return head + why + tail
+}
+
+/** How much of a description the history keeps (History.kt cuts what it stores to this). */
+const val HISTORY_TEXT = 200
 
 /** Where the installer puts the agents' runner (tools/install.sh RUNNER). */
 const val RUNNER = "/usr/local/sbin/sudostamp-run"

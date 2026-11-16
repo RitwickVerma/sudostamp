@@ -8,7 +8,7 @@ use crate::text::clean;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, OpenOptionsExt};
 use std::path::Path;
 
 pub const KEEP: usize = 100;
@@ -100,8 +100,10 @@ pub fn append(path: &Path, e: &Entry) -> io::Result<()> {
             .mode(0o700)
             .create(dir)?;
     }
-    if fs::symlink_metadata(path).is_ok_and(|m| !m.is_file()) {
-        return Err(io::Error::other("the history path is not a regular file"));
+    // A FIFO would block the append (and the tray with it); anything else, a symlink to /dev/null
+    // included (a way to switch history off), is what the user chose.
+    if fs::metadata(path).is_ok_and(|m| m.file_type().is_fifo()) {
+        return Err(io::Error::other("the history path is a FIFO"));
     }
     let mut f = fs::OpenOptions::new()
         .append(true)

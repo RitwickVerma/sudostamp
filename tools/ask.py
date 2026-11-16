@@ -110,29 +110,52 @@ def printable(s):
         s.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return all(unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn") for c in s)
+    # Not "Cn" (unassigned): which code points are assigned depends on the Unicode version of each
+    # python, and the user's and the runner's may differ: a reason this side accepts must never be
+    # refused by the runner after the phone approved it.
+    return all(unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co") for c in s)
+
+
+def sudo_rs():
+    """sudo-rs (Ubuntu's sudo from 25.10) runs PAM even for `sudo -n`: the check below would ask
+    the phone. Not supported until it is tested."""
+    try:
+        v = subprocess.run(["sudo", "--version"], stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=10).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "sudo-rs" in v
 
 
 def asks_for_approval():
     """True when sudo would authenticate before running the runner. A NOPASSWD rule (or
     `!authenticate`) makes sudo skip PAM, and so the phone: then an `ask` must not run, because it
-    would run as root with nobody asked. `sudo -n -l <cmd>` succeeds exactly when no
-    authentication is needed for it; -k so a cached credential does not count."""
-    r = subprocess.run(["sudo", "-k", "-n", "-l", "--", RUNNER], stdin=subprocess.DEVNULL,
+    would run as root with nobody asked. Measured by running the runner itself, with no arguments,
+    non-interactively (-k: a cached credential does not count; -n: never prompt). If sudo would
+    authenticate it refuses at once (status 1) without calling PAM; if it would not, the runner
+    starts and stops at its usage check (64) before reading anything. `sudo -l` cannot answer
+    this: its result depends on listpw and on every other rule the user has."""
+    r = subprocess.run(["sudo", "-k", "-n", "--", RUNNER], stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
                        start_new_session=True)
-    return r.returncode != 0
+    return r.returncode != 64
 
 
 def ready(user, uid):
     """Raise Stop unless asking the phone now can be answered. Nothing here asks anything."""
+    if not sys.platform.startswith("linux"):
+        raise Stop(NOT_READY, "ready", "sudostamp ask is Linux only: the runner is not installed "
+                   "on %s" % sys.platform)
     if not root_safe(RUNNER):
         raise Stop(NOT_READY, "ready", "%s is missing or not root-owned: run 'sudo sudostamp apply' "
                    "once to install it" % RUNNER)
+    if sudo_rs():
+        raise Stop(NOT_READY, "ready", "this sudo is sudo-rs, which sudostamp ask does not support yet "
+                   "(it cannot be checked without asking the phone). Nothing was asked.")
     if not asks_for_approval():
-        raise Stop(NOT_READY, "ready", "sudo here runs %s without asking anyone (a NOPASSWD rule or "
-                   "!authenticate in sudoers): the phone would never be asked, so this does not run. "
-                   "Remove that rule for this user to use sudostamp ask." % RUNNER)
+        raise Stop(NOT_READY, "ready", "sudo here runs %s without asking anyone (a NOPASSWD or "
+                   "!authenticate rule in sudoers matches it): the phone would never be asked, so "
+                   "this does not run. Remove that rule for this user to use sudostamp ask." % RUNNER)
     try:
         with open(PAM) as f:
             settings = block_settings(f.read())

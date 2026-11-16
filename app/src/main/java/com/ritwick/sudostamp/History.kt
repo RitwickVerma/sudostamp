@@ -101,7 +101,7 @@ class History(private val file: File? = null, private val max: Int = MAX) {
         private const val MAX_LABEL = 80
         private const val MAX_PEER = 64
         /** Code points of a description kept: 100 entries of at most this stay far under [MAX_FILE_BYTES]. */
-        private const val MAX_COMMAND = 200
+        private const val MAX_COMMAND = HISTORY_TEXT
 
         /** Identical refusals this close together become one entry with a count, so a client
          *  hammering the port cannot push everything real out of the last 100. */

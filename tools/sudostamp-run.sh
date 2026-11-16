@@ -44,7 +44,7 @@ def printable(s):
         s.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return all(unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn") for c in s)
+    return all(unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co") for c in s)
 
 if not re.fullmatch(r"[0-9a-f]{64}", sha):
     die(64, "the hash must be 64 lowercase hex digits")

@@ -82,14 +82,22 @@ What it does guarantee:
 - **The description cannot make anything easier to approve.** Approval still needs a fresh finger
   on the phone, and nothing in SudoStamp reads the description to decide anything.
 
+Where it works: Linux, with sudo 1.9 (every distribution the installer supports). Not on macOS or
+FreeBSD (the runner is not installed there), and not yet with sudo-rs (Ubuntu's sudo from 25.10),
+which runs PAM even for `sudo -n`, so `ask` cannot check sudo without asking the phone: it says so
+and exits 75. Reasons are one line of plain text; emoji built with joiners or variation selectors
+are refused or shown with `?` where those characters were (they are the ones that hide text).
+
 What else approves, or counts:
 
 - **A fingerprint reader on the computer.** Where the installer found one, sudo at the desk tries
   it first (15 s) and over SSH never: an `ask` started from a local session can be approved by a
   finger on that reader, which shows no description. Approve agents from the phone; ignore the
   reader unless you started the request yourself.
-- **A NOPASSWD rule** would make sudo skip PAM, the phone included: `ask` checks (`sudo -n -l`) and
-  refuses with 75 rather than run anything nobody approved.
+- **A NOPASSWD rule** would make sudo skip PAM, the phone included: `ask` checks by running the
+  runner with no arguments non-interactively (it stops at its usage check, so nothing runs) and
+  refuses with 75 when sudo would not have asked. A NOPASSWD rule for other commands is not the
+  runner's and changes nothing.
 - **pam_faillock** (Fedora, RHEL): a denied or timed-out `ask` falls through to the password, finds no
   terminal and fails, which faillock counts as a failed attempt. Denying an agent several times in a
   row can lock the account's password for the faillock interval.
