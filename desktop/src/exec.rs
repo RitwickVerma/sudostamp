@@ -37,15 +37,21 @@ fn spawn(cmd: &mut Command) -> io::Result<Child> {
     cmd.spawn()
 }
 
-/// Run to completion (or kill at the timeout), collecting stdout and stderr up to `max` bytes.
-/// Returns the exit status (`None` = killed or signalled) and the output.
-fn capture(mut cmd: Command, timeout: Duration, max: usize) -> io::Result<(Option<i32>, Vec<u8>)> {
+/// Run to completion (or stop at the timeout), collecting stdout and stderr apart, each up to
+/// `max` bytes: a parser reads stdout alone (a locale warning on stderr must not spoil the JSON).
+/// Returns the exit status (`None` = timed out, killed or signalled), stdout and stderr.
+type Captured = (Option<i32>, Vec<u8>, Vec<u8>);
+
+fn capture(mut cmd: Command, timeout: Duration, max: usize) -> io::Result<Captured> {
     let mut child = spawn(
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),
     )?;
-    let out = Arc::new(Mutex::new(Vec::new()));
+    let bufs = [
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+    ];
     let (done_tx, done_rx) = mpsc::channel();
     let streams: [Option<Box<dyn Read + Send>>; 2] = [
         child
@@ -57,17 +63,18 @@ fn capture(mut cmd: Command, timeout: Duration, max: usize) -> io::Result<(Optio
             .take()
             .map(|s| Box::new(s) as Box<dyn Read + Send>),
     ];
-    for mut stream in streams.into_iter().flatten() {
-        let (out, done_tx) = (Arc::clone(&out), done_tx.clone());
+    for (stream, buf) in streams.into_iter().zip(bufs.iter()) {
+        let Some(mut stream) = stream else { continue };
+        let (out, done_tx) = (Arc::clone(buf), done_tx.clone());
         thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            while let Ok(n) = stream.read(&mut buf) {
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = stream.read(&mut chunk) {
                 if n == 0 {
                     break;
                 }
                 if let Ok(mut o) = out.lock() {
                     let room = max.saturating_sub(o.len());
-                    o.extend_from_slice(&buf[..n.min(room)]);
+                    o.extend_from_slice(&chunk[..n.min(room)]);
                 }
             }
             let _ = done_tx.send(());
@@ -80,8 +87,11 @@ fn capture(mut cmd: Command, timeout: Duration, max: usize) -> io::Result<(Optio
             break s.code();
         }
         if start.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
+            // A pkexec'd program runs as root: we may not be allowed to kill it, and then waiting
+            // would hang this thread for as long as it runs. Give up on it instead.
+            if child.kill().is_ok() {
+                let _ = child.wait();
+            }
             break None;
         }
         thread::sleep(Duration::from_millis(20));
@@ -93,15 +103,15 @@ fn capture(mut cmd: Command, timeout: Duration, max: usize) -> io::Result<(Optio
         .recv_timeout(until.saturating_duration_since(Instant::now()))
         .is_ok()
     {}
-    let bytes = out.lock().map(|o| o.clone()).unwrap_or_default();
-    Ok((status, bytes))
+    let take = |b: &Arc<Mutex<Vec<u8>>>| b.lock().map(|o| o.clone()).unwrap_or_default();
+    Ok((status, take(&bufs[0]), take(&bufs[1])))
 }
 
 /// `doctor --json`, unprivileged. Its exit code (0/1/2) is the report's business, not ours.
 pub fn doctor(installer: &Path) -> Result<Report, String> {
     let mut cmd = Command::new(installer);
     cmd.args(["doctor", "--json"]);
-    let (status, out) = capture(cmd, DOCTOR_TIMEOUT, MAX_OUTPUT)
+    let (status, out, _) = capture(cmd, DOCTOR_TIMEOUT, MAX_OUTPUT)
         .map_err(|e| format!("cannot run {}: {e}", installer.display()))?;
     if status.is_none() {
         return Err("doctor did not finish in time".into());
@@ -116,7 +126,7 @@ pub fn discover(pair_py: &Path) -> Result<Vec<Phone>, String> {
     cmd.arg("-I")
         .arg(pair_py)
         .args(["discover", "--timeout", "3"]);
-    let (status, out) = capture(cmd, DISCOVER_TIMEOUT, MAX_OUTPUT)
+    let (status, out, _) = capture(cmd, DISCOVER_TIMEOUT, MAX_OUTPUT)
         .map_err(|e| format!("cannot run python3: {e}"))?;
     match status {
         Some(0 | 1) => Ok(setup::parse_discover(&String::from_utf8_lossy(&out))),
@@ -125,27 +135,49 @@ pub fn discover(pair_py: &Path) -> Result<Vec<Phone>, String> {
     }
 }
 
-/// Root-owned and not writable by anyone else, itself and its directory: what is safe to hand to
-/// pkexec. A path the user (or anything running as the user) can rewrite between the polkit prompt
-/// and the exec would turn one administrator approval into a root shell.
+/// Root-owned and not writable by anyone else: the file and EVERY directory above it (a
+/// root-owned directory inside a user-writable one can be renamed away). What is safe to hand to
+/// pkexec: a path the user (or anything running as the user) can change between the polkit prompt
+/// and the exec would turn one administrator approval into a root shell. `p` is canonical.
 fn root_owned(p: &Path) -> bool {
     let ok = |p: &Path| fs::metadata(p).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0);
-    ok(p) && p.parent().is_some_and(ok)
+    p.ancestors().all(|a| a.as_os_str().is_empty() || ok(a))
 }
 
-/// The command line for a privileged installer run: `pkexec <resolved installer> <args>`.
-/// `SUDOSTAMP_PKEXEC` replaces pkexec for tests (a stub that runs the installer unprivileged);
-/// without it the installer must be root-owned.
+/// pkexec by absolute path, never from PATH: a `pkexec` earlier in the user's PATH would show its
+/// own "administrator password" prompt. It must be root's and setuid.
+const PKEXEC: &str = "/usr/bin/pkexec";
+
+/// The pkexec stand-in for tests (a stub that runs the installer unprivileged). Compiled out of a
+/// release build: an environment variable must never be able to switch off the root-owned check.
+fn pkexec_stub(env: Env) -> Option<String> {
+    if cfg!(any(test, feature = "test-hooks")) {
+        env("SUDOSTAMP_PKEXEC")
+    } else {
+        None
+    }
+}
+
+/// The command line for a privileged installer run: `/usr/bin/pkexec <resolved installer> <args>`.
+/// The installer must be root-owned all the way up (only the test stub skips that).
 pub fn privileged(installer: &Path, args: &[String], env: Env) -> Result<Command, String> {
-    let stub = env("SUDOSTAMP_PKEXEC");
+    let stub = pkexec_stub(env);
     let real = fs::canonicalize(installer).map_err(|e| format!("{}: {e}", installer.display()))?;
     if stub.is_none() && !root_owned(&real) {
         return Err(format!(
-            "{} is not owned by root (or others can write it): refusing to run it with administrator rights",
+            "{} is not owned by root (or it or a directory above it can be written by others): refusing to run it with administrator rights",
             real.display()
         ));
     }
-    let mut cmd = Command::new(stub.unwrap_or_else(|| "pkexec".into()));
+    if stub.is_none()
+        && !fs::metadata(PKEXEC)
+            .is_ok_and(|m| m.uid() == 0 && m.mode() & 0o4000 != 0 && m.mode() & 0o022 == 0)
+    {
+        return Err(format!(
+            "{PKEXEC} is missing or not root's setuid program: install polkit"
+        ));
+    }
+    let mut cmd = Command::new(stub.unwrap_or_else(|| PKEXEC.into()));
     cmd.arg(real).args(args);
     Ok(cmd)
 }
@@ -153,8 +185,9 @@ pub fn privileged(installer: &Path, args: &[String], env: Env) -> Result<Command
 /// A repair (`apply`/`stage`) through pkexec. Blocking: call from a thread.
 pub fn repair(installer: &Path, args: &[String], env: Env) -> Result<String, String> {
     let cmd = privileged(installer, args, env)?;
-    let (status, out) =
+    let (status, mut out, err) =
         capture(cmd, REPAIR_TIMEOUT, MAX_OUTPUT).map_err(|e| format!("cannot run pkexec: {e}"))?;
+    out.extend_from_slice(&err);
     let all = String::from_utf8_lossy(&out);
     let mut tail: Vec<&str> = all.lines().rev().take(6).collect();
     tail.reverse();
@@ -174,7 +207,8 @@ pub enum SetupMsg {
 
 /// A running `pkexec <installer> setup --phone <addr> --json`.
 pub struct SetupProc {
-    child: Child,
+    /// `None` once stopped: the reaping happens on a thread of its own.
+    child: Option<Child>,
     stdin: Option<ChildStdin>,
     pub rx: Receiver<SetupMsg>,
 }
@@ -234,7 +268,11 @@ impl SetupProc {
             }
             let _ = tx.send(SetupMsg::Exit(None));
         });
-        Ok(SetupProc { child, stdin, rx })
+        Ok(SetupProc {
+            child: Some(child),
+            stdin,
+            rx,
+        })
     }
 
     pub fn send(&mut self, text: &str) -> io::Result<()> {
@@ -248,12 +286,23 @@ impl SetupProc {
 
     /// The exit status once the process is over (this reaps it): `Some(None)` = killed by a signal.
     pub fn exit_code(&mut self) -> Option<Option<i32>> {
-        self.child.try_wait().ok().flatten().map(|s| s.code())
+        self.child
+            .as_mut()
+            .and_then(|c| c.try_wait().ok().flatten())
+            .map(|s| s.code())
     }
 
+    /// Never blocks the caller (the window's UI thread). Closing stdin first is what ends a setup
+    /// waiting for the code or a yes/no (it reads EOF and stops); the kill may be refused, the
+    /// installer running as root through pkexec, so the wait happens on a thread of its own.
     pub fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.stdin = None;
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            thread::spawn(move || {
+                let _ = c.wait();
+            });
+        }
     }
 }
 
@@ -300,7 +349,7 @@ mod tests {
     fn a_hung_program_is_killed() {
         let p = script("hang", "sleep 60");
         let t = Instant::now();
-        let (status, _) = capture(Command::new(&p), Duration::from_millis(300), 1024).unwrap();
+        let (status, _, _) = capture(Command::new(&p), Duration::from_millis(300), 1024).unwrap();
         assert_eq!(status, None);
         assert!(t.elapsed() < Duration::from_secs(5));
     }
@@ -308,7 +357,7 @@ mod tests {
     #[test]
     fn output_is_bounded() {
         let p = script("flood", "yes | head -c 5000000");
-        let (status, out) = capture(Command::new(&p), Duration::from_secs(20), 1000).unwrap();
+        let (status, out, _) = capture(Command::new(&p), Duration::from_secs(20), 1000).unwrap();
         assert_eq!(status, Some(0));
         assert_eq!(out.len(), 1000);
     }
@@ -333,9 +382,39 @@ mod tests {
 
     #[test]
     fn a_root_owned_system_binary_is_accepted() {
-        let cmd = privileged(Path::new("/usr/bin/env"), &[], &no_env).unwrap();
-        assert_eq!(cmd.get_program(), "pkexec");
+        // pkexec by its absolute path, never from PATH; where polkit is not installed (a CI
+        // image), the refusal names it instead.
+        match privileged(Path::new("/usr/bin/env"), &[], &no_env) {
+            Ok(cmd) => assert_eq!(cmd.get_program(), PKEXEC),
+            Err(e) => assert!(
+                e.contains(PKEXEC) && !Path::new(PKEXEC).exists() || e.contains("setuid"),
+                "{e}"
+            ),
+        }
         assert!(privileged(Path::new("/nonexistent"), &[], &no_env).is_err());
+    }
+
+    #[test]
+    fn a_root_owned_file_in_a_writable_directory_is_refused() {
+        // /tmp is root's but world-writable (sticky): a file under it could be swapped by renaming
+        // what is above it, whoever owns the file.
+        let d = std::env::temp_dir().join(format!("sudostamp-anc-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let e = privileged(&d, &[], &no_env).unwrap_err();
+        assert!(e.contains("not owned by root"), "{e}");
+        assert!(!root_owned(&fs::canonicalize(&d).unwrap()));
+        assert!(root_owned(Path::new("/usr/bin")));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn doctor_reads_stdout_only() {
+        let p = script(
+            "docnoise",
+            r#"echo 'bash: warning: setlocale: LC_ALL: cannot change locale' >&2
+echo '{"v":1,"checks":[{"id":"phone","status":"ok","text":"x","fix":""}],"exit":0}'"#,
+        );
+        assert_eq!(doctor(&p).unwrap().checks.len(), 1);
     }
 
     #[test]

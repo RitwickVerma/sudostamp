@@ -25,6 +25,11 @@ eframe = { version = "0.37", default-features = false, features = ["accesskit", 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+[features]
+# SUDOSTAMP_PKEXEC (a pkexec stand-in for trying the window without root). Never in a package:
+# with it an environment variable could switch off the root-owned check on the installer.
+test-hooks = []
+
 [lib]
 name = "sudostamp_desktop"
 

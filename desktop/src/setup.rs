@@ -134,7 +134,11 @@ impl Setup {
             Some(126) => "The administrator prompt was dismissed or refused.".to_string(),
             Some(127) => "polkit could not authenticate (is a polkit agent running?).".to_string(),
             Some(c) => format!("The installer stopped (exit {c}) before it finished."),
-            None => "The installer was stopped before it finished.".to_string(),
+            // A cancel closes the installer's input: it stops at the next question. Past the last
+            // one it may still finish (it runs as root, beyond our reach): Health shows the truth.
+            None => "Cancelled. If the installer was already past the last question it may still \
+                     finish: Health shows where things stand."
+                .to_string(),
         };
         self.done = Some(Done {
             ok: false,
@@ -320,7 +324,7 @@ mod tests {
             (Some(126), "dismissed"),
             (Some(127), "polkit"),
             (Some(1), "exit 1"),
-            (None, "stopped"),
+            (None, "Cancelled"),
         ] {
             let mut s = run(&[r#"{"v":1,"ask":"code","text":"c"}"#]);
             s.finished(exit);

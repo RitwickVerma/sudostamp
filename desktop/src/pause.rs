@@ -42,6 +42,11 @@ pub fn content(secs: Option<u64>, now: u64) -> String {
 
 /// A few bytes at most: the flag is tiny and a hostile huge file must not be slurped.
 pub fn read(path: &Path, now: u64) -> Pause {
+    // A regular file or nothing: opening a FIFO someone planted would block the tray for good
+    // (the probe refuses one for the same reason).
+    if !fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return Pause::Off;
+    }
     let Ok(f) = fs::File::open(path) else {
         return Pause::Off;
     };
@@ -62,10 +67,11 @@ pub fn write(path: &Path, secs: Option<u64>, now: u64) -> io::Result<()> {
         .mode(0o700)
         .create(dir)?;
     let tmp = path.with_extension("tmp");
+    // Made fresh: whatever sat at the name (a FIFO would block the open) is removed first.
+    let _ = fs::remove_file(&tmp);
     let mut f = fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&tmp)?;
     f.write_all(content(secs, now).as_bytes())?;

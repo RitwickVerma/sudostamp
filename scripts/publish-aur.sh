@@ -26,28 +26,49 @@ command -v makepkg >/dev/null || die "makepkg not found: run this on Arch"
 command -v cargo >/dev/null || die "cargo not found: the desktop package builds with it (pacman -S rust, or rustup)"
 url="https://gitlab.com/ritwick7/sudostamp/-/archive/v$VERSION/sudostamp-v$VERSION.tar.gz"
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
-sum="$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)" || die "cannot download $url (is v$VERSION tagged?)"
+curl -fsSL "$url" -o "$W/src.tar.gz" || die "cannot download $url (is v$VERSION tagged?)"
+sum="$(sha256sum < "$W/src.tar.gz" | cut -d' ' -f1)"
+# The archive the AUR will build is GitLab's, not ours: it must hold exactly the tagged tree
+# (same files, same bytes) before its checksum is pinned for every user.
+git fetch -q origin "refs/tags/v$VERSION:refs/tags/v$VERSION" 2>/dev/null || true
+git rev-parse -q --verify "v$VERSION^{commit}" >/dev/null || die "no tag v$VERSION here"
+mkdir "$W/gitlab" "$W/tag"
+tar -xzf "$W/src.tar.gz" -C "$W/gitlab" && git archive "v$VERSION" | tar -x -C "$W/tag" || die "cannot unpack the sources"
+diff -rq "$W/gitlab"/*/ "$W/tag/" >/dev/null || die "GitLab's archive of v$VERSION differs from the tag: not publishing it"
 
 # served PKG: the version the AUR's own copy of PKG's PKGBUILD names.
 served() { curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$1" 2>/dev/null | sed -n 's/^pkgver=//p'; }
 
-# publish PKG DIR CHECK: DIR's PKGBUILD for this tag, test-built (a package that does not build must
-# never reach the AUR), CHECK = a file the package must contain, then pushed and read back.
-publish() {
+# build PKG DIR CHECK: DIR's PKGBUILD for this tag, test-built (a package that does not build must
+# never reach the AUR), CHECK = a file the package must contain. Without the SSH agent: makepkg runs
+# cargo, so the build scripts of hundreds of crates, and none of them gets the AUR key.
+build() {
   local pkg="$1" dir="$2" check="$3" w="$W/$1"
   if [ "$(served "$pkg")" = "$VERSION" ]; then echo "AUR already serves $pkg $VERSION"; return 0; fi
   mkdir -p "$w/build"
   cp "$dir/PKGBUILD" "$w/PKGBUILD"
   sed -i "s/^pkgver=.*/pkgver=$VERSION/; s/^pkgrel=.*/pkgrel=1/; s/^sha256sums=.*/sha256sums=('$sum')/" "$w/PKGBUILD"
   cp "$w/PKGBUILD" "$w/build/"
-  (cd "$w/build" && makepkg -f --nodeps --noconfirm >"$w/makepkg.log" 2>&1) || {
-    tail -20 "$w/makepkg.log" >&2; die "makepkg failed for $pkg $VERSION"; }
+  (cd "$w/build" && env -u SSH_AUTH_SOCK -u SSH_AGENT_PID makepkg -f --nodeps --noconfirm >"$w/makepkg.log" 2>&1) || {
+    tail -20 "$w/makepkg.log" >&2; die "makepkg failed for $pkg $VERSION: nothing was pushed"; }
   local p; p=$(ls "$w"/build/"$pkg"-"$VERSION"-1-*.pkg.tar.zst)
-  bsdtar -xOf "$p" "$check" >/dev/null || die "$pkg has no $check"
+  bsdtar -xOf "$p" "$check" >/dev/null || die "$pkg has no $check: nothing was pushed"
   echo "built and checked: $(basename "$p") (source $sum)"
+  touch "$w/ready"
+}
 
-  # A package's first push creates it on the AUR: an empty clone is expected then.
-  git clone -q "https://aur.archlinux.org/$pkg.git" "$w/aur" 2>/dev/null || git init -q "$w/aur"
+# push PKG: the built PKGBUILD to the AUR, then read it back.
+push() {
+  local pkg="$1" w="$W/$1"
+  [ -f "$w/ready" ] || return 0
+  # A package's first push creates it on the AUR: an empty repository is expected then, and only
+  # then. A clone that fails for any other reason must not turn into a fresh history.
+  if git ls-remote -q "https://aur.archlinux.org/$pkg.git" >"$w/refs" 2>"$w/ls.err"; then
+    if [ -s "$w/refs" ]; then git clone -q "https://aur.archlinux.org/$pkg.git" "$w/aur" || die "cannot clone $pkg"
+    else git init -q "$w/aur"; fi
+  else
+    cat "$w/ls.err" >&2; die "cannot reach the AUR repository of $pkg"
+  fi
   cp "$w/PKGBUILD" "$w/aur/PKGBUILD"
   (cd "$w/aur" && makepkg --printsrcinfo > .SRCINFO && git add PKGBUILD .SRCINFO && \
     git -c user.name="$(git -C "$OLDPWD" config user.name)" -c user.email="$(git -C "$OLDPWD" config user.email)" \
@@ -62,8 +83,11 @@ publish() {
   echo "AUR serves $pkg $VERSION"
 }
 
-publish sudostamp packaging/aur usr/lib/sudostamp/install.sh
-publish sudostamp-desktop packaging/aur-desktop usr/bin/sudostamp-desktop
+# Both built before either is pushed: never sudostamp at the new version and the desktop at the old.
+build sudostamp packaging/aur usr/lib/sudostamp/install.sh
+build sudostamp-desktop packaging/aur-desktop usr/bin/sudostamp-desktop
+push sudostamp
+push sudostamp-desktop
 
 # Keep the repository's copies in step (packaging/aur*/), through a merge request.
 if [ "$(sed -n 's/^pkgver=//p' packaging/aur/PKGBUILD)" != "$VERSION" ] || \

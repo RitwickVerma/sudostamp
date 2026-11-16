@@ -23,3 +23,7 @@ This product includes third-party material:
 The desktop app (desktop/) is built from crates.io dependencies, pinned in desktop/Cargo.lock and
 used under their own licenses (MIT, Apache-2.0 and similar permissive terms; deny.toml lists the
 allowed set and `cargo deny check` enforces it in CI).
+The sudostamp-desktop binary embeds egui's default fonts (epaint, `default_fonts`), each under its
+own license: Ubuntu-Light (Ubuntu Font Licence 1.0), Hack (MIT / Bitstream Vera), Noto Emoji
+(SIL Open Font License 1.1) and emoji-icon-font (SIL OFL 1.1 / MIT). Their texts ship in the
+epaint crate (`epaint_default_fonts/fonts/`).
