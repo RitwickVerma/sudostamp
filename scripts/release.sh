@@ -102,7 +102,8 @@ if [ "$MODE" = ship ]; then
   command -v glab >/dev/null || die "glab is not installed"
   git fetch -q origin master --tags
   # The merge commit of release/X.Y.Z, and nothing else: the tag names exactly what was reviewed.
-  MERGE=$(git log origin/master --merges --format='%H %s' | awk -v b="'release/$VERSION'" '$0 ~ b {print $1; exit}')
+  # awk reads to the end (no exit): an early exit SIGPIPEs git log, and pipefail kills the script.
+  MERGE=$(git log origin/master --merges --format='%H %s' | awk -v b="'release/$VERSION'" '!m && $0 ~ b {m=$1} END {print m}')
   [ -n "$MERGE" ] || die "no merge of release/$VERSION on origin/master yet: merge the release MR first"
   if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     [ "$(git rev-parse "$TAG^{commit}")" = "$MERGE" ] || die "$TAG exists but is not the release merge commit"
@@ -306,6 +307,9 @@ step "publish $TAG"
 FILES="sudostamp-$TAG.apk sudostamp-setup.sh sudostamp-setup.sh.sig SHA256SUMS SHA256SUMS.sig mapping-$TAG.txt sudostamp-$TAG.apk.cdx.json sudostamp-setup.cdx.json"
 printf '  %s\n' $FILES
 if [ "${SUDOSTAMP_YES:-}" != 1 ]; then
+  # Without a terminal the question cannot be answered: say so, instead of read failing silently
+  # under set -e.
+  [ -t 0 ] || die "no terminal to confirm the upload: run in a terminal, or set SUDOSTAMP_YES=1"
   read -r -p "Upload these and create the public GitLab Release $TAG? [yes/no] " answer
   [ "$answer" = yes ] || die "stopped; nothing published"
 fi
