@@ -37,7 +37,22 @@ tar -xzf "$W/src.tar.gz" -C "$W/gitlab" && git archive "v$VERSION" | tar -x -C "
 diff -rq "$W/gitlab"/*/ "$W/tag/" >/dev/null || die "GitLab's archive of v$VERSION differs from the tag: not publishing it"
 
 # served PKG: the version the AUR's own copy of PKG's PKGBUILD names.
-served() { curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$1" 2>/dev/null | sed -n 's/^pkgver=//p'; }
+# The AUR's RPC, not cgit's PKGBUILD: cgit caches for minutes, and a fresh push read as "not
+# served" (1.6.0 died here after pushing sudostamp, before sudostamp-desktop).
+served_rpc() {
+  curl -fsSL "https://aur.archlinux.org/rpc/v5/info?arg[]=$1" 2>/dev/null |
+    python3 -c 'import json,sys
+r=json.load(sys.stdin).get("results") or [{}]
+print(r[0].get("Version","").rsplit("-",1)[0])' 2>/dev/null || true
+}
+# A brand-new package is missing from the RPC for a while (sudostamp-desktop's first upload);
+# its page knows it at once.
+served() {
+  local v; v=$(served_rpc "$1")
+  [ -n "$v" ] || v=$(curl -fsSL "https://aur.archlinux.org/packages/$1" 2>/dev/null |
+    sed -n "s/.*Package Details: $1 \\([^ <]*\\)-[0-9][0-9]*<.*/\\1/p" | sed -n 1p)
+  printf '%s\n' "$v"
+}
 
 # build PKG DIR CHECK: DIR's PKGBUILD for this tag, test-built (a package that does not build must
 # never reach the AUR), CHECK = a file the package must contain. makepkg runs cargo, so the build
