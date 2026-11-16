@@ -806,7 +806,7 @@ ask_u "--why 'e2e: nopasswd' -- touch /tmp/ask-nopw" >/dev/null 2>/tmp/ask8.err;
 rm -f /etc/sudoers.d/91-nopasswd
 check "a NOPASSWD rule for the runner: exit 75, says why, nothing ran (it would have run unasked)" \
   bash -c "[ $rc = 75 ] && grep -q NOPASSWD /tmp/ask8.err && [ ! -e /tmp/ask-nopw ]" || said "" /tmp/ask8.err
-ask_u "--why \"\$(printf 'bad\\xffbyte')\" -- touch /tmp/ask-nopw" >/dev/null 2>/tmp/ask9.err; rc=$?
+ask_u "--why \"\$(printf 'bad\\377byte')\" -- touch /tmp/ask-nopw" >/dev/null 2>/tmp/ask9.err; rc=$?
 check "a reason that is not UTF-8: exit 64 before anything is asked" bash -c "[ $rc = 64 ] && [ ! -e /tmp/ask-nopw ]" || said "" /tmp/ask9.err
 rm -f /tmp/run-ran
 "$R" "$RS" e2e -- "$(printf 'fine\342\200\256 evil')" < /tmp/run.sh >/dev/null 2>&1; rc=$?
