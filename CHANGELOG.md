@@ -2,7 +2,7 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
-## 1.6.0 — unreleased
+## 1.6.0 — 2026-11-16
 
 SudoStamp on the desktop, and a safe way for agents to ask for root.
 
