@@ -74,6 +74,12 @@ PHONE_ADDR="${SUDOSTAMP_PHONE:-}"
 # Whose key is pinned: SUDOSTAMP_USER, else the user who ran sudo, else (for a plain
 # `status`) whoever is running this.
 TARGET_USER="${SUDOSTAMP_USER:-${SUDO_USER:-}}"
+# Through pkexec (the desktop app's Fix and Pair buttons) there is no SUDO_USER: pkexec says who
+# asked in PKEXEC_UID instead. Only as root and only a plain, non-zero number: anything else is not
+# pkexec's doing and is ignored.
+if [ -z "$TARGET_USER" ] && [ "$(id -u)" -eq 0 ]; then
+  case "${PKEXEC_UID:-}" in ''|0|*[!0-9]*) ;; *) TARGET_USER="$(id -nu "$PKEXEC_UID" 2>/dev/null)" ;; esac
+fi
 [ -z "$TARGET_USER" ] && [ "$(id -u)" -ne 0 ] && TARGET_USER="$(id -un)"
 KEYDIR="/etc/authorized_keys"
 KEYFILE="${KEYDIR}/${TARGET_USER}.keys"
@@ -127,9 +133,12 @@ END_MARK="# <<< SudoStamp <<<"
 VENDOR_MARK="# SudoStamp: copied from the vendor file; rollback deletes this file"
 
 say()  { printf '%s\n' "$*"; }
-ok()   { printf '  \033[32mOK\033[0m   %s\n' "$*"; }
-bad()  { LAST_BAD="$*"; printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
-warn() { printf '  \033[33mWARN\033[0m %s\n' "$*"; }
+# Colour only on a terminal: a program reading the output (the desktop app's Fix, a log) gets text.
+if [ -t 1 ]; then C_OK='\033[32m'; C_BAD='\033[31m'; C_WARN='\033[33m'; C_END='\033[0m'
+else C_OK=''; C_BAD=''; C_WARN=''; C_END=''; fi
+ok()   { printf "  ${C_OK}OK${C_END}   %s\n" "$*"; }
+bad()  { LAST_BAD="$*"; printf "  ${C_BAD}FAIL${C_END} %s\n" "$*"; }
+warn() { printf "  ${C_WARN}WARN${C_END} %s\n" "$*"; }
 die()  { bad "$*"; exit 1; }
 
 # --json (docs/DESKTOP.md): `doctor` prints one JSON object, `setup` prints JSON lines on the real
@@ -684,10 +693,11 @@ install_helper() {
 }
 # The local-vs-remote gate, only where a local sensor can exist (Linux with pam_fprintd), and
 # the reachability probe, wherever the PAM syntax can skip a line on its answer (Linux-PAM).
-# The agents' runner everywhere: it only needs sudo and python3.
+# The agents' runner too, on Linux only: it is tested there, and on macOS /usr/local/sbin can belong
+# to the user (Homebrew), where root must not write.
 install_helpers() {
-  install_helper sudostamp-run.sh "$RUNNER" || die "could not install $RUNNER"
   linux_pam || return 0
+  install_helper sudostamp-run.sh "$RUNNER" || die "could not install $RUNNER"
   install_helper sudostamp-probe.sh "$PROBE" || die "could not install $PROBE"
   if has_fprintd; then
     install_helper sudostamp-is-local.sh "$GATE" || die "could not install $GATE"
@@ -1550,15 +1560,15 @@ cmd_doctor() {
     else
       d_ok local-reader "local fingerprint reader: none (the phone is asked directly)"
     fi
+    # The agents' runner (sudostamp ask). Not on the authentication path: a missing one only
+    # means agents cannot ask, so a warning, not a failure.
+    if [ ! -e "$RUNNER" ]; then
+      d_warn helper-run "helper $RUNNER is missing: agents cannot use 'sudostamp ask'" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+    else
+      doctor_helper helper-run "$RUNNER" sudostamp-run.sh "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+    fi
   else
     d_ok helper-probe "helper scripts: not used on OpenPAM ($FAMILY)"
-  fi
-  # The agents' runner (sudostamp ask). Not on the authentication path: a missing one only
-  # means agents cannot ask, so a warning, not a failure.
-  if [ ! -e "$RUNNER" ]; then
-    d_warn helper-run "helper $RUNNER is missing: agents cannot use 'sudostamp ask'" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
-  else
-    doctor_helper helper-run "$RUNNER" sudostamp-run.sh "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
   fi
 
   # 5. the pinned key

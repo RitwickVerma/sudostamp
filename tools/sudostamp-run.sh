@@ -21,7 +21,7 @@
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 exec python3 -I -S -c '
-import hashlib, os, re, signal, subprocess, sys, tempfile, time
+import hashlib, os, re, signal, subprocess, sys, tempfile, time, unicodedata
 
 MAX = 1 << 20                                   # 1 MiB: a script, not a payload
 KEEP = 200                                      # audit copies kept in RUNS
@@ -35,12 +35,23 @@ a = sys.argv[1:]
 if len(a) < 4 or a[2] != "--":
     die(64, "usage: sudostamp-run <sha256> <agent> -- <why>")
 sha, agent, why = a[0], a[1], " ".join(a[3:]).strip()
+
+def printable(s):
+    # One line of text a person reads before touching the sensor, and that lands in the audit copy
+    # and the log of sudo: valid UTF-8 (argv bytes that are not become surrogates), and none of the
+    # characters that fake a line or reorder text (controls, C1, format/bidi, line separators).
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return all(unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn") for c in s)
+
 if not re.fullmatch(r"[0-9a-f]{64}", sha):
     die(64, "the hash must be 64 lowercase hex digits")
 if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,31}", agent):
     die(64, "bad agent name")
-if not why or len(why) > 300 or any(ord(c) < 32 or ord(c) == 127 for c in why):
-    die(64, "bad reason")
+if not why or len(why) > 300 or not printable(why):
+    die(64, "bad reason (one line of plain text, 300 characters at most)")
 
 # Ask for the script only now that sudo has let us start: sudostamp ask writes it on seeing this
 # line, and not at all once it has given up waiting, so an approval that comes after the agent was
@@ -81,10 +92,11 @@ try:
     old = sorted(n for n in os.listdir(RUNS) if n.endswith(".sh"))
     for n in old[:-KEEP]:
         os.unlink(os.path.join(RUNS, n))
-except OSError as e:
+except Exception as e:                       # a copy is a record, never a reason not to run
     sys.stderr.write("sudostamp-run: (no audit copy: %s)\n" % e)
 
-work = tempfile.mkdtemp(prefix="sudostamp-run.", dir="/run" if os.path.isdir("/run") else None)
+# Never from the environment (TMPDIR): a directory only root can write. Linux has /run.
+work = tempfile.mkdtemp(prefix="sudostamp-run.", dir="/run")
 script = os.path.join(work, "script")
 fd = os.open(script, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o700)
 with os.fdopen(fd, "wb") as f:
@@ -99,8 +111,12 @@ env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "
 for k in ("SUDO_USER", "SUDO_UID", "SUDO_GID"):
     if k in os.environ:
         env[k] = os.environ[k]
+# A stop that arrives before the script starts (sudo relays it when ask gives up) must stop it
+# from starting at all, not be lost because there is no child yet.
 child = None
+stopped = []
 def stop(sig, _):
+    stopped.append(sig)
     if child:
         child.send_signal(sig)
 for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -112,8 +128,12 @@ for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
 sys.stdout.write("sudostamp-run: output %s\n" % sha)
 sys.stdout.flush()
 try:
+    if stopped:
+        sys.exit(128 + stopped[0])
     child = subprocess.Popen(["bash", "--noprofile", "--norc", script], stdin=subprocess.DEVNULL,
                              env=env, cwd="/")
+    if stopped:                                  # it came while Popen ran: the script stops too
+        child.send_signal(stopped[0])
     rc = child.wait()
     sys.stdout.write("sudostamp-run: end %s\n" % sha)
     sys.stdout.flush()
