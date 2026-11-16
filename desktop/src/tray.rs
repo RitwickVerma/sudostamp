@@ -83,7 +83,7 @@ impl Tray for SudoTray {
     }
 
     fn status(&self) -> Status {
-        if self.verdict.state == State::NeedsAttention {
+        if matches!(self.verdict.state, State::NeedsAttention | State::NotSetUp) {
             Status::NeedsAttention
         } else {
             Status::Active
@@ -128,7 +128,15 @@ impl Tray for SudoTray {
             self.item("Pause for 1 hour", !self.paused, Cmd::Pause(Some(3600))),
             self.item("Resume", self.paused, Cmd::Resume),
             MenuItem::Separator,
-            self.item("Open SudoStamp", true, Cmd::OpenWindow),
+            self.item(
+                if self.verdict.state == State::NotSetUp {
+                    "Set up SudoStamp…"
+                } else {
+                    "Open SudoStamp"
+                },
+                true,
+                Cmd::OpenWindow,
+            ),
             self.item("Quit", true, Cmd::Quit),
         ]
     }
@@ -186,6 +194,17 @@ mod tests {
         let (p, _) = tray(State::Paused, true);
         let l = labels(&p);
         assert!(!l[2].1 && !l[3].1 && l[4].1);
+    }
+
+    #[test]
+    fn not_set_up_offers_the_setup() {
+        let (t, _) = tray(State::NotSetUp, false);
+        assert!(
+            labels(&t)
+                .iter()
+                .any(|(n, on)| n == "Set up SudoStamp…" && *on)
+        );
+        assert_eq!(t.status(), Status::NeedsAttention);
     }
 
     #[test]

@@ -182,6 +182,19 @@ pub fn privileged(installer: &Path, args: &[String], env: Env) -> Result<Command
     Ok(cmd)
 }
 
+/// `doctor --json` through pkexec, for the checks only root can make. Read-only. Blocking: call
+/// from a thread.
+pub fn root_doctor(installer: &Path, env: Env) -> Result<Report, String> {
+    let cmd = privileged(installer, &["doctor".into(), "--json".into()], env)?;
+    let (status, out, _) = capture(cmd, DOCTOR_TIMEOUT * 6, MAX_OUTPUT)
+        .map_err(|e| format!("cannot run pkexec: {e}"))?;
+    match status {
+        Some(126) => Err("The administrator prompt was dismissed or refused.".into()),
+        None => Err("doctor did not finish in time".into()),
+        _ => doctor::parse(&String::from_utf8_lossy(&out)),
+    }
+}
+
 /// A repair (`apply`/`stage`) through pkexec. Blocking: call from a thread.
 pub fn repair(installer: &Path, args: &[String], env: Env) -> Result<String, String> {
     let cmd = privileged(installer, args, env)?;

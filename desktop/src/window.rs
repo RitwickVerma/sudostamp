@@ -79,6 +79,8 @@ struct App {
     tx: Sender<Done>,
     rx: Receiver<Done>,
     mark: TextureHandle,
+    /// The Google Play link as QR modules, computed once.
+    play_qr: Vec<Vec<bool>>,
 
     doctor: Option<Result<Report, String>>,
     doctor_busy: bool,
@@ -169,11 +171,25 @@ fn actionable(c: &Check) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Standing {
     Checking,
+    /// Nothing is set up on this computer yet (no SudoStamp block, or no key pinned for this user):
+    /// a first run, greeted as one, not a list of failures.
+    NotSetUp,
     Unavailable,
     Ready,
     PhoneAway,
     Update,
     Attention,
+}
+
+/// A computer where SudoStamp has not been set up: the PAM block or the pinned key is missing, and
+/// what doctor proposes for it is pairing (`setup`), not a repair.
+fn not_set_up(r: &Report) -> bool {
+    r.checks.iter().any(|c| {
+        c.level == Level::Fail
+            && (c.id == "pam-block" || c.id == "pinned-key")
+            && matches!(doctor::plan_fix(&c.fix), Fix::Pair(None))
+            && (c.text.contains("not applied") || c.text.contains("does not exist"))
+    })
 }
 
 fn standing(doctor: Option<&Result<Report, String>>) -> Standing {
@@ -188,7 +204,9 @@ fn standing(doctor: Option<&Result<Report, String>>) -> Standing {
             .iter()
             .any(|c| c.level == Level::Fail && (c.id == "phone") == phone)
     };
-    if fails(false) {
+    if not_set_up(r) {
+        Standing::NotSetUp
+    } else if fails(false) {
         Standing::Attention
     } else if fails(true) {
         Standing::PhoneAway
@@ -211,7 +229,7 @@ fn common_fix(r: &Report) -> Option<Vec<String>> {
                 Some(_) => return None,
             },
             // A failure the installer run does not cover: no single button.
-            Fix::Pair(_) | Fix::Show(_) => return None,
+            Fix::Pair(_) | Fix::Show(_) | Fix::RootCheck => return None,
         }
     }
     found
@@ -402,6 +420,59 @@ fn ghost(text: &str) -> egui::Button<'static> {
         .min_size(vec2(0.0, 30.0))
 }
 
+/// The phone app, for a computer whose person does not have it yet.
+const PLAY_URL: &str = "https://play.google.com/store/apps/details?id=com.ritwick.sudostamp";
+
+/// Open a web page in the person's browser (as them, never privileged); a missing xdg-open is
+/// not an error worth a dialog: the QR code next to the button does the same job.
+fn open_url(url: &str) {
+    let _ = std::process::Command::new("/usr/bin/xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// A QR code's modules, drawn dark on a white tile with a quiet zone, as phone cameras expect.
+fn qr(ui: &mut egui::Ui, code: &[Vec<bool>], size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(10), Color32::WHITE);
+    let n = code.len().max(1) as f32;
+    let module = (size - 16.0) / n;
+    for (y, row) in code.iter().enumerate() {
+        for (x, &dark) in row.iter().enumerate() {
+            if dark {
+                let min = rect.min + vec2(8.0 + x as f32 * module, 8.0 + y as f32 * module);
+                p.rect_filled(
+                    egui::Rect::from_min_size(min, Vec2::splat(module + 0.4)),
+                    0.0,
+                    Color32::from_rgb(0x0B, 0x0D, 0x12),
+                );
+            }
+        }
+    }
+}
+
+/// The modules of a QR code for `text` (empty if it cannot be encoded, which a URL this short can).
+fn qr_modules(text: &str) -> Vec<Vec<bool>> {
+    qrcode::QrCode::new(text.as_bytes()).map_or_else(
+        |_| Vec::new(),
+        |c| {
+            let w = c.width();
+            let colors = c.to_colors();
+            (0..w)
+                .map(|y| {
+                    (0..w)
+                        .map(|x| colors[y * w + x] == qrcode::Color::Dark)
+                        .collect()
+                })
+                .collect()
+        },
+    )
+}
+
 /// A command to copy: one line in mono on the ground colour, cut with "…" rather than wrapped
 /// (a path broken at its hyphen cannot be checked by eye); egui shows it whole on hover, Copy takes
 /// it whole.
@@ -525,6 +596,20 @@ impl App {
         }
         self.doctor_busy = true;
         self.spawn(move || Done::Doctor(exec::doctor(&installer)));
+    }
+
+    /// doctor through pkexec: the checks that need root (the sudoers files) are made instead of
+    /// skipped. Read-only, like every doctor run.
+    fn refresh_doctor_as_root(&mut self) {
+        let Some(installer) = self.installer.clone() else {
+            return;
+        };
+        if self.doctor_busy {
+            return;
+        }
+        self.doctor_busy = true;
+        let env = self.env_for_exec();
+        self.spawn(move || Done::Doctor(exec::root_doctor(&installer, &env)));
     }
 
     fn refresh_history(&mut self) {
@@ -712,6 +797,13 @@ impl App {
                     _ => String::new(),
                 },
             ),
+            Standing::NotSetUp => (
+                ACCENT,
+                "Set up SudoStamp",
+                "Approve sudo on this computer with your phone's fingerprint, instead of typing \
+                 your password. It takes about a minute: the phone app, a 6-digit code, done."
+                    .into(),
+            ),
             Standing::Ready => (
                 ACCENT,
                 "Ready",
@@ -768,6 +860,9 @@ impl App {
             });
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                if st == Standing::NotSetUp && ui.add(primary("Set up")).clicked() {
+                    self.tab = Tab::Pair;
+                }
                 if let Some(r) = report
                     && st == Standing::Update
                     && let Some(args) = common_fix(r)
@@ -840,6 +935,7 @@ impl App {
             .collect();
         let mut go_pair: Option<Option<std::net::SocketAddr>> = None;
         let mut fix: Option<Vec<String>> = None;
+        let mut root_check = false;
 
         if !problems.is_empty() {
             ui.add_space(12.0);
@@ -892,6 +988,8 @@ impl App {
                                     }
                                 }
                                 Fix::Show(cmd) => command_block(ui, &cmd),
+                                // Only a warning carries it (see the notes below).
+                                Fix::RootCheck => {}
                             }
                         });
                     });
@@ -914,8 +1012,26 @@ impl App {
                         ui.vertical(|ui| {
                             ui.label(title(check_title(c), 14.5));
                             ui.add(egui::Label::new(muted(check_detail(c))).wrap());
-                            if let Fix::Show(cmd) = doctor::plan_fix(&c.fix) {
-                                command_block(ui, &cmd);
+                            match doctor::plan_fix(&c.fix) {
+                                // "Needs root to read": the same read-only check, run with the
+                                // administrator's rights through polkit, no terminal.
+                                Fix::RootCheck => {
+                                    ui.add_space(4.0);
+                                    if ui
+                                        .add_enabled(
+                                            !self.doctor_busy,
+                                            secondary("Check with administrator rights"),
+                                        )
+                                        .on_hover_text(
+                                            "Runs: pkexec sudostamp doctor --json (read-only)",
+                                        )
+                                        .clicked()
+                                    {
+                                        root_check = true;
+                                    }
+                                }
+                                Fix::Show(cmd) => command_block(ui, &cmd),
+                                _ => {}
                             }
                         });
                     });
@@ -961,6 +1077,9 @@ impl App {
         }
         if let Some(args) = fix {
             self.run_fix(args);
+        }
+        if root_check {
+            self.refresh_doctor_as_root();
         }
     }
 
@@ -1026,6 +1145,10 @@ impl App {
 
     fn health_ui(&mut self, ui: &mut egui::Ui) {
         self.hero(ui);
+        // A first run gets the welcome and nothing technical: the checks are all "not yet".
+        if standing(self.doctor.as_ref()) == Standing::NotSetUp {
+            return;
+        }
         self.checks(ui);
         self.activity(ui);
     }
@@ -1057,13 +1180,30 @@ impl App {
         }
         card(ui, |ui| {
             Self::step_label(ui, "1", "On the phone");
-            ui.add(
-                egui::Label::new(muted(
-                    "Open SudoStamp and tap Pair a computer. Keep that screen open until this \
-                     computer says it is done.",
-                ))
-                .wrap(),
-            );
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_max_width((ui.available_width() - 132.0).max(160.0));
+                    ui.add(
+                        egui::Label::new(muted(
+                            "Get SudoStamp from Google Play (scan the code with the phone's \
+                             camera), open it and tap Pair a computer. Keep that screen open \
+                             until this computer says it is done.",
+                        ))
+                        .wrap(),
+                    );
+                    ui.add_space(6.0);
+                    if ui
+                        .add(secondary("Open Google Play"))
+                        .on_hover_text(PLAY_URL)
+                        .clicked()
+                    {
+                        open_url(PLAY_URL);
+                    }
+                });
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    qr(ui, &self.play_qr, 120.0);
+                });
+            });
         });
         ui.add_space(10.0);
         let mut chosen = None;
@@ -1505,6 +1645,7 @@ pub fn run(env: Env) -> i32 {
                 tx,
                 rx,
                 mark,
+                play_qr: qr_modules(PLAY_URL),
                 doctor: None,
                 doctor_busy: false,
                 repair_busy: false,
@@ -1565,6 +1706,42 @@ mod tests {
     }
 
     const APPLY: &str = "sudo sudostamp apply --phone 192.168.1.5:7777";
+
+    #[test]
+    fn a_fresh_install_is_not_set_up_not_a_failure() {
+        let ok = check("platform", Level::Ok, "platform: arch", "");
+        let no_block = check(
+            "pam-block",
+            Level::Fail,
+            "PAM block: not applied: sudo does not ask the phone (/etc/pam.d/sudo)",
+            "sudo sudostamp setup   (or, if paired already: sudo sudostamp apply --phone <phone-ip>:7777)",
+        );
+        let no_key = check(
+            "pinned-key",
+            Level::Fail,
+            "pinned key: /etc/authorized_keys/u.keys does not exist: pam_rssh has nothing to check the phone against",
+            "sudo sudostamp setup",
+        );
+        assert_eq!(
+            standing(Some(&report(vec![ok.clone(), no_block.clone()]))),
+            Standing::NotSetUp
+        );
+        assert_eq!(
+            standing(Some(&report(vec![ok.clone(), no_key]))),
+            Standing::NotSetUp
+        );
+        // A damaged block is a repair, not a first run.
+        let damaged = check(
+            "pam-block",
+            Level::Fail,
+            "PAM block: damaged markers in x",
+            "edit x by hand",
+        );
+        assert_eq!(
+            standing(Some(&report(vec![ok, damaged]))),
+            Standing::Attention
+        );
+    }
 
     #[test]
     fn standing_puts_real_failures_first_and_a_missing_phone_after() {

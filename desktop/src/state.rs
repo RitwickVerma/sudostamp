@@ -11,6 +11,8 @@ pub enum State {
     Away,
     Paused,
     NeedsAttention,
+    /// Installed, not set up yet: a click opens the setup, not an error.
+    NotSetUp,
 }
 
 impl State {
@@ -20,7 +22,7 @@ impl State {
             State::Ready => "sudostamp-desktop-ready",
             State::Away => "sudostamp-desktop-away",
             State::Paused => "sudostamp-desktop-paused",
-            State::NeedsAttention => "sudostamp-desktop-attention",
+            State::NeedsAttention | State::NotSetUp => "sudostamp-desktop-attention",
         }
     }
 
@@ -30,6 +32,7 @@ impl State {
             State::Away => "Phone away",
             State::Paused => "Paused",
             State::NeedsAttention => "Needs attention",
+            State::NotSetUp => "Not set up",
         }
     }
 }
@@ -38,6 +41,8 @@ impl State {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Config {
     Ok,
+    /// No SudoStamp block in sudo's PAM file, or no key pinned for this user: a fresh install.
+    NotSetUp,
     Broken(String),
 }
 
@@ -73,6 +78,9 @@ pub fn compute(i: &Inputs) -> Verdict {
             "Paused on this computer: sudo asks for the password.",
         );
     }
+    if i.config == Config::NotSetUp {
+        return v(State::NotSetUp, "Not set up yet: click to set it up.");
+    }
     if let Config::Broken(why) = &i.config {
         return v(State::NeedsAttention, why);
     }
@@ -98,6 +106,19 @@ pub fn compute(i: &Inputs) -> Verdict {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_fresh_install_reads_not_set_up() {
+        let i = super::Inputs {
+            pause: crate::pause::Pause::Off,
+            config: super::Config::NotSetUp,
+            agent: None,
+            doctor: None,
+        };
+        let v = super::compute(&i);
+        assert_eq!(v.state, super::State::NotSetUp);
+        assert_eq!(v.state.label(), "Not set up");
+    }
+
     use super::*;
     use crate::doctor::parse;
 

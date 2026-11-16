@@ -72,11 +72,8 @@ fn probe_agent(ctx: &Ctx) -> (Config, Option<Status>) {
     };
     let addr = match pam::phone_address(&text) {
         Ok(a) => a,
-        Err(pam::Error::NoBlock) => {
-            return broken(
-                "sudo does not ask the phone: no SudoStamp block in /etc/pam.d/sudo.".into(),
-            );
-        }
+        // A fresh install: nothing to fix, something to set up.
+        Err(pam::Error::NoBlock) => return (Config::NotSetUp, None),
         Err(pam::Error::Damaged) => {
             return broken("The SudoStamp block in /etc/pam.d/sudo is damaged.".into());
         }
@@ -95,10 +92,7 @@ fn probe_agent(ctx: &Ctx) -> (Config, Option<Status>) {
         .map(|t| crate::keys::parse(&t))
         .unwrap_or_default();
     if keys.is_empty() {
-        return broken(format!(
-            "No pinned key in {}: pair the phone.",
-            file.display()
-        ));
+        return (Config::NotSetUp, None);
     }
     (Config::Ok, Some(agent::check(addr, &keys, agent::BUDGET)))
 }
@@ -162,7 +156,7 @@ fn checked(mut e: Event, proc_root: &Path) -> Option<Event> {
     Some(e)
 }
 
-fn open_window(child: &mut Option<Child>) {
+fn open_window(child: &mut Option<Child>, setup: bool) {
     if let Some(c) = child
         && matches!(c.try_wait(), Ok(None))
     {
@@ -176,11 +170,12 @@ fn open_window(child: &mut Option<Child>) {
             .map_or_else(|| p.clone(), PathBuf::from)
     });
     *child = exe.and_then(|exe| {
-        Command::new(exe)
-            .arg("window")
-            .stdin(Stdio::null())
-            .spawn()
-            .ok()
+        let mut cmd = Command::new(exe);
+        // Not set up: open straight on the setup steps.
+        if setup {
+            cmd.env("SUDOSTAMP_WINDOW_TAB", "pair");
+        }
+        cmd.arg("window").stdin(Stdio::null()).spawn().ok()
     });
 }
 
@@ -233,6 +228,7 @@ pub fn run(env: Env) -> i32 {
     });
     let flag = paths::pause_flag(&runtime);
     let history_path = paths::state_dir(env).map(|d| paths::history_file(&d));
+    let setup_marker = paths::state_dir(env).map(|d| d.join("setup-offered"));
 
     let (tx, rx) = mpsc::channel::<Msg>();
     {
@@ -335,6 +331,22 @@ pub fn run(env: Env) -> i32 {
             Some(Msg::Event(e)) => actions = engine.on_event(&e, now()),
             Some(Msg::Agent(config, status)) => {
                 c.agent_running = false;
+                // The first time the app finds a computer not set up, it opens the setup by itself,
+                // once (a marker in the state directory): after a package install there is no
+                // terminal to tell anyone what to do next.
+                if config == Config::NotSetUp
+                    && let Some(marker) = setup_marker.as_ref()
+                    && !marker.exists()
+                {
+                    if let Some(dir) = marker.parent() {
+                        let _ = fs::DirBuilder::new()
+                            .recursive(true)
+                            .mode(0o700)
+                            .create(dir);
+                    }
+                    let _ = fs::write(marker, b"");
+                    open_window(&mut window, true);
+                }
                 inputs.config = config;
                 inputs.agent = status;
                 republish = true;
@@ -357,7 +369,7 @@ pub fn run(env: Env) -> i32 {
                     }
                     republish = true;
                 }
-                Cmd::OpenWindow => open_window(&mut window),
+                Cmd::OpenWindow => open_window(&mut window, inputs.config == Config::NotSetUp),
                 Cmd::MenuOpened => {
                     c.want_agent = true;
                     c.want_doctor = true;
