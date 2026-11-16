@@ -14,7 +14,7 @@ import json
 import re
 import sys
 
-IDS = {"platform", "user", "pam-block", "pam-foreign", "pam-rssh", "helper-probe", "helper-is-local",
+IDS = {"helper-run", "platform", "user", "pam-block", "pam-foreign", "pam-rssh", "helper-probe", "helper-is-local",
        "local-reader", "pinned-key", "phone", "sudoers", "scratch-pam"}
 
 

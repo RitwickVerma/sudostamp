@@ -4,7 +4,27 @@ Versions are the app's `versionName`. The host-side tooling is versioned with th
 
 ## 1.6.0 — unreleased
 
-The phone app is unchanged: this release is the computer side.
+SudoStamp on the desktop, and a safe way for agents to ask for root.
+
+### Agents (new)
+- **`sudostamp ask`**: the one way for a program acting for you (Hermes, Claude Code, a script) to
+  run something as root, approved on the phone like any sudo. It checks first that the phone can be
+  asked (exit 75 and the reason otherwise, nothing asked), asks for a fresh approval every run
+  (`sudo -k`), never drops to a password prompt nobody can answer (exit 77, nothing ran), and runs
+  exactly the script whose SHA-256 the approval named: the root runner `sudostamp-run` takes it only
+  on stdin, checks the hash, and keeps a root-only copy of what ran. `--json` for programs.
+- **The agent, the reason and the script's hash are in sudo's own command line**, so sudo's log, the
+  desktop notification ("hermes: rebuild pam_rssh (script a3f9c2d1e0b7a44c…)") and the phone all show them.
+- docs/AGENTS-SUDO.md: how to use it, exit codes, and what the description does and does not guarantee.
+
+### Phone
+- **The approval says what a sudo is for** when the computer tells it (`context-v1@sudostamp`, sent
+  by the 1.6 probe): for an agent's run, the agent, its reason and the script's SHA-256; otherwise
+  the command. Always labelled as the computer's own report, since a program running as you there
+  could report something else. Two different descriptions for one request show a red warning and
+  neither text. The notification carries it but keeps it off the lock screen, and the history lists it.
+- A phone with 1.6 works with older computers, and a 1.6 computer with older phones: neither
+  side depends on the description.
 
 ### Desktop (new, Linux)
 - **`sudostamp-desktop`**, a tray app (AUR `sudostamp-desktop`). It runs as you, holds no key and

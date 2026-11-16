@@ -336,6 +336,23 @@ only with the AppIndicator extension. For scripts, the installer speaks JSON too
 `sudostamp doctor --json` (works without root) and `sudo sudostamp setup --phone <ip>:7777 --json`.
 [docs/DESKTOP.md](docs/DESKTOP.md) has the design.
 
+## For agents: `sudostamp ask`
+
+Programs that act for you (Hermes, Claude Code, a script) get one way to root that you still approve
+with your finger, and that says what it is for:
+
+```sh
+sudostamp ask --agent hermes --why "rebuild pam_rssh with the timeout patch" --script fix.sh
+sudostamp ask --why "read the unit's log" -- journalctl -u sshd -n 50
+```
+
+It checks that the phone can be asked at all before asking (exit 75 otherwise), asks for a fresh
+approval every time (`sudo -k`), never falls to a password prompt (exit 77 when not approved), and
+runs exactly the script whose SHA-256 the approval named. The agent, the reason and the hash show in
+sudo's log, the desktop notification and, from 1.6, on the phone's approval screen.
+[docs/AGENTS-SUDO.md](docs/AGENTS-SUDO.md) has the details and what the description does and does
+not guarantee.
+
 ## Development
 
 ```sh

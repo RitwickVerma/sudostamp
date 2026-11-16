@@ -131,6 +131,7 @@ hygiene:
     - shellcheck -S warning tools/*.sh tools/test/*.sh scripts/*.sh
     - python3 -m py_compile tools/*.py tools/test/*.py && rm -rf tools/__pycache__ tools/test/__pycache__
     - python3 -I tools/test/test_pair.py && rm -rf tools/test/__pycache__ tools/__pycache__
+    - python3 -I tools/test/test_ask.py && rm -rf tools/test/__pycache__ tools/__pycache__
     - python3 -I tools/test/test_attest.py && rm -rf tools/test/__pycache__ tools/__pycache__
     # Fuzz and property tests of pair.py's parsers and of install.sh's --phone check: seeded, stdlib
     # only, about 10 s. SUDOSTAMP_FUZZ_ITERATIONS=2000000 for a long local run.

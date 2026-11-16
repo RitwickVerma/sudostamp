@@ -101,7 +101,7 @@ sshd/sshd-session/mosh-server), `sudostamp-probe.sh` (PAM check before pam_rssh:
 answer with this user's key within 4 s, else skip; also the pause flag and the datagrams for the
 desktop app, and with the word `after` the hook line after pam_rssh, with `check` the bare check
 for `doctor`; docs/DESKTOP.md), device probes, `verify.sh`, `verify_ssh_sig.py`,
-`check-secrets.py`. `attest.py` (verifies the attestation chain pair.py gets from the phone: embedded Google roots pinned by SHA-256, signatures through the system `openssl`; stdlib only). `tools/test/`: `test_attest.py` + `attest/` (REAL hardware chains published by Google, with provenance) + `attest_fixture.py` (throwaway-root chains, tests only), `mock_agent.py` (software-key stand-in for the phone,
+`check-secrets.py`, `ask.py` (`sudostamp ask`: an agent's one way to root, runs as the user; docs/AGENTS-SUDO.md), `sudostamp-run.sh` (root: runs exactly the script whose hash sudo's command line names, from stdin). `attest.py` (verifies the attestation chain pair.py gets from the phone: embedded Google roots pinned by SHA-256, signatures through the system `openssl`; stdlib only). `tools/test/`: `test_attest.py` + `attest/` (REAL hardware chains published by Google, with provenance) + `attest_fixture.py` (throwaway-root chains, tests only), `mock_agent.py` (software-key stand-in for the phone,
 loopback only, tests only), `event_sink.py` (the desktop app's datagram socket, a root socket, a full
 one), `check_event.py` / `check_doctor_json.py` (the schemas of docs/DESKTOP.md), `drive_setup.py`
 (drives `setup --json` like the app does) and `e2e.sh` (the host side end to end in a throwaway container).
@@ -259,3 +259,12 @@ installer built: `uninstall` removes only that, `doctor` reads the patch state f
     `desktop/src/track.rs` must ignore among sudo's children or "approved" would fire before the
     phone is asked. Change any of them on both sides in one MR. Its tests run as root in CI: a
     test that wants a file "not root's" must make it writable by others instead.
+32. `sudostamp ask` must never be able to run something nobody approved, and never hang. It runs
+    `sudo -k` (no cached credentials, ever) in a new session (no controlling terminal: a refused
+    approval cannot become a password prompt), and the runner takes the script only from stdin,
+    checked against the hash in its argv, before anything runs. sudo's argv is the description the
+    desktop, sudo's log and the phone show: its format (`sudostamp-run <sha256> <agent> -- <why>`)
+    is parsed in desktop/src/text.rs and the app's Context.kt; change all three together. Root
+    never opens a path the agent names. The runner is Python inside single quotes in a shell wrapper: no
+    apostrophe anywhere in it (test_ask.py checks). sudo prints PAM messages on stdout, so the
+    runner marks where the script's output starts and ask splits there.

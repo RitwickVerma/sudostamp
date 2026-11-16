@@ -94,7 +94,8 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
 ### `install.sh doctor --json`
 - Same checks as `doctor`, unchanged exit codes (0/1/2). Output: one JSON object
   `{"v":1,"checks":[{"id":"<stable id>","status":"ok"|"warn"|"fail","text":"<what>","fix":"<command or empty>"}…],"exit":<code>}`.
-  Stable ids: `platform pam-block pam-rssh helper-<name> local-reader pinned-key phone user`.
+  Stable ids: `platform pam-block pam-rssh helper-<name> local-reader pinned-key phone user` (1.6 adds
+  `helper-run`, the agents' runner: a WARN when missing, never a FAIL).
 - Runs without root for everything a user can read; checks that need root report `warn` with
   text "needs root" instead of failing. Read-only, as `doctor` is today.
 

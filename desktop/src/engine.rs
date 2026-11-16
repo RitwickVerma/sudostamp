@@ -63,7 +63,7 @@ fn shown(command: &str) -> String {
     if command.is_empty() {
         "sudo".into()
     } else {
-        command.to_string()
+        crate::text::describe(command)
     }
 }
 

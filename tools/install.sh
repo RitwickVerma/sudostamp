@@ -14,6 +14,8 @@
 #                                            # (stdout), human text on stderr, answers on stdin
 #                                            # (docs/DESKTOP.md: the desktop app drives this)
 #   sudo tools/install.sh uninstall [--yes]  # remove everything SudoStamp installed, nothing else
+#   tools/install.sh ask --why "..." --script fix.sh   # for agents: run one script as root, approved
+#                                            # on the phone (tools/ask.py, docs/AGENTS-SUDO.md)
 #
 # Options: --fingerprint SHA256:... skips the interactive fingerprint check (the app's "Copy
 # setup command" fills it in); --allow-rustup pre-approves a throwaway Rust toolchain when
@@ -83,6 +85,8 @@ ATTESTFILE="${KEYDIR}/${TARGET_USER}.attestation"
 KEY_RE='ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABB[A-Za-z0-9+/]{87}= sudostamp'
 GATE="/usr/local/sbin/sudostamp-is-local"
 PROBE="/usr/local/sbin/sudostamp-probe"
+# Runs one agent script as root, the exact bytes the approval named (tools/sudostamp-run.sh).
+RUNNER="/usr/local/sbin/sudostamp-run"
 # The gate's control flags. NOT `[success=ok default=1]`: in Linux-PAM `ok` makes a
 # successful gate count towards the stack's result, after which a failing `sufficient` module
 # changes nothing -- on a stack with no required module below (a hand-written one), every
@@ -680,7 +684,9 @@ install_helper() {
 }
 # The local-vs-remote gate, only where a local sensor can exist (Linux with pam_fprintd), and
 # the reachability probe, wherever the PAM syntax can skip a line on its answer (Linux-PAM).
+# The agents' runner everywhere: it only needs sudo and python3.
 install_helpers() {
+  install_helper sudostamp-run.sh "$RUNNER" || die "could not install $RUNNER"
   linux_pam || return 0
   install_helper sudostamp-probe.sh "$PROBE" || die "could not install $PROBE"
   if has_fprintd; then
@@ -1260,7 +1266,7 @@ cmd_uninstall() {
   keyfiles="$(our_key_files)"
   m="$(ours_module)" || m=""
   [ "$have_block" = 1 ] || [ "$have_foreign" = 1 ] || [ -n "$keyfiles" ] || [ -n "$m" ] || \
-    [ -e "$GATE" ] || [ -e "$PROBE" ] || [ -e "$PAM_TEST" ] || [ -d "$(state_dir)" ] && any=1
+    [ -e "$GATE" ] || [ -e "$PROBE" ] || [ -e "$RUNNER" ] || [ -e "$PAM_TEST" ] || [ -d "$(state_dir)" ] && any=1
   if [ "$any" = 0 ]; then
     say "=== uninstall ==="
     ok "SudoStamp is not installed here: nothing to remove, nothing changed"
@@ -1270,10 +1276,10 @@ cmd_uninstall() {
   say "=== uninstall: what SudoStamp installed, and nothing else ==="
   [ "$have_block" = 1 ] && say "  - the SudoStamp block in $target"
   [ "$have_foreign" = 1 ] && [ "$have_block" = 0 ] && say "  - the pam_rssh stack an older SudoStamp wrote to $target (its backup is put back)"
-  for f in "$GATE" "$PROBE" "$PAM_TEST"; do [ -e "$f" ] && say "  - $f"; done
+  for f in "$GATE" "$PROBE" "$RUNNER" "$PAM_TEST"; do [ -e "$f" ] && say "  - $f"; done
   for f in $keyfiles; do say "  - SudoStamp's key line(s) in $f"; done
   [ -n "$m" ] && say "  - the pam_rssh module SudoStamp built: $m"
-  [ -d "$(state_dir)" ] && say "  - $(state_dir) (backups of sudo's PAM file, the build record)"
+  [ -d "$(state_dir)" ] && say "  - $(state_dir) (backups of sudo's PAM file, the build record, copies of the scripts agents ran)"
   if [ -z "$m" ] && mod="$(find_pam_rssh)"; then
     say "  (kept: $mod -- not built by this installer: a package's, or SudoStamp 1.4's or earlier)"
   fi
@@ -1286,7 +1292,7 @@ cmd_uninstall() {
   # nothing else has been touched.
   if [ "$have_block" = 1 ]; then strip_block "$target"
   elif [ "$have_foreign" = 1 ]; then restore_legacy "$target"; fi
-  for f in "$PAM_TEST" "$GATE" "$PROBE"; do
+  for f in "$PAM_TEST" "$GATE" "$PROBE" "$RUNNER"; do
     [ -e "$f" ] && rm -f "$f" && ok "removed $f"
   done
 
@@ -1327,7 +1333,9 @@ cmd_uninstall() {
   fi
   # Last, and only once the stack is proven: the backups are what would repair it.
   rm -f "$(backup_dir)"/*.bak-* 2>/dev/null
-  rmdir "$(backup_dir)" "$(state_dir)" 2>/dev/null
+  # The copies of what agents ran (sudostamp-run): only the runner's own names, then the directory.
+  rm -f "$(state_dir)"/runs/[0-9]*T[0-9]*Z-*.sh 2>/dev/null
+  rmdir "$(backup_dir)" "$(state_dir)/runs" "$(state_dir)" 2>/dev/null
   [ -d "$(state_dir)" ] && warn "$(state_dir) holds files that are not SudoStamp's backups: left in place"
   ok "SudoStamp is removed. Check:   sudo -k && sudo true   (it asks for your password)"
 }
@@ -1545,6 +1553,13 @@ cmd_doctor() {
   else
     d_ok helper-probe "helper scripts: not used on OpenPAM ($FAMILY)"
   fi
+  # The agents' runner (sudostamp ask). Not on the authentication path: a missing one only
+  # means agents cannot ask, so a warning, not a failure.
+  if [ ! -e "$RUNNER" ]; then
+    d_warn helper-run "helper $RUNNER is missing: agents cannot use 'sudostamp ask'" "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+  else
+    doctor_helper helper-run "$RUNNER" sudostamp-run.sh "sudo $PROG apply --phone ${addr:-<phone-ip>:7777}"
+  fi
 
   # 5. the pinned key
   if [ "$user_ok" = 1 ]; then
@@ -1606,6 +1621,12 @@ cmd_doctor() {
 # caller's ENTIRE environment to a root process (APT_CONFIG, for one, survives sudo's
 # filter), and a sudoers env_reset policy may drop them anyway. The SUDOSTAMP_* variables
 # still work, for scripts and CI.
+# `ask` is for agents and runs as the user: its own arguments, its own program (tools/ask.py),
+# nothing of the root code paths below. The same rule as everywhere: our PATH, python3 -I.
+if [ "${1:-}" = ask ]; then
+  shift
+  exec python3 -I "$HERE/ask.py" "$@"
+fi
 CMD="${1:-status}"
 [ $# -gt 0 ] && shift
 while [ $# -gt 0 ]; do
@@ -1644,5 +1665,5 @@ case "$CMD" in
   status)   cmd_status ;;
   doctor)   cmd_doctor ;;
   uninstall) cmd_uninstall ;;
-  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status|doctor|uninstall} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes] [--require-attestation] [--check-revocation] [--json (doctor, setup)]"; exit 2 ;;
+  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status|doctor|uninstall|ask} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes] [--require-attestation] [--check-revocation] [--json (doctor, setup)]"; exit 2 ;;
 esac
