@@ -40,8 +40,10 @@ diff -rq "$W/gitlab"/*/ "$W/tag/" >/dev/null || die "GitLab's archive of v$VERSI
 served() { curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=$1" 2>/dev/null | sed -n 's/^pkgver=//p'; }
 
 # build PKG DIR CHECK: DIR's PKGBUILD for this tag, test-built (a package that does not build must
-# never reach the AUR), CHECK = a file the package must contain. Without the SSH agent: makepkg runs
-# cargo, so the build scripts of hundreds of crates, and none of them gets the AUR key.
+# never reach the AUR), CHECK = a file the package must contain. makepkg runs cargo, so the build
+# scripts of hundreds of crates: SSH_AUTH_SOCK is removed from their environment, which keeps them
+# from finding the agent the ordinary way. It does not keep a hostile one from looking for the
+# socket on disk (same user); that would take a separate user or container to rule out.
 build() {
   local pkg="$1" dir="$2" check="$3" w="$W/$1"
   if [ "$(served "$pkg")" = "$VERSION" ]; then echo "AUR already serves $pkg $VERSION"; return 0; fi
@@ -83,7 +85,9 @@ push() {
   echo "AUR serves $pkg $VERSION"
 }
 
-# Both built before either is pushed: never sudostamp at the new version and the desktop at the old.
+# Both built before either is pushed: a desktop build that fails never leaves the AUR with sudostamp
+# at the new version and the desktop at the old. (A push that fails after the first succeeded still
+# can: run the script again, it skips what the AUR already serves.)
 build sudostamp packaging/aur usr/lib/sudostamp/install.sh
 build sudostamp-desktop packaging/aur-desktop usr/bin/sudostamp-desktop
 push sudostamp

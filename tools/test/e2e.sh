@@ -806,6 +806,20 @@ ask_u "--why 'e2e: nopasswd' -- touch /tmp/ask-nopw" >/dev/null 2>/tmp/ask8.err;
 rm -f /etc/sudoers.d/91-nopasswd
 check "a NOPASSWD rule for the runner: exit 75, says why, nothing ran (it would have run unasked)" \
   bash -c "[ $rc = 75 ] && grep -q NOPASSWD /tmp/ask8.err && [ ! -e /tmp/ask-nopw ]" || said "" /tmp/ask8.err
+# The same rule with listpw=always (which made `sudo -n -l` look like "a password is required").
+printf '%s\nDefaults:%s listpw=always\n' "$U ALL=(ALL) NOPASSWD: /usr/local/sbin/sudostamp-run" "$U" > /etc/sudoers.d/91-nopasswd
+chmod 0440 /etc/sudoers.d/91-nopasswd
+ask_u "--why 'e2e: nopasswd listpw' -- touch /tmp/ask-nopw" >/dev/null 2>/tmp/ask8b.err; rc=$?
+rm -f /etc/sudoers.d/91-nopasswd
+check "and with listpw=always too (no listing trick): exit 75, nothing ran" \
+  bash -c "[ $rc = 75 ] && [ ! -e /tmp/ask-nopw ]" || said "" /tmp/ask8b.err
+# A NOPASSWD rule for some other command is not the runner's: ask must still ask (and run).
+echo "$U ALL=(ALL) NOPASSWD: /bin/ls" > /etc/sudoers.d/91-nopasswd; chmod 0440 /etc/sudoers.d/91-nopasswd
+echo approve > /tmp/mode
+out="$(ask_u "--why 'e2e: unrelated nopasswd' -- id -u" 2>/tmp/ask8c.err)"; rc=$?
+rm -f /etc/sudoers.d/91-nopasswd
+check "a NOPASSWD rule for another command changes nothing: asked, approved, ran" \
+  bash -c "[ $rc = 0 ] && [ '$out' = 0 ]" || said "$out" /tmp/ask8c.err
 ask_u "--why \"\$(printf 'bad\\377byte')\" -- touch /tmp/ask-nopw" >/dev/null 2>/tmp/ask9.err; rc=$?
 check "a reason that is not UTF-8: exit 64 before anything is asked" bash -c "[ $rc = 64 ] && [ ! -e /tmp/ask-nopw ]" || said "" /tmp/ask9.err
 rm -f /tmp/run-ran

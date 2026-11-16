@@ -1394,7 +1394,7 @@ impl App {
                 if let Some(run) = &mut self.run {
                     run.stop();
                 }
-                self.setup.finished(None);
+                self.setup.cancelled();
             }
         }
         if close {

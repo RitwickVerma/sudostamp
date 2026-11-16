@@ -128,14 +128,16 @@ const LISTEN_MAX: u32 = 60;
 const LISTEN_WINDOW: Duration = Duration::from_secs(10);
 
 /// An event as sent is anybody's (any process of this user can write the socket); what sudo is
-/// doing is the kernel's. When `/proc/<pid>` is readable: it must be a `sudo` of this user, and
-/// its own command line replaces the one in the event, so a forged datagram cannot make a
-/// notification name a command that is not the one running. Unreadable (gone, or `hidepid`): the
-/// event as sent, which is all there is.
+/// doing is the kernel's. The pid must be a live `sudo` (or `sudoedit`) of this user, and its own
+/// command line replaces the one in the event, so a forged datagram cannot make a notification
+/// name a command that is not the one running. A pid that cannot be read is dropped (a forged
+/// event names a dead one), unless /proc hides every process but our own (`hidepid`, seen as
+/// pid 1 being unreadable), where the event as sent is all there is.
 fn checked(mut e: Event, proc_root: &Path) -> Option<Event> {
     let dir = proc_root.join(e.sudo_pid.to_string());
     let Ok(argv) = fs::read(dir.join("cmdline")) else {
-        return Some(e);
+        let hidepid = fs::read(proc_root.join("1").join("cmdline")).is_err();
+        return hidepid.then_some(e);
     };
     let me = fs::metadata(proc_root.join("self")).map(|m| m.uid()).ok();
     let theirs = fs::read_to_string(dir.join("status")).ok().and_then(|s| {
@@ -151,7 +153,7 @@ fn checked(mut e: Event, proc_root: &Path) -> Option<Event> {
     let is_sudo = words
         .first()
         .and_then(|w| w.rsplit(|b| *b == b'/').next())
-        .is_some_and(|b| b == b"sudo");
+        .is_some_and(|b| b == b"sudo" || b == b"sudoedit");
     if !is_sudo || (me.is_some() && theirs.is_some() && me != theirs) {
         return None;
     }
@@ -458,9 +460,24 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_process_keeps_the_event_as_sent() {
+    fn a_dead_pid_is_dropped_unless_proc_hides_everyone() {
+        // A forged event names a pid that does not exist: dropped while pid 1 is readable.
         let p = Proc::new("checked-gone");
-        let e = checked(asking(99, "sudo id"), p.root()).expect("kept");
+        p.cmdline(1, &["/sbin/init"]);
+        assert!(checked(asking(999_999, "sudo rm -rf / # approve me"), p.root()).is_none());
+        // hidepid: nothing but our own processes is readable, so the event is all there is.
+        let h = Proc::new("checked-hidepid");
+        let e = checked(asking(99, "sudo id"), h.root()).expect("kept");
         assert_eq!(e.command, "sudo id");
+    }
+
+    #[test]
+    fn sudoedit_is_sudo_too() {
+        let p = Proc::new("checked-sudoedit");
+        p.cmdline(55, &["sudoedit", "/etc/hosts"]);
+        assert_eq!(
+            checked(asking(55, "x"), p.root()).unwrap().command,
+            "sudoedit /etc/hosts"
+        );
     }
 }

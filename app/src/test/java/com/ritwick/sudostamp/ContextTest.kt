@@ -332,6 +332,14 @@ class ContextTest {
     }
 
     @Test
+    fun `a long reason is cut before the hash, which the history always keeps`() {
+        val why = "w".repeat(300)
+        val d = describeContext("sudo -k -- /usr/local/sbin/sudostamp-run $sha claude -- $why")
+        assertEquals(HISTORY_TEXT, d.codePointCount(0, d.length))
+        assertTrue(d, d.startsWith("claude: www") && d.endsWith("… (SHA-256 0123456789abcdef…)"))
+    }
+
+    @Test
     fun `only the installed runner is a run`() {
         // Anything else dressed as one is shown as the command it is (and its path with it).
         assertNull(parseRun("sudo -k -- sudostamp-run $sha claude -- update"))

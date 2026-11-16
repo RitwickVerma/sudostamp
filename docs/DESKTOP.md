@@ -43,8 +43,7 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
    - *skipped*: the probe found the phone away or paused: "Phone not reachable: password".
 3. **Pause on this computer.** Tray toggle: *Pause until resumed* / *for 1 hour*. While paused the
    probe exits non-zero before dialling the phone, so sudo goes straight to the password (and the
-   phone sees nothing). The flag lives in the user's `$XDG_RUNTIME_DIR` (tmpfs: a reboot or logout
-   resumes). Anyone running as the user can set it: the only effect is "use the password".
+   phone sees nothing). The flag lives in `/run/user/<uid>` (tmpfs: a reboot or logout resumes). Anyone running as the user can set it: the only effect is "use the password".
 4. **Pairing and repair window.** A small window (egui) that lists phones found on the network
    (`pair.py discover`, unprivileged), runs `pkexec /usr/bin/sudostamp setup --phone <addr> --json`,
    shows the 6-digit code entry when the installer asks for it, and shows the result including the
@@ -57,7 +56,8 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
 ## Interfaces (both sides build against exactly these)
 
 ### Event socket
-- Path: `$XDG_RUNTIME_DIR/sudostamp/events.sock`, a `SOCK_DGRAM` Unix socket created by the app
+- Path: `/run/user/<uid>/sudostamp/events.sock` (where the probe sends, whatever the app's
+  `XDG_RUNTIME_DIR` says), a `SOCK_DGRAM` Unix socket created by the app
   (directory mode 0700). Absent socket = no app = nothing happens.
 - Sender: the probe and its after-hook, **after dropping to the target user**
   (`setpriv --reuid=<uid> --regid=<gid> --init-groups` from util-linux). WHY: the path is under a
@@ -86,8 +86,7 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
   returns, the stack's result is unchanged.
 
 ### Pause flag
-- Path: `$XDG_RUNTIME_DIR/sudostamp/paused` for the target user, i.e.
-  `/run/user/<uid>/sudostamp/paused`. Content: empty = until resumed, or a decimal unix time =
+- Path: `/run/user/<uid>/sudostamp/paused` for the target user. Content: empty = until resumed, or a decimal unix time =
   paused until then. The probe checks it **as the user** (the same dropped helper), never following
   a path as root. Unreadable, malformed or in the past = not paused.
 
@@ -153,7 +152,11 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
   attention.
 - **Fix buttons** run `pkexec <installer> apply|stage [--phone <ip:port>]` and nothing else; a `fix`
   naming `setup` opens Pair a phone (the address filled in); any other text is shown to copy, never
-  run. The installer must be root-owned and writable by no one else, or the app refuses to pkexec it.
+  run. The installer must be root-owned and writable by no one else, and so must every directory
+  above it, or the app refuses to pkexec it; pkexec is /usr/bin/pkexec, never looked up in PATH.
+- **Events are checked against /proc**: the pid must be a live `sudo`/`sudoedit` of this user,
+  whose own command line replaces the datagram's (a pid that cannot be read is dropped, unless
+  /proc hides other processes); events beyond 60 per 10 s are dropped before they are queued.
 - **The window is its own process** (`sudostamp-desktop window`), so the tray loads no GL.
 
 ## Explicitly NOT doing (YAGNI)
