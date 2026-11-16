@@ -31,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 
 RUNNER = "/usr/local/sbin/sudostamp-run"
 PROBE = "/usr/local/sbin/sudostamp-probe"
@@ -102,11 +103,36 @@ def paused(uid, now=None, f=None):
     return int(c) > (time.time() if now is None else now)
 
 
+def printable(s):
+    """One line of plain text: valid UTF-8 and none of the characters that fake a line or reorder
+    text (controls, C1, format/bidi, line separators). The runner applies the same rule."""
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return all(unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn") for c in s)
+
+
+def asks_for_approval():
+    """True when sudo would authenticate before running the runner. A NOPASSWD rule (or
+    `!authenticate`) makes sudo skip PAM, and so the phone: then an `ask` must not run, because it
+    would run as root with nobody asked. `sudo -n -l <cmd>` succeeds exactly when no
+    authentication is needed for it; -k so a cached credential does not count."""
+    r = subprocess.run(["sudo", "-k", "-n", "-l", "--", RUNNER], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                       start_new_session=True)
+    return r.returncode != 0
+
+
 def ready(user, uid):
     """Raise Stop unless asking the phone now can be answered. Nothing here asks anything."""
     if not root_safe(RUNNER):
         raise Stop(NOT_READY, "ready", "%s is missing or not root-owned: run 'sudo sudostamp apply' "
                    "once to install it" % RUNNER)
+    if not asks_for_approval():
+        raise Stop(NOT_READY, "ready", "sudo here runs %s without asking anyone (a NOPASSWD rule or "
+                   "!authenticate in sudoers): the phone would never be asked, so this does not run. "
+                   "Remove that rule for this user to use sudostamp ask." % RUNNER)
     try:
         with open(PAM) as f:
             settings = block_settings(f.read())
@@ -329,8 +355,8 @@ def main(argv=None):
         if a.check:
             ready(user, uid)
             return finish(0, "ready", "ready: the phone answers with %s's key" % user)
-        if not a.why or not a.why.strip() or len(a.why) > 300 or any(ord(c) < 32 or ord(c) == 127 for c in a.why):
-            raise Stop(USAGE, "usage", "--why is required: one line, 300 characters at most")
+        if not a.why or not a.why.strip() or len(a.why) > 300 or not printable(a.why):
+            raise Stop(USAGE, "usage", "--why is required: one line of plain text, 300 characters at most")
         if not AGENT_RE.fullmatch(a.agent):
             raise Stop(USAGE, "usage", "--agent must match [a-z0-9][a-z0-9._-]{0,31}")
         body = build(a)
@@ -350,8 +376,12 @@ def main(argv=None):
             why = "not approved in time" if timed_out else "not approved (denied, timed out or no phone)"
             return finish(NOT_APPROVED, "approval", "%s: nothing ran" % why, sha, out, "".join(err))
         if timed_out:
-            return finish(124, "run", "stopped after %d s" % a.timeout, sha, out, "".join(err))
-        return finish(rc, "run", "" if rc == 0 else "the script exited %d" % rc, sha, out, "".join(err))
+            return finish(124, "run", "asked to stop after %d s; a script that ignores the stop may "
+                          "still be running as root" % a.timeout, sha, out, "".join(err))
+        # The script's own status, which can be any number, 75 and 77 included: say plainly that it
+        # ran, so a reader of plain mode never takes a script's 77 for "not approved" (--json has
+        # the stage).
+        return finish(rc, "run", "ran; the script exited %d" % rc, sha, out, "".join(err))
     except Stop as s:
         return finish(s.code, s.stage, s.reason)
     except (OSError, subprocess.SubprocessError) as e:

@@ -12,10 +12,12 @@ fn absolute(v: Option<String>) -> Option<PathBuf> {
     v.map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
-/// `$XDG_RUNTIME_DIR/sudostamp`, the directory of the event socket and the pause flag. No runtime
-/// directory (no login session) means there is nothing to do: refuse rather than guess a /tmp path.
-pub fn runtime_dir(env: Env) -> Option<PathBuf> {
-    absolute(env("XDG_RUNTIME_DIR")).map(|d| d.join("sudostamp"))
+/// `/run/user/<uid>/sudostamp`, the directory of the event socket and the pause flag: exactly where
+/// the probe looks (it knows the uid, not this process's environment). An `XDG_RUNTIME_DIR` that
+/// says otherwise (su without a login, an inherited environment) would have the tray listen and
+/// pause where sudo never looks.
+pub fn runtime_dir(uid: u32) -> PathBuf {
+    PathBuf::from(format!("/run/user/{uid}/sudostamp"))
 }
 
 pub fn socket(runtime: &Path) -> PathBuf {
@@ -87,8 +89,9 @@ mod tests {
 
     #[test]
     fn runtime_and_state() {
-        let e = env(&[("XDG_RUNTIME_DIR", "/run/user/1000"), ("HOME", "/home/a")]);
-        let r = runtime_dir(&e).unwrap();
+        // The probe's path for the uid, whatever XDG_RUNTIME_DIR says.
+        let e = env(&[("XDG_RUNTIME_DIR", "/elsewhere"), ("HOME", "/home/a")]);
+        let r = runtime_dir(1000);
         assert_eq!(r, PathBuf::from("/run/user/1000/sudostamp"));
         assert_eq!(
             socket(&r),
@@ -108,8 +111,6 @@ mod tests {
 
     #[test]
     fn relative_or_missing_paths_are_refused() {
-        assert_eq!(runtime_dir(&env(&[])), None);
-        assert_eq!(runtime_dir(&env(&[("XDG_RUNTIME_DIR", "run/x")])), None);
         assert_eq!(
             state_dir(&env(&[("XDG_STATE_HOME", "rel"), ("HOME", "rel")])),
             None

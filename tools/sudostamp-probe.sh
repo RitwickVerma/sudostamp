@@ -166,9 +166,10 @@ emit() {
 # Exit 0: the phone offers a pinned key. 2: it answers but offers none (the caller turns that
 # into 1; it only picks the notification's reason). Anything else: 1.
 #
-# $1 = a pid whose command line describes this sudo, or empty. When the phone offers the key,
-# that description goes to the phone on the same connection (extension context-v1@sudostamp)
-# so its approval can say what it is for (docs/AGENTS-SUDO.md). It is a courtesy: whatever the
+# $1 = a pid whose command line describes this sudo, or empty. When the phone offers the key and
+# that command line is an agent's run (sudostamp ask), it goes to the phone on the same connection
+# (extension context-v1@sudostamp) so its approval can say what it is for (docs/AGENTS-SUDO.md).
+# Nothing else is sent: an ordinary command line can hold a password. It is a courtesy: whatever the
 # phone answers, or fails to, the exit status is the same, and it never adds to the 4 s.
 phone_check() {
 python3 -I - "$PHONE" "$KEYFILE" "${1:-}" <<'PY'
@@ -179,23 +180,36 @@ end = time.monotonic() + BUDGET
 
 
 def describe(s, rx, pid):
-    # sudo's command line, as the desktop event has it: NUL-separated argv joined by spaces,
-    # control characters shown as "?", 512 characters. The phone cleans it again (it is input
-    # there too); this only keeps the frame small and honest.
+    # Only an agent's run is described: `sudo [-k] [--] /usr/local/sbin/sudostamp-run <sha256>
+    # <agent> -- <why>`, which is made to be shown (a hash, a name, a reason the agent wrote for
+    # the person). Any other command line can carry a password (`mysql -p...`, a token) and the
+    # LAN connection is plain TCP to whatever holds the phone's address, so it is never sent.
+    # The phone cleans the text again (it is input there too).
     if not pid.isdigit():
         return
     with open("/proc/%s/cmdline" % pid, "rb") as f:
-        argv = f.read(65536)
-    text = argv.rstrip(b"\0").replace(b"\0", b" ").decode("utf-8", "replace")
-    text = "".join("?" if ord(c) < 32 or 0x7f <= ord(c) < 0xa0 else c for c in text)[:512]
-    if not text:
+        argv = f.read(65536).rstrip(b"\0").split(b"\0")
+    i = 1 if argv and argv[0].rsplit(b"/", 1)[-1] == b"sudo" else 0
+    if i == 0:
         return
+    if argv[i:i + 1] == [b"-k"]:
+        i += 1
+    if argv[i:i + 1] == [b"--"]:
+        i += 1
+    run = argv[i:]
+    if (len(run) < 5 or run[0] != b"/usr/local/sbin/sudostamp-run" or run[3] != b"--"
+            or len(run[1]) != 64 or run[1].strip(b"0123456789abcdef")):
+        return
+    text = b" ".join(argv).decode("utf-8", "replace")
+    text = "".join("?" if ord(c) < 32 or 0x7f <= ord(c) < 0xa0 else c for c in text)[:512]
     name, cmd = b"context-v1@sudostamp", text.encode("utf-8")
     payload = bytes([27]) + struct.pack(">I", len(name)) + name + struct.pack(">I", len(cmd)) + cmd
     global end
     end = min(end, time.monotonic() + 0.5)       # the answer may take half a second, no more
     s.sendall(struct.pack(">I", len(payload)) + payload)
-    rx(struct.unpack(">I", rx(4))[0])            # SUCCESS or FAILURE: either is fine
+    n = struct.unpack(">I", rx(4))[0]            # SUCCESS or FAILURE: either is fine; read a
+    if n <= 16:                                  # sane answer, never a huge one
+        rx(n)
 
 
 try:

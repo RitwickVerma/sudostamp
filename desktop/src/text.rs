@@ -4,19 +4,43 @@
 //! mDNS name are text somebody else chose. None of it is trusted: it is shown as plain text, with
 //! the characters that can forge a line or reorder it replaced.
 
-/// Controls, line separators and the invisible or direction-changing characters that let one
-/// string pose as another (a right-to-left override can make `sudo rm -rf x` read differently).
+/// Controls, line separators and the invisible, blank-looking or direction-changing characters
+/// that let one string pose as another (a right-to-left override can make `sudo rm -rf x` read
+/// differently; a Hangul filler or a variation selector hides text). std has no Unicode general
+/// category, so these are the Cf, Zl, Zp and default-ignorable code points, listed.
 fn spoofs(c: char) -> bool {
     c.is_control()
         || matches!(c as u32,
-            0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB)
+            0x00AD | 0x034F | 0x061C | 0x0600..=0x0605 | 0x06DD | 0x070F | 0x0890..=0x0891
+            | 0x08E2 | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F | 0x200B..=0x200F
+            | 0x2028..=0x202E | 0x2060..=0x206F | 0x2800 | 0x3164 | 0xFE00..=0xFE0F | 0xFEFF
+            | 0xFFA0 | 0xFFF0..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)
 }
 
-/// `s` cut to `max` characters with every spoofing character replaced by `?`.
+/// Spaces other than the ASCII one (no-break, wide, thin): shown as a plain space, so a gap cannot
+/// pose as the end of a line or hide how far apart words are.
+fn odd_space(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00A0 | 0x1680 | 0x2000..=0x200A | 0x202F | 0x205F | 0x3000
+    )
+}
+
+/// `s` cut to `max` characters with every spoofing character replaced by `?` and every odd space
+/// by a plain one.
 pub fn clean(s: &str, max: usize) -> String {
     s.chars()
         .take(max)
-        .map(|c| if spoofs(c) { '?' } else { c })
+        .map(|c| {
+            if spoofs(c) {
+                '?'
+            } else if odd_space(c) {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -40,7 +64,9 @@ fn describe_run(command: &str) -> Option<String> {
     if t == "--" {
         t = w.next()?;
     }
-    if t.rsplit('/').next()? != "sudostamp-run" {
+    // The installed runner and nothing else: a `sudostamp-run` anywhere else is somebody's
+    // program dressed as an agent's run, and is shown as the command line it is.
+    if t != "/usr/local/sbin/sudostamp-run" {
         return None;
     }
     let sha = w.next()?;
@@ -137,10 +163,35 @@ mod tests {
             format!("sudo -k -- /usr/local/sbin/sudostamp-run {sha} hermes x"),
             format!("sudo -k -- /usr/local/sbin/sudostamp-run {sha} hermes --"),
             format!("doas /usr/local/sbin/sudostamp-run {sha} hermes -- x"),
+            // Only the installed runner: one anywhere else is shown as the command it is.
+            format!("sudo -k -- /tmp/evil/sudostamp-run {sha} backup -- nightly snapshot"),
+            format!("sudo -k -- sudostamp-run {sha} backup -- nightly snapshot"),
             "sudo pacman -Syu".to_string(),
             String::new(),
         ] {
             assert_eq!(describe(&bad), bad, "{bad}");
         }
+    }
+
+    #[test]
+    fn hidden_and_blank_looking_characters_are_shown() {
+        // Each of these renders as nothing or as blank space: a filler, a variation selector, a
+        // tag, the Arabic letter mark, a soft hyphen, a Braille blank.
+        for c in [
+            '\u{3164}',
+            '\u{FE0F}',
+            '\u{E0041}',
+            '\u{061C}',
+            '\u{00AD}',
+            '\u{2800}',
+            '\u{034F}',
+        ] {
+            assert_eq!(clean(&format!("a{c}b"), 10), "a?b", "U+{:04X}", c as u32);
+        }
+        assert_eq!(clean("a\u{00A0}b\u{3000}c", 10), "a b c");
+        assert_eq!(
+            clean("plain ascii, é and 日本", 64),
+            "plain ascii, é and 日本"
+        );
     }
 }

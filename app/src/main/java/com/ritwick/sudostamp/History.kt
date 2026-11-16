@@ -195,7 +195,7 @@ class History(private val file: File? = null, private val max: Int = MAX) {
 
     private fun mergeable(top: HistoryEntry, e: HistoryEntry): Boolean =
         top.verdict == Verdict.REFUSED && e.verdict == Verdict.REFUSED &&
-            top.refusal == e.refusal && top.hostId == e.hostId &&
+            top.refusal == e.refusal && top.hostId == e.hostId && top.command == e.command &&
             (e.refusal == Refusal.OUTSIDE_LAN || top.peer == e.peer) &&
             e.at - top.at in 0 until COALESCE_WINDOW_MS &&
             top.count < 9_999

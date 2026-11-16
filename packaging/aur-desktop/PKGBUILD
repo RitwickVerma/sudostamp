@@ -10,7 +10,9 @@ pkgrel=1
 pkgdesc="SudoStamp on the desktop: tray status, sudo notifications, pause, pairing and health"
 arch=('x86_64' 'aarch64')
 url="https://gitlab.com/ritwick7/sudostamp"
-license=('MIT' 'Apache-2.0')
+# MIT (the app), Apache-2.0 (the fingerprint glyph), and the fonts egui builds in: OFL-1.1 and
+# Ubuntu-font-1.0 (see NOTICE).
+license=('MIT' 'Apache-2.0' 'OFL-1.1' 'LicenseRef-Ubuntu-Font-1.0')
 # The window opens Wayland/X11, EGL and xkbcommon at run time (not linked), hence named here.
 depends=('sudostamp' 'polkit' 'gcc-libs' 'glibc' 'hicolor-icon-theme' 'libglvnd' 'libxkbcommon' 'wayland')
 makedepends=('cargo')
@@ -27,13 +29,12 @@ _src() { cd "$srcdir"/sudostamp-v"$pkgver"*/desktop; }
 
 prepare() {
   _src
-  export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
   _src
-  export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
+  export CARGO_TARGET_DIR=target
   cargo build --frozen --release
 }
 

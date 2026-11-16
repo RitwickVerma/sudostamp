@@ -65,6 +65,10 @@ fn parse_line(line: &str) -> Option<Entry> {
 
 /// The last `KEEP` valid entries, oldest first.
 pub fn read(path: &Path) -> Vec<Entry> {
+    // A regular file or nothing: a planted FIFO would block whoever opens it.
+    if !fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return Vec::new();
+    }
     let Ok(mut f) = fs::File::open(path) else {
         return Vec::new();
     };
@@ -96,6 +100,9 @@ pub fn append(path: &Path, e: &Entry) -> io::Result<()> {
             .mode(0o700)
             .create(dir)?;
     }
+    if fs::symlink_metadata(path).is_ok_and(|m| !m.is_file()) {
+        return Err(io::Error::other("the history path is not a regular file"));
+    }
     let mut f = fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -111,10 +118,10 @@ pub fn append(path: &Path, e: &Entry) -> io::Result<()> {
 
 fn compact(path: &Path) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
+    let _ = fs::remove_file(&tmp);
     let mut f = fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&tmp)?;
     for e in read(path) {

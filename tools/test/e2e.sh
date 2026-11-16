@@ -797,6 +797,25 @@ check "runner: a bad agent name, or no reason: exit 64, nothing ran" bash -c "[ 
 check "runner: the matching script runs" bash -c "[ $rc = 0 ] && [ -e /tmp/run-ran ]"
 python3 -I "$W/tools/ask.py" --why x -- true >/dev/null 2>&1; rc=$?
 check "ask as root refuses (exit 64): it is for a user asking for root" test "$rc" = 64
+# Audit fixes (1.6 review): each is a hole that was found, so each has its test.
+c0=$(grep -c '^context:' /tmp/p7811.log)
+check "an ordinary sudo sends the phone no description (a command line can hold a password)" \
+  bash -c "as_user_sudo() { su $U -c \"sudo -k; sudo -S -p '' true </dev/null\" >/dev/null 2>&1; }; as_user_sudo; [ \$(grep -c '^context:' /tmp/p7811.log) = $c0 ]"
+echo "$U ALL=(ALL) NOPASSWD: /usr/local/sbin/sudostamp-run" > /etc/sudoers.d/91-nopasswd; chmod 0440 /etc/sudoers.d/91-nopasswd
+ask_u "--why 'e2e: nopasswd' -- touch /tmp/ask-nopw" >/dev/null 2>/tmp/ask8.err; rc=$?
+rm -f /etc/sudoers.d/91-nopasswd
+check "a NOPASSWD rule for the runner: exit 75, says why, nothing ran (it would have run unasked)" \
+  bash -c "[ $rc = 75 ] && grep -q NOPASSWD /tmp/ask8.err && [ ! -e /tmp/ask-nopw ]" || said "" /tmp/ask8.err
+ask_u "--why \"\$(printf 'bad\\377byte')\" -- touch /tmp/ask-nopw" >/dev/null 2>/tmp/ask9.err; rc=$?
+check "a reason that is not UTF-8: exit 64 before anything is asked" bash -c "[ $rc = 64 ] && [ ! -e /tmp/ask-nopw ]" || said "" /tmp/ask9.err
+rm -f /tmp/run-ran
+"$R" "$RS" e2e -- "$(printf 'fine\342\200\256 evil')" < /tmp/run.sh >/dev/null 2>&1; rc=$?
+check "runner: a reason with a bidi override is refused (exit 64), nothing ran" bash -c "[ $rc = 64 ] && [ ! -e /tmp/run-ran ]"
+check "through pkexec (no SUDO_USER, PKEXEC_UID set) the installer knows the user" \
+  bash -c "env -u SUDO_USER -u SUDOSTAMP_USER PKEXEC_UID=$UID_T bash '$I' doctor --json 2>/dev/null | grep -q '\"user: $U\"'"
+check "and a PKEXEC_UID of 0 is not taken" \
+  bash -c "env -u SUDO_USER -u SUDOSTAMP_USER PKEXEC_UID=0 bash '$I' doctor --json 2>/dev/null | grep -q '\"id\":\"user\",\"status\":\"warn\"'"
+rm -f /tmp/ask-nopw
 rm -f /tmp/run.sh /tmp/run-ran /tmp/ask-script /tmp/ask-denied /tmp/ask*.json /tmp/ask-json-check.py
 
 step "12i. with the phone gone the desktop hears skipped (away)"

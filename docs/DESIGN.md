@@ -153,32 +153,35 @@ only a request the app makes.
 
 pam_rssh signs an opaque 32-byte challenge, so on its own the phone can say only which computer
 is asking. The host probe (`tools/sudostamp-probe.sh`) already opens its own short connection to
-the phone right before pam_rssh; on it, after `REQUEST_IDENTITIES`, it now also sends one
-extension frame: type 27, the SSH string `context-v1@sudostamp`, then one SSH string, the
-command: sudo's argv joined with spaces. The phone answers `SSH2_AGENT_SUCCESS` when it stored
-it and `SSH2_AGENT_FAILURE` otherwise (an older phone answers FAILURE from its pairing branch,
-and the host ignores that).
+the phone right before pam_rssh; on it, after `REQUEST_IDENTITIES`, and only for an agent's run
+(sudo's argv is `sudo [-k] [--] /usr/local/sbin/sudostamp-run <sha256> <agent> -- <why>`), it
+also sends one extension frame: type 27, the SSH string `context-v1@sudostamp`, then one SSH
+string, that command line. An ordinary sudo's command line is never sent: it can hold a password,
+and the connection is plain TCP to whatever holds the phone's address. The phone answers
+`SSH2_AGENT_SUCCESS` when it stored it and `SSH2_AGENT_FAILURE` otherwise (an older phone answers
+FAILURE from its pairing branch, and the host ignores that and reads at most a short answer).
 
 - **Parsing** (`AgentProtocol.parseContext`): exactly one string and nothing after it, at most
-  2048 bytes, strict UTF-8 (malformed is refused, not repaired). Every C0 and C1 control, DEL and
-  the invisible or bidirectional format characters (U+200B-200F, U+2028-202E, U+2060-2069,
-  U+061C, U+FEFF) become `?`, so the text shown is what the bytes are (no right-to-left override
-  can make one command read as another). Nothing else is collapsed; the text is trimmed and cut
-  to 512 code points, ending in an ellipsis when cut.
-- **Holding** (`ContextBox`, pure, in `Context.kt`): per client address, for 15 s, **single
-  use**. The first description wins; the same text again changes nothing and does not extend the
-  time; a **different** one while one is pending marks the address **conflicted**. At most 16
-  addresses, the oldest dropped first.
+  2048 bytes, strict UTF-8 (malformed is refused, not repaired). Controls, format characters
+  (bidi, zero-width, tags), line and paragraph separators, surrogates, private use, unassigned
+  code points and the blank-looking default-ignorables (fillers, variation selectors, the Braille
+  blank) become `?`; spaces other than U+0020 become a plain space. So the text shown is what the
+  bytes are. Trimmed and cut to 512 code points, ending in an ellipsis when cut.
+- **Holding** (`ContextBox`, pure, in `Context.kt`): per client address, for 5 s, **single use**.
+  The first description wins; the same text again changes nothing and does not extend the time; a
+  **different** one while one is pending marks the address **conflicted**. At most 16 addresses,
+  the oldest dropped first (a flood of addresses can only make a description go missing).
 - **Using**: on the next `SIGN_REQUEST` from that address the service takes the description once,
-  right after reading the frame, so a request that is refused unprompted consumes it too. The
-  approval screen shows it above "Request from", the notification shows it only in its private
-  form (the lock screen keeps the generic text), and the history keeps it. For a conflict the
-  screen shows a warning and no text. A command shaped like the host tool's script run
-  (`sudo [-k] [--] .../sudostamp-run <sha256> <agent> -- <why>`) is shown as the agent, its
-  reason and the first 16 hex digits of the script's hash; any other command is shown as is.
-- **Advisory, always**: a program running as the user on that computer can send any description,
-  and the screen says so under it. Nothing about whether a request is refused, rate-limited or
-  approved depends on it: it is only handed on to the prompt, the notification and the history.
+  right after reading the frame, so a request that is refused unprompted consumes it too (and is
+  stored without it). The approval screen shows it above "Request from", attributed to that
+  address, a few lines at most and left to right; the notification never carries it (a locked
+  screen, a watch or a notification listener could read it); the history keeps it with the hash.
+  For a conflict the screen shows a red warning and no text. Only the installed runner's path is
+  read as an agent's run (agent, reason, first 16 hex digits of the hash); anything else is shown
+  as the command it is.
+- **Advisory, always**: any program on that computer, or any device on the LAN, can send a
+  description, and the screen says so under it. Nothing about whether a request is refused,
+  rate-limited or approved depends on it.
 
 ## Pairing, version 2
 

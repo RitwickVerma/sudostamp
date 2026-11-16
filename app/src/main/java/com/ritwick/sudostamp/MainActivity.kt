@@ -1015,7 +1015,7 @@ class MainActivity : Activity() {
             }, matchWrap())
             addView(left, matchWrap(top = dp(6)))
 
-            val asked = askedToRun(p, name)
+            val asked = askedToRun(p)
             if (asked != null) addView(asked, matchWrap(top = dp(18)))
             addView(card().apply {
                 addView(field(getString(R.string.approval_from), p.client, mono = true))
@@ -1073,7 +1073,7 @@ class MainActivity : Activity() {
      * so this is never a reason to approve, only a way to spot a mismatch. Two different
      * descriptions are shown as a warning and no text at all.
      */
-    private fun askedToRun(p: Approval, name: String): View? {
+    private fun askedToRun(p: Approval): View? {
         if (p.contextConflicted) {
             val msg = getString(R.string.approval_ctx_conflict)
             // Red, not the amber of the first-request note: two stories for one request means
@@ -1092,7 +1092,9 @@ class MainActivity : Activity() {
         }
         val command = p.context ?: return null
         val run = parseRun(command)
-        val advisory = getString(R.string.approval_ctx_advisory, name)
+        // Attributed to the address it came from, not to the computer's name: anything on the LAN
+        // can send a description, and only the address is known to be where this one came from.
+        val advisory = getString(R.string.approval_ctx_advisory, p.client)
         val said = if (run != null) "${getString(R.string.approval_ctx_agent, run.agent)}. ${run.why}. " +
             getString(R.string.approval_ctx_script, run.shortSha) else command
         return card().apply {
@@ -1100,11 +1102,14 @@ class MainActivity : Activity() {
             if (run != null) {
                 // Who and why on one line; then the one thing that can be checked against what the
                 // agent said it ran, the script's hash, at full contrast.
-                addView(text(getString(R.string.approval_ctx_run, run.agent, run.why), Type.LABEL), matchWrap(top = dp(8)))
+                addView(text(getString(R.string.approval_ctx_run, run.agent, run.why), Type.LABEL).apply {
+                    clamp(3)
+                }, matchWrap(top = dp(8)))
                 addView(text(getString(R.string.approval_ctx_script, run.shortSha), Type.CODE), matchWrap(top = dp(8)))
             } else {
                 addView(text(command, Type.CODE).apply {
                     breakStrategy = android.graphics.text.LineBreaker.BREAK_STRATEGY_SIMPLE
+                    clamp(4)
                 }, matchWrap(top = dp(8)))
             }
             addView(text(advisory, Type.CAPTION, Ui.MUTED), matchWrap(top = dp(10)))
@@ -1112,6 +1117,15 @@ class MainActivity : Activity() {
             isScreenReaderFocusable = true
             HistoryScreen.hideChildren(this)
         }
+    }
+
+    /** A description is someone else's text: a few lines at most (it must not push the buttons
+     *  away), read left to right whatever letters it holds (right-to-left text must not reorder
+     *  the words around it). */
+    private fun TextView.clamp(lines: Int) {
+        maxLines = lines
+        ellipsize = android.text.TextUtils.TruncateAt.END
+        textDirection = View.TEXT_DIRECTION_LTR
     }
 
     // ------------------------------------------------------------------ result

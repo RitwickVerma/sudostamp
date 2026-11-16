@@ -91,9 +91,18 @@ class ContextTest {
         for (b in bad) assertNull(b.joinToString(" ") { "%02x".format(it) }, parse(str(b)))
     }
 
-    private fun forbidden(cp: Int): Boolean =
-        cp <= 0x1F || cp in 0x7F..0x9F || cp in 0x200B..0x200F || cp in 0x2028..0x202E ||
-            cp in 0x2060..0x2069 || cp == 0x061C || cp == 0xFEFF
+    // The rule, stated from the Unicode side (AgentProtocol.invisible): controls, format, line and
+    // paragraph separators, surrogates, private use, unassigned, and the default-ignorable or
+    // blank-looking characters that are none of those.
+    private fun forbidden(cp: Int): Boolean = when (Character.getType(cp)) {
+        Character.CONTROL.toInt(), Character.FORMAT.toInt(), Character.LINE_SEPARATOR.toInt(),
+        Character.PARAGRAPH_SEPARATOR.toInt(), Character.SURROGATE.toInt(),
+        Character.PRIVATE_USE.toInt(), Character.UNASSIGNED.toInt() -> true
+        else -> cp in setOf(0x034F, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x17B4, 0x17B5, 0x2800) ||
+            cp in 0x180B..0x180F || cp in 0xFE00..0xFE0F || cp in 0xE0100..0xE01EF
+    }
+
+    private fun oddSpace(cp: Int) = cp != 0x20 && Character.getType(cp) == Character.SPACE_SEPARATOR.toInt()
 
     @Test
     fun `every control and invisible character class becomes a visible question mark`() {
@@ -120,9 +129,19 @@ class ContextTest {
     }
 
     @Test
-    fun `ordinary characters next to the stripped ones survive`() {
-        // U+00A0 and U+3000 are spaces, not controls; U+00AD (soft hyphen) and U+0301 are left alone.
-        assertEquals("a\u00a0b\u3000c\u00add\u00e9\u0301", parseText("a\u00a0b\u3000c\u00add\u00e9\u0301"))
+    fun `odd spaces become plain ones, ordinary letters and marks survive`() {
+        // U+00A0 and U+3000 could fake a gap or a line end: a plain space. U+00AD (soft hyphen) is a
+        // format character, hidden when rendered: '?'. Accented letters and combining marks stay.
+        assertEquals("a b c?d\u00e9\u0301", parseText("a\u00a0b\u3000c\u00add\u00e9\u0301"))
+    }
+
+    @Test
+    fun `blank-looking and hidden characters the audit found are visible`() {
+        // A Hangul filler, a variation selector, a tag letter (hidden ASCII), the Braille blank,
+        // the combining grapheme joiner, the Mongolian vowel separator, private use, unassigned.
+        for (cp in listOf(0x3164, 0xFE0F, 0xE0041, 0x2800, 0x034F, 0x180E, 0xE000, 0x0378)) {
+            assertEquals("U+%04X".format(cp), "a?b", parseText("a" + String(Character.toChars(cp)) + "b"))
+        }
     }
 
     @Test
@@ -263,53 +282,63 @@ class ContextTest {
         assertEquals(want, parseRun("sudo -k /usr/local/sbin/sudostamp-run $sha claude -- update the packages"))
         assertEquals(want, parseRun("sudo -- /usr/local/sbin/sudostamp-run $sha claude -- update the packages"))
         assertEquals(want, parseRun("sudo /usr/local/sbin/sudostamp-run $sha claude -- update the packages"))
-        assertEquals(want, parseRun("/usr/bin/sudo sudostamp-run $sha claude -- update the packages"))
+        assertEquals(want, parseRun("/usr/bin/sudo /usr/local/sbin/sudostamp-run $sha claude -- update the packages"))
     }
 
     @Test
     fun `the reason keeps its own spacing`() {
-        assertEquals("a  b -- c", parseRun("sudo sudostamp-run $sha x -- a  b -- c")?.why)
+        assertEquals("a  b -- c", parseRun("sudo /usr/local/sbin/sudostamp-run $sha x -- a  b -- c")?.why)
     }
 
     @Test
     fun `a script run needs sudo, the tool and a 64 character lowercase hash`() {
-        assertNull(parseRun("doas sudostamp-run $sha claude -- why"))
+        assertNull(parseRun("doas /usr/local/sbin/sudostamp-run $sha claude -- why"))
         assertNull(parseRun("sudo other-tool $sha claude -- why"))
-        assertNull(parseRun("sudo sudostamp-run ${sha.dropLast(1)} claude -- why"))
-        assertNull(parseRun("sudo sudostamp-run ${sha}0 claude -- why"))
-        assertNull(parseRun("sudo sudostamp-run ${sha.uppercase()} claude -- why"))
-        assertNull(parseRun("sudo sudostamp-run ${sha.dropLast(1)}g claude -- why"))
-        assertNull(parseRun("sudo -k -k sudostamp-run $sha claude -- why"))
-        assertNull(parseRun("sudo -- -k sudostamp-run $sha claude -- why"))
-        assertNull(parseRun("sudo -u root sudostamp-run $sha claude -- why"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run ${sha.dropLast(1)} claude -- why"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run ${sha}0 claude -- why"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run ${sha.uppercase()} claude -- why"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run ${sha.dropLast(1)}g claude -- why"))
+        assertNull(parseRun("sudo -k -k /usr/local/sbin/sudostamp-run $sha claude -- why"))
+        assertNull(parseRun("sudo -- -k /usr/local/sbin/sudostamp-run $sha claude -- why"))
+        assertNull(parseRun("sudo -u root /usr/local/sbin/sudostamp-run $sha claude -- why"))
     }
 
     @Test
     fun `the agent name follows its pattern`() {
         for (ok in listOf("a", "0", "claude-code", "a.b_c-d", "a".repeat(32))) {
-            assertEquals(ok, ok, parseRun("sudo sudostamp-run $sha $ok -- why")?.agent)
+            assertEquals(ok, ok, parseRun("sudo /usr/local/sbin/sudostamp-run $sha $ok -- why")?.agent)
         }
         for (bad in listOf("A", "-a", ".a", "_a", "a".repeat(33), "a/b", "a b", "\u00e9", "")) {
-            assertNull(bad, parseRun("sudo sudostamp-run $sha $bad -- why"))
+            assertNull(bad, parseRun("sudo /usr/local/sbin/sudostamp-run $sha $bad -- why"))
         }
     }
 
     @Test
     fun `the reason is required`() {
-        assertNull(parseRun("sudo sudostamp-run $sha claude --"))
-        assertNull(parseRun("sudo sudostamp-run $sha claude -- "))
-        assertNull(parseRun("sudo sudostamp-run $sha claude -- \u00a0"))
-        assertNull(parseRun("sudo sudostamp-run $sha claude why"))
-        assertNull(parseRun("sudo sudostamp-run $sha claude"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run $sha claude --"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run $sha claude -- "))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run $sha claude -- \u00a0"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run $sha claude why"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run $sha claude"))
     }
 
     @Test
     fun `extra spaces between the structural tokens are not a script run`() {
-        assertNull(parseRun("sudo  sudostamp-run $sha claude -- why"))
-        assertNull(parseRun("sudo sudostamp-run  $sha claude -- why"))
-        assertNull(parseRun("sudo sudostamp-run $sha  claude -- why"))
-        assertNull(parseRun("sudo sudostamp-run $sha claude  -- why"))
-        assertNull(parseRun(" sudo sudostamp-run $sha claude -- why"))
+        assertNull(parseRun("sudo  /usr/local/sbin/sudostamp-run $sha claude -- why"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run  $sha claude -- why"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run $sha  claude -- why"))
+        assertNull(parseRun("sudo /usr/local/sbin/sudostamp-run $sha claude  -- why"))
+        assertNull(parseRun(" sudo /usr/local/sbin/sudostamp-run $sha claude -- why"))
+    }
+
+    @Test
+    fun `only the installed runner is a run`() {
+        // Anything else dressed as one is shown as the command it is (and its path with it).
+        assertNull(parseRun("sudo -k -- sudostamp-run $sha claude -- update"))
+        assertNull(parseRun("sudo -k -- /tmp/evil/sudostamp-run $sha claude -- update"))
+        assertNull(parseRun("sudo -k -- /usr/local/sbin/sudostamp-run.sh $sha claude -- update"))
+        val fake = "sudo -k -- /home/u/sudostamp-run $sha backup -- nightly snapshot"
+        assertEquals(fake, describeContext(fake))
     }
 
     @Test
@@ -326,7 +355,10 @@ class ContextTest {
 
     @Test
     fun `the one-line description is agent and reason, or the command`() {
-        assertEquals("claude: update", describeContext("sudo -k -- /x/sudostamp-run $sha claude -- update"))
+        assertEquals(
+            "claude: update (SHA-256 0123456789abcdef…)",
+            describeContext("sudo -k -- /usr/local/sbin/sudostamp-run $sha claude -- update")
+        )
         assertEquals("sudo pacman -Syu", describeContext("sudo pacman -Syu"))
     }
 }
