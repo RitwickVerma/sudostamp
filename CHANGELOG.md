@@ -13,16 +13,17 @@ SudoStamp on the desktop, and a safe way for agents to ask for root.
   (`sudo -k`), never drops to a password prompt nobody can answer (exit 77, nothing ran), and runs
   exactly the script whose SHA-256 the approval named: the root runner `sudostamp-run` takes it only
   on stdin, checks the hash, and keeps a root-only copy of what ran. `--json` for programs.
+  Where a NOPASSWD rule would let sudo skip the phone, it refuses (75) instead of running unasked.
 - **The agent, the reason and the script's hash are in sudo's own command line**, so sudo's log, the
   desktop notification ("hermes: rebuild pam_rssh (script a3f9c2d1e0b7a44c…)") and the phone all show them.
 - docs/AGENTS-SUDO.md: how to use it, exit codes, and what the description does and does not guarantee.
 
 ### Phone
-- **The approval says what a sudo is for** when the computer tells it (`context-v1@sudostamp`, sent
-  by the 1.6 probe): for an agent's run, the agent, its reason and the script's SHA-256; otherwise
-  the command. Always labelled as the computer's own report, since a program running as you there
-  could report something else. Two different descriptions for one request show a red warning and
-  neither text. The notification carries it but keeps it off the lock screen, and the history lists it.
+- **The approval says what an agent's sudo is for** (`context-v1@sudostamp`, sent by the 1.6 probe
+  for `sudostamp ask` runs only, never an ordinary command line): the agent, its reason and the
+  script's SHA-256, labelled as a report from the computer's address that nothing verifies. Two
+  different descriptions for one request show a red warning and neither text. It is on the approval
+  screen only, never in the notification, and the history lists it with the hash.
 - A phone with 1.6 works with older computers, and a 1.6 computer with older phones: neither
   side depends on the description.
 

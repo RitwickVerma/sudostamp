@@ -21,7 +21,10 @@ class ContextBox(private val ttlMs: Long = TTL_MS, private val maxClients: Int =
 
     companion object {
         /** From the probe's description to pam_rssh's sign request is well under a second; this is slack. */
-        const val TTL_MS = 15_000L
+        // The probe sends its description a few milliseconds before pam_rssh's request (the local
+        // reader, if any, is asked BEFORE the probe): 5 s is ample, and a description left over from
+        // a sudo that never asked cannot linger long enough to be pinned on the next one.
+        const val TTL_MS = 5_000L
         const val MAX_CLIENTS = 16
     }
 
@@ -91,7 +94,9 @@ fun parseRun(command: String): Run? {
     i++
     if (t.getOrNull(i) == "-k") i++
     if (t.getOrNull(i) == "--") i++
-    if (t.getOrNull(i)?.let(::base) != "sudostamp-run") return null
+    // The installed runner and nothing else: a `sudostamp-run` anywhere else is somebody's program
+    // dressed as an agent's run, and is shown as the command line it is.
+    if (t.getOrNull(i) != RUNNER) return null
     i++
     val sha = t.getOrNull(i)?.takeIf { SHA_RE.matches(it) } ?: return null
     i++
@@ -105,4 +110,8 @@ fun parseRun(command: String): Run? {
 }
 
 /** One line for a notification or the history: "agent: why" for a script run, else the command. */
-fun describeContext(command: String): String = parseRun(command)?.let { "${it.agent}: ${it.why}" } ?: command
+fun describeContext(command: String): String =
+    parseRun(command)?.let { "${it.agent}: ${it.why} (SHA-256 ${it.sha.take(16)}…)" } ?: command
+
+/** Where the installer puts the agents' runner (tools/install.sh RUNNER). */
+const val RUNNER = "/usr/local/sbin/sudostamp-run"

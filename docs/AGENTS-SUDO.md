@@ -39,9 +39,13 @@ sudostamp ask --check                                                      # wou
 | the script's | it ran | yes |
 | 64 | bad usage (no `--why`, bad agent name, run as root) | no |
 | 70 | the runner refused the script (hash, size) | no |
-| 75 | not ready: not set up, paused, phone away or holding another key | no, and nothing was asked |
+| 75 | not ready: not set up, paused, phone away or holding another key, or sudo would not ask at all (a `NOPASSWD` rule) | no, and nothing was asked |
 | 77 | not approved: denied, timed out, or this user may not sudo | no |
-| 124 | stopped after `--timeout` | partly |
+| 124 | asked to stop after `--timeout` | partly; a script that ignores the stop may still be running |
+
+A script can exit with any number, 75 and 77 included, so in plain mode `ask` also says on stderr
+`ran; the script exited N` whenever the script ran. Programs should use `--json`: its `stage` says
+whether anything ran.
 
 ## Where the description shows
 
@@ -52,10 +56,12 @@ shows or records sudo shows them, with no new channel to trust:
 - **The desktop app** (`sudostamp-desktop`): the notification and history read
   `hermes: rebuild pam_rssh (script a3f9c2d1e0b7a44c…)`.
 - **The phone (1.6)**: the probe already connects to the phone right before pam_rssh does. When the
-  phone offers your key, the probe sends the command line on that connection as the extension
-  `context-v1@sudostamp`, and the approval screen shows *hermes wants to run a script: rebuild
-  pam_rssh, SHA-256 a3f9 c2d1 e0b7 a44c …*. A phone older than 1.6 answers FAILURE and the approval looks
-  as before. Nothing about the probe's result depends on the answer.
+  phone offers your key and the sudo is an agent's run, the probe sends that command line on the
+  connection as the extension `context-v1@sudostamp`, and the approval screen shows *hermes:
+  rebuild pam_rssh, SHA-256 a3f9 c2d1 e0b7 a44c …*, reported by the computer's address. Not in the
+  notification. An ordinary sudo is never described to the phone: its command line can hold a
+  password. A phone older than 1.6 answers FAILURE and the approval looks as before. Nothing
+  about the probe's result depends on the answer.
 
 ## What the description is and is not
 
@@ -75,6 +81,18 @@ What it does guarantee:
   root-only copy of what ran.
 - **The description cannot make anything easier to approve.** Approval still needs a fresh finger
   on the phone, and nothing in SudoStamp reads the description to decide anything.
+
+What else approves, or counts:
+
+- **A fingerprint reader on the computer.** Where the installer found one, sudo at the desk tries
+  it first (15 s) and over SSH never: an `ask` started from a local session can be approved by a
+  finger on that reader, which shows no description. Approve agents from the phone; ignore the
+  reader unless you started the request yourself.
+- **A NOPASSWD rule** would make sudo skip PAM, the phone included: `ask` checks (`sudo -n -l`) and
+  refuses with 75 rather than run anything nobody approved.
+- **pam_faillock** (Fedora, RHEL): a denied or timed-out `ask` falls through to the password, finds no
+  terminal and fails, which faillock counts as a failed attempt. Denying an agent several times in a
+  row can lock the account's password for the faillock interval.
 
 ## For agent authors
 

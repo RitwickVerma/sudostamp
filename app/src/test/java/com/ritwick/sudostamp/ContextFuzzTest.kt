@@ -58,15 +58,25 @@ class ContextFuzzTest {
         return out.toIntArray()
     }
 
-    private fun forbidden(cp: Int): Boolean =
-        cp in 0..0x1F || cp in 0x7F..0x9F || cp in 0x200B..0x200F || cp in 0x2028..0x202E ||
-            cp in 0x2060..0x2069 || cp == 0x061C || cp == 0xFEFF
+    // The rule, stated from the Unicode side (AgentProtocol.invisible): controls, format, line and
+    // paragraph separators, surrogates, private use, unassigned, and the default-ignorable or
+    // blank-looking characters that are none of those.
+    private fun forbidden(cp: Int): Boolean = when (Character.getType(cp)) {
+        Character.CONTROL.toInt(), Character.FORMAT.toInt(), Character.LINE_SEPARATOR.toInt(),
+        Character.PARAGRAPH_SEPARATOR.toInt(), Character.SURROGATE.toInt(),
+        Character.PRIVATE_USE.toInt(), Character.UNASSIGNED.toInt() -> true
+        else -> cp in setOf(0x034F, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x17B4, 0x17B5, 0x2800) ||
+            cp in 0x180B..0x180F || cp in 0xFE00..0xFE0F || cp in 0xE0100..0xE01EF
+    }
+
+    private fun oddSpace(cp: Int) = cp != 0x20 && Character.getType(cp) == Character.SPACE_SEPARATOR.toInt()
 
     private fun space(cp: Int) = Character.isWhitespace(cp) || Character.isSpaceChar(cp)
 
     private fun refContext(payload: ByteArray): String? {
         if (payload.size > 2048) return null
-        val cps = (refDecode(payload) ?: return null).map { if (forbidden(it)) '?'.code else it }.toMutableList()
+        val cps = (refDecode(payload) ?: return null)
+            .map { if (forbidden(it)) '?'.code else if (oddSpace(it)) ' '.code else it }.toMutableList()
         while (cps.isNotEmpty() && space(cps.first())) cps.removeAt(0)
         while (cps.isNotEmpty() && space(cps.last())) cps.removeAt(cps.size - 1)
         if (cps.isEmpty()) return null
@@ -75,7 +85,7 @@ class ContextFuzzTest {
     }
 
     private val RUN = Regex(
-        "^(?:[^ ]*/)?sudo (?:-k )?(?:-- )?(?:[^ ]*/)?sudostamp-run ([0-9a-f]{64}) ([a-z0-9][a-z0-9._-]{0,31}) -- (.*)$",
+        "^(?:[^ ]*/)?sudo (?:-k )?(?:-- )?/usr/local/sbin/sudostamp-run ([0-9a-f]{64}) ([a-z0-9][a-z0-9._-]{0,31}) -- (.*)$",
         RegexOption.DOT_MATCHES_ALL
     )
 
@@ -171,7 +181,8 @@ class ContextFuzzTest {
         val pre = listOf("sudo ", "/usr/bin/sudo ")[r.nextInt(2)] +
             (if (r.nextBoolean()) "-k " else "") + (if (r.nextBoolean()) "-- " else "")
         val cmd = "${pre}${dir}sudostamp-run $s $a -- $why"
-        assertEquals(cmd, Run(s, a, why), parseRun(cmd))
+        // Only the installed runner reads as an agent's run; the same words anywhere else do not.
+        assertEquals(cmd, if (dir == "/usr/local/sbin/") Run(s, a, why) else null, parseRun(cmd))
     }
 
     @Test

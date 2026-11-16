@@ -376,12 +376,13 @@ job (secret scan, shellcheck). [CONTRIBUTING.md](CONTRIBUTING.md) has the conven
 
 ## Known limits
 
-- **The prompt says what the computer reports, which is advisory.** pam_rssh sends only an opaque
-  challenge, so the phone cannot see which command is being authorised. The host's probe tells it
-  the command beforehand and the prompt shows that, labelled as the computer's own report: a
-  program running as you there could report something else. Two different reports for one request
-  show a warning instead. Approve by the computer's name and whether you just ran sudo, not by
-  the description.
+- **The prompt can say what an agent's run is for, and that is advisory.** pam_rssh sends only an
+  opaque challenge, so the phone cannot see which command is being authorised. For a
+  `sudostamp ask` run the host tells it the agent, the reason and the script's hash beforehand, and
+  the prompt shows that as a report from the computer's address: anything there could report
+  something else. An ordinary sudo is not described (its command line could hold a password). Two
+  different reports for one request show a warning instead. Approve by the computer's name and
+  whether you or your agent just asked, not by the description.
 - **Only paired computers can make the phone ask**, and a program running as you on one of them
   can start a sudo you did not type — read the computer's name on every request.
   See [SECURITY.md](SECURITY.md).

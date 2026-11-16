@@ -179,7 +179,7 @@ object AgentProtocol {
         while (i < s.length) {
             val cp = s.codePointAt(i)
             i += Character.charCount(cp)
-            sb.appendCodePoint(if (invisible(cp)) '?'.code else cp)
+            sb.appendCodePoint(if (invisible(cp)) '?'.code else if (oddSpace(cp)) ' '.code else cp)
         }
         val t = sb.toString().trim()
         if (t.isEmpty()) return null
@@ -187,12 +187,24 @@ object AgentProtocol {
         return t.substring(0, t.offsetByCodePoints(0, maxCodePoints - 1)) + "…"
     }
 
-    private fun invisible(cp: Int): Boolean =
-        cp <= 0x1F || cp in 0x7F..0x9F ||                  // C0, DEL, C1
-            cp in 0x200B..0x200F ||                         // zero-width space/joiners, LRM, RLM
-            cp in 0x2028..0x202E ||                         // line/paragraph separator, embeddings, overrides
-            cp in 0x2060..0x2069 ||                         // word joiner, invisible operators, isolates
-            cp == 0x061C || cp == 0xFEFF                    // Arabic letter mark, BOM / zero-width no-break space
+    private fun invisible(cp: Int): Boolean = when (Character.getType(cp)) {
+        // Controls, format characters (bidi, zero-width, tags, the Arabic letter mark, soft
+        // hyphen), line and paragraph separators, and what is not a character at all.
+        Character.CONTROL.toInt(), Character.FORMAT.toInt(), Character.LINE_SEPARATOR.toInt(),
+        Character.PARAGRAPH_SEPARATOR.toInt(), Character.SURROGATE.toInt(),
+        Character.PRIVATE_USE.toInt(), Character.UNASSIGNED.toInt() -> true
+        // Default-ignorable or blank-looking characters that are not FORMAT: the combining
+        // grapheme joiner, Hangul fillers, Khmer inherent vowels, Mongolian variation selectors,
+        // variation selectors and the Braille blank.
+        else -> cp == 0x034F || cp == 0x115F || cp == 0x1160 || cp == 0x3164 || cp == 0xFFA0 ||
+            cp == 0x17B4 || cp == 0x17B5 || cp in 0x180B..0x180F || cp in 0xFE00..0xFE0F ||
+            cp in 0xE0100..0xE01EF || cp == 0x2800
+    }
+
+    /** A space other than U+0020 (no-break, wide, thin): shown as a plain space, so a gap cannot
+     *  pose as the end of a line. */
+    private fun oddSpace(cp: Int): Boolean =
+        cp != 0x20 && Character.getType(cp) == Character.SPACE_SEPARATOR.toInt()
 
     /** IDENTITIES_ANSWER listing [keyBlobs]: one key per paired computer. pam_rssh uses the
      *  one its computer pinned. */

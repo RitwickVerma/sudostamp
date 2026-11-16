@@ -424,7 +424,9 @@ class AgentService : Service() {
                 if (why != null) {
                     Log.w(TAG, "${AgentProtocol.refusal(host != null, data) ?: limiter.refusal(host!!.id) ?: why} (from $client)")
                     // Refused unprompted: the user never saw it, so the history is where it shows.
-                    remember(Verdict.REFUSED, why, host?.id, host?.label ?: "", client, seen?.text)
+                    // No description on a refusal: it never reached the user, and anything on the
+                    // LAN could otherwise write text into the history under a paired computer's name.
+                    remember(Verdict.REFUSED, why, host?.id, host?.label ?: "", client)
                     AgentProtocol.writeFrame(out, AgentProtocol.failure())
                     return 0
                 }
@@ -627,18 +629,10 @@ class AgentService : Service() {
             getString(if (p.trusted) R.string.notif_approval_text else R.string.notif_approval_text_new, p.client),
             CHANNEL_APPROVAL, pi, denyAction
         )
-        val described = p.context?.let(::describeContext)
-        mgr().notify(
-            APPROVAL_NOTIF_ID,
-            if (described == null) generic.build()
-            else notificationBuilder(title, described, CHANNEL_APPROVAL, pi, denyAction)
-                .setStyle(Notification.BigTextStyle().bigText(described))
-                // What the computer says it is running stays off a locked screen: that shows
-                // only the generic text. (The conflict case never gets here: no text.)
-                .setVisibility(Notification.VISIBILITY_PRIVATE)
-                .setPublicVersion(generic.build())
-                .build()
-        )
+        // Never the description: a notification can show on a locked screen (whether it does is
+        // the user's lock-screen setting, not ours), on a watch and to any notification listener.
+        // The description is only on the approval screen, behind the tap.
+        mgr().notify(APPROVAL_NOTIF_ID, generic.build())
     }
 
     /**

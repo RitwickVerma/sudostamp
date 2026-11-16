@@ -92,7 +92,7 @@
     <string name="approval_ctx_agent">%1$s wants to run a script</string>
     <string name="approval_ctx_run">%1$s: %2$s</string>
     <string name="approval_ctx_script">SHA-256 %1$s …</string>
-    <string name="approval_ctx_advisory">Reported by %1$s, not verified: a program running as you there could report something else.</string>
+    <string name="approval_ctx_advisory">Reported by %1$s, not verified: any program on that computer could report something else.</string>
     <string name="approval_ctx_conflict">This computer sent two different descriptions of this request. Deny it unless you are sure.</string>
     <string name="a11y_approval_ctx">Asked to run: %1$s. %2$s</string>
     <string name="approval_hint">Touch the sensor to approve</string>
