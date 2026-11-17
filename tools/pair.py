@@ -26,6 +26,12 @@ software, or is for another key or pairing, refuses the pairing; one that cannot
 receives "<key fingerprint> TAB <that line>" for `install.sh status`. Nothing is fetched from
 the network unless --check-revocation is given.
 
+Pairing by QR code (qr-v1, 1.7; same file in the app) replaces the person comparing codes with a
+secret the computer showed in a QR code and the phone scanned: `pair --qr-secret-file F` proves
+it to the phone and checks the phone's proof, both bound to the address dialled, and needs no
+typing. `discover --qr-stdin` reads that secret from stdin and marks the phone that scanned it
+(pair-qr-hello). The secret is never on a command line: those are world-readable.
+
 Prompts go to stderr and the typed code is read from stdin, so `install.sh` can capture the
 key line from stdout. With --json-fd N (install.sh setup --json) the question is also written to
 fd N as one JSON line, {"v":1,"ask":"code",...}, which the caller answers on stdin like a person
@@ -54,6 +60,14 @@ EXT_ATTEST = b"attest-v1@sudostamp"
 COMMIT_TAG = b"sudostamp-pair-commit-v2\x00"
 CODE_TAG = b"sudostamp-pair-code-v2\x00"
 ATTEST_TAG = b"sudostamp-attest-challenge-v1\x00"
+EXT_QR_HELLO = b"pair-qr-hello-v1@sudostamp"
+EXT_QR_COMMIT = b"pair-qr-v1@sudostamp"
+EXT_QR_DONE = b"pair-qr-done-v1@sudostamp"
+QR_HELLO_TAG = b"sudostamp-qr-hello-v1\x00"
+QR_C_TAG = b"sudostamp-qr-commit-v1\x00"
+QR_P_TAG = b"sudostamp-qr-phone-v1\x00"
+QR_D_TAG = b"sudostamp-qr-done-v1\x00"
+QR_SECRET = 16
 NONCE = 32
 ENDPOINT = 18                     # 16 address bytes (IPv4 as ::ffff:a.b.c.d) + 2 port bytes
 SERVICE = "_sudostamp._tcp.local."
@@ -100,6 +114,41 @@ def code(key, np_, nh, dialled, stable):
 def attest_challenge(np_, dialled, stable):
     """What the Keystore was told to sign into the key's attestation (Pairing.attestChallenge)."""
     return hashlib.sha256(ATTEST_TAG + s(np_) + s(dialled) + s(stable)).digest()
+
+
+def framed(tag, *parts):
+    return tag + b"".join(s(p) for p in parts)
+
+
+def qr_hello(secret):
+    return hashlib.sha256(framed(QR_HELLO_TAG, secret)).digest()
+
+
+def qr_commit_mac(secret, nh, reached):
+    return hmac.new(secret, framed(QR_C_TAG, nh, reached), hashlib.sha256).digest()
+
+
+def qr_phone_mac(secret, nh, key, np_, dialled, stable):
+    return hmac.new(secret, framed(QR_P_TAG, nh, key, np_, dialled, stable), hashlib.sha256).digest()
+
+
+def qr_done_mac(secret, nh, key):
+    return hmac.new(secret, framed(QR_D_TAG, nh, key), hashlib.sha256).digest()
+
+
+def qr_secret(text):
+    """The secret as the desktop writes it: canonical unpadded base64url of exactly QR_SECRET
+    bytes, or None."""
+    t = text.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{22}", t):
+        return None
+    try:
+        b = base64.urlsafe_b64decode(t + "==")
+    except ValueError:
+        return None
+    if len(b) != QR_SECRET or base64.urlsafe_b64encode(b).decode().rstrip("=") != t:
+        return None
+    return b
 
 
 def endpoint(sockaddr):
@@ -265,7 +314,9 @@ def fingerprint(blob):
     return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
 
 
-def cmd_pair(a):
+def pair_code(a):
+    """Numeric comparison (v2): the person types the code the phone shows. Returns the key, the
+    phone's nonce, both endpoints and the attestation chain (or why there is none)."""
     global WHY
     label = (a.label or socket.gethostname()).encode("ascii", "replace")[:64]
     try:
@@ -342,6 +393,61 @@ def cmd_pair(a):
         ok = False
     if not ok:
         sys.exit("the phone did not confirm the pairing (it may have been cancelled on the phone) -- NOT pinned.")
+    return key, np_, dialled, stable, chain
+
+
+def pair_qr(a, secret):
+    """qr-v1: both sides prove the secret from the QR code, over where the computer dialled.
+    Same returns as pair_code."""
+    try:
+        ag = Agent(a.phone)
+    except OSError as e:
+        sys.exit("cannot reach the phone at %s: %s" % (a.phone, e))
+    try:
+        reached = endpoint(ag.sock.getpeername())
+        nh = os.urandom(NONCE)
+        r = ag.ext(EXT_QR_COMMIT, s(nh) + s(qr_commit_mac(secret, nh, reached)))
+        if r is None:
+            sys.exit("the phone refused to pair. It may not be the phone that scanned this computer's code, "
+                     "its pairing screen may have closed, or something on this network answered in its place. "
+                     "Scan the code again.")
+        key, o = take(r, 0)
+        np_, o = take(r, o)
+        dialled, o = take(r, o)
+        stable, o = take(r, o)
+        mac, o = take(r, o)
+        if len(np_) != NONCE or len(dialled) != ENDPOINT or len(stable) != ENDPOINT or \
+                not hmac.compare_digest(qr_phone_mac(secret, nh, key, np_, dialled, stable), mac):
+            sys.exit("the phone's answer does not prove the code -- NOT pinned. "
+                     "Something between this computer and the phone is interfering.")
+        if not valid_key(key):
+            sys.exit("the phone did not send a SudoStamp key -- NOT pinned.")
+        if dialled != reached:
+            sys.exit("the phone says it was reached at %s, but this computer is talking to %s -- NOT pinned."
+                     % (endpoint_text(dialled), endpoint_text(reached)))
+        if ag.ext(EXT_QR_DONE, s(nh) + s(qr_done_mac(secret, nh, key))) is None:
+            sys.exit("the phone did not confirm the pairing (it may have been cancelled on the phone) -- NOT pinned.")
+        chain = request_chain(ag, attest_challenge(np_, dialled, stable))
+    except (OSError, ValueError, ConnectionError) as e:
+        sys.exit("pairing failed: %s" % e)
+    finally:
+        ag.close()
+    return key, np_, dialled, stable, chain
+
+
+def cmd_pair(a):
+    global WHY
+    if a.qr_secret_file:
+        try:
+            with open(a.qr_secret_file) as f:
+                secret = qr_secret(f.readline())
+        except OSError as e:
+            sys.exit("cannot read the pairing code's secret: %s" % e)
+        if secret is None:
+            sys.exit("the pairing code's secret is malformed")
+        key, np_, dialled, stable, chain = pair_qr(a, secret)
+    else:
+        key, np_, dialled, stable, chain = pair_code(a)
 
     # Where does the key live? Decided before anything is pinned. A phone that cannot prove it
     # (emulator, old phone, no openssl) is allowed through with a warning unless the person said
@@ -375,7 +481,7 @@ def cmd_pair(a):
     if a.addr_out:
         with open(a.addr_out, "w") as f:
             f.write(keep + "\n")
-    say("  Codes match: paired.")
+    say("  Paired." if a.qr_secret_file else "  Codes match: paired.")
     print("ecdsa-sha2-nistp256 %s sudostamp" % base64.b64encode(key).decode())
 
 
@@ -585,13 +691,34 @@ def display_name(name):
     return "".join(ch for ch in name if " " <= ch <= "~")[:64] or "a phone"
 
 
+def scanned(addr, tag):
+    """Whether the phone at addr is the one that scanned the code whose hello tag this is."""
+    try:
+        ag = Agent(addr, timeout=2)
+    except OSError:
+        return False
+    try:
+        return ag.ext(EXT_QR_HELLO, s(tag), limit=16) is not None
+    except (OSError, ValueError, ConnectionError):
+        return False
+    finally:
+        ag.close()
+
+
 def cmd_discover(a):
+    tag = None
+    if a.qr_stdin:
+        secret = qr_secret(read_line())
+        if secret is None:
+            sys.exit("discover --qr-stdin: no valid secret on stdin")
+        tag = qr_hello(secret)
     found, method = via_avahi(min(a.timeout, 3)), "avahi"
     if not found:
         found, method = via_mdns(a.timeout), "mdns"
     found = [(addr, display_name(name)) for addr, name in found if plausible(addr)]
     for addr, name in dict.fromkeys(found):
-        print("%s\t%s" % (addr, name))
+        # A third field "qr": this phone scanned the code (only with --qr-stdin).
+        print("%s\t%s%s" % (addr, name, "\tqr" if tag is not None and scanned(addr, tag) else ""))
     if found and a.verbose:
         print("found via %s" % method, file=sys.stderr)
     return 0 if found else 1
@@ -609,9 +736,11 @@ def main():
     p.add_argument("--check-revocation", action="store_true")
     p.add_argument("--json-fd", type=int)
     p.add_argument("--fail-out")
+    p.add_argument("--qr-secret-file")
     d = sub.add_parser("discover")
     d.add_argument("--timeout", type=float, default=3.0)
     d.add_argument("--verbose", action="store_true")
+    d.add_argument("--qr-stdin", action="store_true")
     a = ap.parse_args()
     if a.cmd == "pair":
         try:

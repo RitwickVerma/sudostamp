@@ -2,6 +2,8 @@ package com.ritwick.sudostamp
 
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Pairing: how a computer learns the key this phone made FOR IT, and the address to reach it
@@ -45,6 +47,31 @@ import java.security.MessageDigest
  * single-use. Pairing never signs anything and is not on the sudo path.
  *
  * All fields are SSH strings (length-prefixed), so no two different inputs hash the same.
+ *
+ * PAIRING BY QR CODE (qr-v1, 1.7). The computer shows a code; the phone's camera opens it as a
+ * link to this app ([QrLink]): a secret S of [QR_SECRET_BYTES] random bytes, and the computer's
+ * name. S then stands in for the person comparing codes: whoever knows it is the person at that
+ * screen, and nobody else can know it. Nh, Np, K, D and S as above; S_ is the secret.
+ *
+ *   computer -> phone     pair-qr-hello-v1(H(hello-tag || S_))   "is it you?": SUCCESS only from
+ *                                                                the phone that scanned S_
+ *   computer -> phone     pair-qr-v1(Nh, macC)                   macC = HMAC(S_, c-tag || Nh || R)
+ *                                                                R: where the computer dialled
+ *   phone                 checks macC with D for R: what it saw itself dialled on. A relay that
+ *                         answered in its place dialled it from elsewhere, and fails here.
+ *                         A message that fails is refused and changes nothing: without S_ nobody
+ *                         can cancel, spend or slow a pairing.
+ *   phone    -> computer  K, Np, D, S, macP                      macP = HMAC(S_, p-tag || Nh || K
+ *                                                                       || Np || D || S)
+ *   computer              checks macP and D == R, then:
+ *   computer -> phone     pair-qr-done-v1(Nh, macD)              macD = HMAC(S_, d-tag || Nh || K)
+ *                         on the same connection; then attest-v1 exactly as above.
+ *
+ * Unlike the code, both directions are authenticated, so pair-qr-done proves the computer
+ * holding S_ finished. A second VALID commit still stops the pairing (someone else holds S_), and
+ * the new computer still starts PENDING. What it cannot help: anyone who sees the computer's
+ * screen holds S_ as much as its owner does. That is why the code stays, and why the computer
+ * makes a new S_ for every attempt and every two minutes.
  */
 object Pairing {
 
@@ -57,6 +84,12 @@ object Pairing {
     /** After DONE, while the pairing is still open: the attestation chain of the key just made
      *  (leaf first), for the computer to check against Google's roots. Not in the sudo path. */
     const val EXT_ATTEST = "attest-v1@sudostamp"
+
+    /** Pairing by QR code (qr-v1, see the class comment). */
+    const val EXT_QR_HELLO = "pair-qr-hello-v1@sudostamp"
+    const val EXT_QR_COMMIT = "pair-qr-v1@sudostamp"
+    const val EXT_QR_DONE = "pair-qr-done-v1@sudostamp"
+    const val QR_SECRET_BYTES = 16
 
     /** Version 1's first message: recognised only to tell the person their installer is old. */
     const val EXT_COMMIT_V1 = "pair-commit@sudostamp"
@@ -74,6 +107,26 @@ object Pairing {
     private val COMMIT_TAG = "sudostamp-pair-commit-v2\u0000".toByteArray(Charsets.US_ASCII)
     private val CODE_TAG = "sudostamp-pair-code-v2\u0000".toByteArray(Charsets.US_ASCII)
     private val ATTEST_TAG = "sudostamp-attest-challenge-v1\u0000".toByteArray(Charsets.US_ASCII)
+    private val QR_HELLO_TAG = "sudostamp-qr-hello-v1\u0000".toByteArray(Charsets.US_ASCII)
+    private val QR_C_TAG = "sudostamp-qr-commit-v1\u0000".toByteArray(Charsets.US_ASCII)
+    private val QR_P_TAG = "sudostamp-qr-phone-v1\u0000".toByteArray(Charsets.US_ASCII)
+    private val QR_D_TAG = "sudostamp-qr-done-v1\u0000".toByteArray(Charsets.US_ASCII)
+
+    fun qrHello(secret: ByteArray): ByteArray = sha256(QR_HELLO_TAG, secret)
+
+    fun qrCommitMac(secret: ByteArray, hostNonce: ByteArray, reached: ByteArray): ByteArray =
+        hmac(secret, QR_C_TAG, hostNonce, reached)
+
+    fun qrPhoneMac(
+        secret: ByteArray, hostNonce: ByteArray, keyBlob: ByteArray, phoneNonce: ByteArray,
+        dialled: ByteArray, stable: ByteArray,
+    ): ByteArray = hmac(secret, QR_P_TAG, hostNonce, keyBlob, phoneNonce, dialled, stable)
+
+    fun qrDoneMac(secret: ByteArray, hostNonce: ByteArray, keyBlob: ByteArray): ByteArray =
+        hmac(secret, QR_D_TAG, hostNonce, keyBlob)
+
+    /** Equal, in time that does not depend on where they differ. */
+    fun same(a: ByteArray?, b: ByteArray?): Boolean = a != null && b != null && MessageDigest.isEqual(a, b)
 
     fun commitment(keyBlob: ByteArray, phoneNonce: ByteArray, dialled: ByteArray, stable: ByteArray): ByteArray =
         sha256(COMMIT_TAG, keyBlob, phoneNonce, dialled, stable)
@@ -110,13 +163,22 @@ object Pairing {
         String(raw, Charsets.US_ASCII).filter { it in ' '..'~' }.trim().take(64).ifEmpty { "a computer" }
 
     /** Tag, then each part as an SSH string. */
-    private fun sha256(tag: ByteArray, vararg parts: ByteArray): ByteArray {
+    private fun framed(tag: ByteArray, parts: Array<out ByteArray>): ByteArray {
         val o = ByteArrayOutputStream()
         o.write(tag)
         for (p in parts) {
             o.write(byteArrayOf((p.size ushr 24).toByte(), (p.size ushr 16).toByte(), (p.size ushr 8).toByte(), p.size.toByte()))
             o.write(p)
         }
-        return MessageDigest.getInstance("SHA-256").digest(o.toByteArray())
+        return o.toByteArray()
     }
+
+    private fun sha256(tag: ByteArray, vararg parts: ByteArray): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(framed(tag, parts))
+
+    private fun hmac(key: ByteArray, tag: ByteArray, vararg parts: ByteArray): ByteArray =
+        Mac.getInstance("HmacSHA256").run {
+            init(SecretKeySpec(key, "HmacSHA256"))
+            doFinal(framed(tag, parts))
+        }
 }

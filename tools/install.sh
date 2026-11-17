@@ -147,6 +147,9 @@ die()  { bad "$*"; exit 1; }
 # self-contained. Text reaching it is ours, a hostname or the phone's; printable ASCII is all that
 # survives, so the output is valid UTF-8 JSON whatever came in.
 JSON=0
+# setup --qr (the desktop app): pair by the QR code it showed. The secret comes as the first line
+# of stdin, never as an argument: command lines are world-readable.
+QR=0
 JSON_CMD=""
 LAST_BAD=""
 json_esc() {
@@ -396,6 +399,16 @@ need_phone() {
   phone_valid "$PHONE_ADDR" || {
     echo "--phone must be an address and port, e.g. 192.168.1.50:7777 or [fd00::1]:7777" >&2; exit 2
   }
+}
+# The phone address in the current SudoStamp block, if it is a usable one; nothing otherwise.
+phone_in_block() {
+  local target addr
+  target="$(pam_target)"
+  has_block "$target" || return 0
+  addr="$(awk -v b="$BEGIN_MARK" -v e="$END_MARK" '$0==b{i=1} i{print} $0==e{i=0}' "$target" |
+    sed -n 's/.*ssh_agent_addr=\([^ ]*\).*/\1/p' | head -1)"
+  phone_valid "$addr" && printf '%s\n' "$addr"
+  return 0
 }
 need_user() {
   if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = root ] || ! id "$TARGET_USER" >/dev/null 2>&1; then
@@ -910,6 +923,7 @@ acquire_key() {
     # --json: pair.py asks its question on fd 3 (the real stdout; its own stdout is the key
     # line captured here) and leaves the reason it failed in a file for the final event.
     [ "$JSON" = 0 ] || extra+=(--json-fd 3 --fail-out "$(root_tmp)/pair-fail")
+    [ "$QR" = 0 ] || extra+=(--qr-secret-file "$ROOT_TMP/qr-secret")
     key="$(python3 -I "$HERE/pair.py" pair --phone "$PHONE_ADDR" --label "$(hostname 2>/dev/null || uname -n)" \
              --addr-out "$addr_file" --attest-out "$(root_tmp)/attest" ${extra[@]+"${extra[@]}"})" || return 1
   fi
@@ -1075,6 +1089,15 @@ cmd_setup() {
     # Nobody to ask which phone: the caller (the desktop app) lists them first.
     LAST_BAD="setup --json needs --phone <address>:7777"; echo "$LAST_BAD" >&2; exit 2
   fi
+  if [ "$QR" = 1 ]; then
+    # Read before anything else can touch stdin. Into the private directory (0700, root), and
+    # gone with it when this exits.
+    local qr_secret=""
+    IFS= read -r qr_secret || true
+    [[ "$qr_secret" =~ ^[A-Za-z0-9_-]{22}$ ]] || { LAST_BAD="setup --qr: no pairing secret on stdin"; echo "$LAST_BAD" >&2; exit 2; }
+    (umask 077; printf '%s\n' "$qr_secret" > "$ROOT_TMP/qr-secret")
+    qr_secret=""
+  fi
   [ -n "$PHONE_ADDR" ] || find_phone
   need_phone
 
@@ -1154,6 +1177,9 @@ cmd_test() {
 }
 
 cmd_apply() {
+  # Updating an existing block: its phone, unless told otherwise (an older version's block is
+  # what `status` and `doctor` send people here for, and they should not have to dig it out).
+  [ -n "$PHONE_ADDR" ] || PHONE_ADDR="$(phone_in_block)"
   need_root apply; need_platform; need_phone; need_user
   [ -f "$KEYFILE" ] || die "no pinned key -- run 'stage' first"
   find_pam_rssh >/dev/null || die "pam_rssh is not installed -- run 'stage' first"
@@ -1372,9 +1398,9 @@ cmd_status() {
   say "local reader    : $(has_fprintd && echo "pam_fprintd (gate: $GATE)" || echo none)"
   say "probe           : $([ -x "$PROBE" ] && echo "$PROBE" || echo "absent$(linux_pam || echo ' (not used on OpenPAM)')")"
   if has_block "$target" && grep -qF "$OLD_GATE_CONTROL" "$target"; then
-    say "PAM             : SudoStamp block from an older version in $target -- run 'sudo $PROG setup' to update it"
+    say "PAM             : SudoStamp block from an older version in $target -- run 'sudo $PROG apply' to update it"
   elif has_block "$target" && linux_pam && ! grep -qF "$PROBE after" "$target"; then
-    say "PAM             : SudoStamp block from an older version in $target (no hook after pam_rssh) -- run 'sudo $PROG setup' to update it"
+    say "PAM             : SudoStamp block from an older version in $target (no hook after pam_rssh) -- run 'sudo $PROG apply' to update it"
   elif has_block "$target"; then say "PAM             : SudoStamp block present in $target"
   elif has_foreign_rssh "$target"; then say "PAM             : pam_rssh lines NOT written by this script in $target"
   else say "PAM             : not applied ($target)"; fi
@@ -1651,10 +1677,12 @@ while [ $# -gt 0 ]; do
     --require-attestation) SUDOSTAMP_REQUIRE_ATTESTATION=1; shift ;;
     --check-revocation)    SUDOSTAMP_CHECK_REVOCATION=1; shift ;;
     --json)         JSON=1; shift ;;
+    --qr)           QR=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
 
+if [ "$QR" = 1 ] && { [ "$CMD" != setup ] || [ "$JSON" != 1 ]; }; then echo "--qr is for 'setup --json' (the desktop app)" >&2; exit 2; fi
 if [ "$JSON" = 1 ]; then
   case "$CMD" in
     doctor) ;;
@@ -1675,5 +1703,5 @@ case "$CMD" in
   status)   cmd_status ;;
   doctor)   cmd_doctor ;;
   uninstall) cmd_uninstall ;;
-  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status|doctor|uninstall|ask} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes] [--require-attestation] [--check-revocation] [--json (doctor, setup)]"; exit 2 ;;
+  *)        echo "usage: $PROG {setup|stage|test|apply|rollback|status|doctor|uninstall|ask} [--phone host:port] [--fingerprint SHA256:..] [--key LINE] [--yes] [--require-attestation] [--check-revocation] [--json (doctor, setup)] [--qr (setup --json)]"; exit 2 ;;
 esac

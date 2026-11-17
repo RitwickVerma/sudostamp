@@ -103,7 +103,13 @@ class MainActivity : Activity() {
         private const val REFUSAL_FLASH_MS = 1_400L
     }
 
-    private enum class Screen { SETUP, APPROVAL, RESULT, PAIRING, HISTORY, LOCKED }
+    private enum class Screen { SETUP, APPROVAL, RESULT, PAIRING, QR_CONFIRM, HISTORY, LOCKED }
+
+    /** A computer's pairing code, scanned and opened here, waiting for the person to confirm. */
+    private var pendingLink: QrLink.Link? = null
+
+    /** Whether the last pairing started from a scanned code: what "try again" means differs. */
+    private var lastQr = false
 
     /** The request the approval screen is showing, so it is drawn once, not on every sync. */
     private var shownRequest = -1L
@@ -222,8 +228,32 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * A computer's pairing code, opened as a link (the camera hands it over; see [QrLink]).
+     * Returns true when there is one to confirm. A link that is not a valid code says so and is
+     * otherwise ignored. Taken once: the intent is replaced, so recreating the activity does not
+     * ask again.
+     */
+    private fun takeLink(i: Intent?): Boolean {
+        if (i?.action != Intent.ACTION_VIEW) return false
+        val u = i.data
+        setIntent(Intent(this, MainActivity::class.java))
+        val link = u?.let { QrLink.parse(it.scheme, it.host, it.path, it.fragment, runCatching { it.getQueryParameter("k") }.getOrNull()) }
+        if (link == null) {
+            toast(getString(R.string.pair_qr_bad_link))
+            return false
+        }
+        pendingLink = link
+        return true
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        if (takeLink(intent)) {
+            // A request being approved comes first; the code waits on screen until it is done.
+            if (AgentService.currentRequest()?.isResolved != false) renderQrConfirm()
+            return
+        }
         takeRequest(intent)
         // The request this tap is for, drawn NOW: an instance that was stopped behind the lock
         // screen still holds whatever it showed last (setup, say), and must never be what the
@@ -269,7 +299,11 @@ class MainActivity : Activity() {
         // Opened from a request's notification: draw THAT request now, not setup first. Setup
         // would clear the over-the-lock-screen permission an instant before the approval needed
         // it. (The fingerprint prompt itself still waits for onResume, via sync().)
-        if (pending != null) renderApproval(pending) else render()
+        when {
+            pending != null -> renderApproval(pending)
+            savedInstanceState == null && takeLink(intent) -> renderQrConfirm()
+            else -> render()
+        }
     }
 
     override fun onStart() {
@@ -464,8 +498,11 @@ class MainActivity : Activity() {
             // The request ended (timed out, denied elsewhere) while the approval was over the
             // lock screen: there is nothing else to show there, so leave rather than draw setup.
             p == null && screen == Screen.APPROVAL && overKeyguard -> finishAndRemoveTask()
-            p == null && screen == Screen.APPROVAL ->
-                if (AgentService.pairing.armed()) renderPairing() else render()
+            p == null && screen == Screen.APPROVAL -> when {
+                AgentService.pairing.armed() -> renderPairing()
+                pendingLink != null -> renderQrConfirm()
+                else -> render()
+            }
             // Unlocked since the blank screen was drawn: draw the real one.
             screen == Screen.LOCKED && !deviceLocked() -> render()
             screen == Screen.SETUP && shownSetup != setupState() -> render()
@@ -821,7 +858,8 @@ class MainActivity : Activity() {
      * that really puts keys in secure hardware. Otherwise the computer would only hear
      * "refused", with the reason visible nowhere.
      */
-    private fun startPairing() {
+    private fun startPairing(link: QrLink.Link? = null) {
+        pendingLink = null
         if (biometricStatus() != BiometricManager.BIOMETRIC_SUCCESS) { render(); return }
         if (!hardwareChecked) {
             val probe = "sudostamp-probe"
@@ -839,9 +877,32 @@ class MainActivity : Activity() {
         // Pairing needs the port: tapping Pair a computer is a deliberate resume.
         if (AwayControl.view(this).away) AwayControl.resume(this)
         else runCatching { startForegroundService(Intent(this, AgentService::class.java)) }
-        AgentService.pairing.arm()
+        lastQr = link != null
+        if (link != null) AgentService.pairing.armQr(link.secret, link.label) else AgentService.pairing.arm()
         startAdvertising()
         renderPairing()
+    }
+
+    /**
+     * A scanned code, before anything happens: which computer, and one tap to go on. The tap is
+     * the person's consent: a link can come from anywhere (a message, a web page), and it must
+     * not be enough on its own to let a computer pair with this phone.
+     */
+    private fun renderQrConfirm() {
+        val link = pendingLink ?: return render()
+        screen = Screen.QR_CONFIRM
+        interceptBack(true)
+        tick.removeCallbacksAndMessages(null)
+        show(frame(centered = true) {
+            addView(text(getString(R.string.pair_overline), Type.OVERLINE, Ui.ACCENT, center = true), matchWrap())
+            addView(mark(150, top = dp(12), bottom = dp(4)))
+            addView(text(getString(R.string.pair_qr_confirm_title, link.label), Type.DISPLAY, center = true), matchWrap())
+            addView(text(getString(R.string.pair_qr_confirm_body), Type.BODY, Ui.MUTED, center = true), matchWrap(top = dp(10)))
+            addView(button(getString(R.string.pair_qr_confirm), Kind.PRIMARY, R.drawable.ic_computer) { startPairing(link) },
+                matchWrap(top = dp(24)))
+            addView(button(getString(R.string.cancel), Kind.GHOST) { pendingLink = null; render() }, wrap(top = dp(8)))
+            entrance()
+        })
     }
 
     private fun cancelPairing() {
@@ -896,7 +957,19 @@ class MainActivity : Activity() {
         else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         show(frame(centered = true) {
             when (v.state) {
-                PairingSession.State.WAITING, PairingSession.State.COMMITTED -> {
+                PairingSession.State.WAITING, PairingSession.State.COMMITTED -> if (v.qr) {
+                    // From a scanned code: nothing to read or type. The computer finds this phone.
+                    val found = v.state == PairingSession.State.COMMITTED
+                    addView(text(getString(R.string.pair_overline), Type.OVERLINE, Ui.ACCENT, center = true), matchWrap())
+                    addView(mark(150, top = dp(12), bottom = dp(4)).apply {
+                        countDown(v.deadline - Pairing.CODE_TTL_MS, Pairing.CODE_TTL_MS)
+                    })
+                    addView(text(getString(if (found) R.string.pair_qr_working else R.string.pair_qr_waiting, v.label ?: ""),
+                        Type.DISPLAY, center = true), matchWrap())
+                    addView(text(getString(R.string.pair_qr_waiting_body, v.label ?: ""), Type.BODY, Ui.MUTED, center = true),
+                        matchWrap(top = dp(10)))
+                    addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(16)))
+                } else {
                     addView(text(getString(R.string.pair_overline), Type.OVERLINE, Ui.ACCENT, center = true), matchWrap())
                     addView(mark(150, top = dp(12), bottom = dp(4)).apply {
                         countDown(v.deadline - Pairing.CODE_TTL_MS, Pairing.CODE_TTL_MS)
@@ -950,7 +1023,7 @@ class MainActivity : Activity() {
                     addView(text(getString(R.string.pair_interrupted), Type.DISPLAY, Ui.DANGER, center = true), matchWrap(top = dp(20)))
                     addView(text(getString(R.string.pair_interrupted_detail), Type.BODY, Ui.MUTED, center = true),
                         matchWrap(top = dp(8)))
-                    addView(button(getString(R.string.pair_again), Kind.PRIMARY) { startPairing() }, matchWrap(top = dp(28)))
+                    tryAgain()
                     addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(8)))
                 }
                 PairingSession.State.OUTDATED -> {
@@ -967,7 +1040,7 @@ class MainActivity : Activity() {
                     addView(text(getString(R.string.pair_expired), Type.DISPLAY, center = true), matchWrap())
                     addView(text(getString(R.string.pair_expired_detail), Type.BODY, Ui.MUTED, center = true),
                         matchWrap(top = dp(8)))
-                    addView(button(getString(R.string.pair_again), Kind.PRIMARY) { startPairing() }, matchWrap(top = dp(28)))
+                    tryAgain()
                     addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(8)))
                 }
             }
@@ -983,6 +1056,13 @@ class MainActivity : Activity() {
                 }
             }, 1000)
         }
+    }
+
+    /** "Try again" after a pairing that ended without a computer. A scanned code is single-use
+     *  (its secret is gone with the pairing), so then the way back is the computer's new code. */
+    private fun LinearLayout.tryAgain() {
+        if (lastQr) addView(text(getString(R.string.pair_qr_again), Type.BODY, Ui.FG, center = true), matchWrap(top = dp(24)))
+        else addView(button(getString(R.string.pair_again), Kind.PRIMARY) { startPairing() }, matchWrap(top = dp(28)))
     }
 
     // ---------------------------------------------------------------- approval

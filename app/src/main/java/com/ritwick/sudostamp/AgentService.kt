@@ -518,23 +518,7 @@ class AgentService : Service() {
                 val label = r.blob()
                 val dialled = Net.endpoint(conn.local, conn.localPort)
                 val stable = Net.endpoint(Net.stable() ?: conn.local, PORT)
-                val c = pairing.commit(client, conn.id, label, dialled, stable) { challenge ->
-                    // A new key for this computer alone. Made here, before the commitment,
-                    // because the commitment covers it.
-                    val id = Keys.newId()
-                    try {
-                        val where = Keys.create(Keys.aliasFor(id), allowSoftware = debuggable(this), challenge)
-                        Log.i(TAG, "pairing: key $id created in $where")
-                        PairingSession.NewKey(
-                            id, Keys.blob(Keys.aliasFor(id))!!,
-                            PairingSession.Attestation(challenge, Keys.attestationChain(Keys.aliasFor(id))),
-                        )
-                    } catch (e: Exception) {
-                        Log.w(TAG, "pairing: cannot create a key: ${e.message}")
-                        runCatching { Keys.delete(Keys.aliasFor(id)) }
-                        null
-                    }
-                }
+                val c = pairing.commit(client, conn.id, label, dialled, stable, ::newPairingKey)
                 Log.i(TAG, if (c != null) "pairing: commit from $client" else "pairing: commit from $client refused")
                 if (c != null) AgentProtocol.success(c) else AgentProtocol.failure()
             }
@@ -554,6 +538,30 @@ class AgentService : Service() {
                 }
                 if (id != null) AgentProtocol.success() else AgentProtocol.failure()
             }
+            Pairing.EXT_QR_HELLO -> {
+                // Only "yes, I scanned you" or nothing: no state, no log line per probe.
+                if (pairing.qrHello(r.blob())) AgentProtocol.success() else AgentProtocol.failure()
+            }
+            Pairing.EXT_QR_COMMIT -> {
+                val nh = r.blob()
+                val mac = r.blob()
+                val dialled = Net.endpoint(conn.local, conn.localPort)
+                val stable = Net.endpoint(Net.stable() ?: conn.local, PORT)
+                val v = pairing.qrCommit(client, conn.id, nh, mac, dialled, stable, ::newPairingKey)
+                Log.i(TAG, if (v != null) "pairing: QR commit from $client" else "pairing: QR commit from $client refused")
+                if (v != null) AgentProtocol.success(v.keyBlob, v.phoneNonce, v.dialled, v.stable, v.mac) else AgentProtocol.failure()
+            }
+            Pairing.EXT_QR_DONE -> {
+                val nh = r.blob()
+                val mac = r.blob()
+                val label = pairing.view().label ?: "a computer"
+                val id = pairing.qrDone(client, conn.id, nh, mac)
+                if (id != null) {
+                    Hosts.add(this, Host(id, label, System.currentTimeMillis(), false, client))
+                    Log.i(TAG, "pairing: $client paired by QR code as $id (pending its first approval)")
+                }
+                if (id != null) AgentProtocol.success() else AgentProtocol.failure()
+            }
             Pairing.EXT_ATTEST -> {
                 // Only the key this open pairing just made, to the computer that paired.
                 val a = pairing.attestation(client)
@@ -566,6 +574,24 @@ class AgentService : Service() {
                 AgentProtocol.failure()
             }
             else -> AgentProtocol.failure()
+        }
+    }
+
+    /** A new key for one computer, made while answering its commit (the commitment or MAC
+     *  covers it), with its attestation for [challenge]; null if the Keystore cannot. */
+    private fun newPairingKey(challenge: ByteArray): PairingSession.NewKey? {
+        val id = Keys.newId()
+        return try {
+            val where = Keys.create(Keys.aliasFor(id), allowSoftware = debuggable(this), challenge)
+            Log.i(TAG, "pairing: key $id created in $where")
+            PairingSession.NewKey(
+                id, Keys.blob(Keys.aliasFor(id))!!,
+                PairingSession.Attestation(challenge, Keys.attestationChain(Keys.aliasFor(id))),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "pairing: cannot create a key: ${e.message}")
+            runCatching { Keys.delete(Keys.aliasFor(id)) }
+            null
         }
     }
 

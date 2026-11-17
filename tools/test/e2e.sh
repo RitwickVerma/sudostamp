@@ -966,6 +966,53 @@ check "sudo works via the phone with NO password" as_user_sudo ""
 check "--json is refused on the commands that have no JSON form" bash -c "bash '$I' status --json >/dev/null 2>&1; [ \$? = 2 ]"
 pkill -f -- "--port 7821 " 2>/dev/null; pkill -f -- "--port 7822 " 2>/dev/null; sleep 0.5
 
+step "15b. setup --json --qr: pairing by the desktop's QR code, no code typed"
+# The phone "scanned" the secret in /tmp/qr7823.secret. The installer gets it as the first line
+# of stdin; it must never appear in a command line.
+QRS="ZGVmZ2hpamtsbW5vcHFycw"; WRONG_QRS="AAECAwQFBgcICQoLDA0ODw"
+echo "$QRS" > /tmp/qr7823.secret
+pairing_phone 7823 --qr-secret-file /tmp/qr7823.secret
+check "the phone that scanned answers the hello, and only to its own secret" \
+  python3 -I -c "
+import importlib.util; s = importlib.util.spec_from_file_location('p', '$W/tools/pair.py'); P = importlib.util.module_from_spec(s); s.loader.exec_module(P)
+assert P.scanned('127.0.0.1:7823', P.qr_hello(P.qr_secret('$QRS')))
+assert not P.scanned('127.0.0.1:7823', P.qr_hello(P.qr_secret('$WRONG_QRS')))"
+check "--qr is only for setup --json" bash -c "echo $QRS | bash '$I' setup --phone 127.0.0.1:7823 --qr >/dev/null 2>&1; [ \$? = 2 ]"
+cp "/etc/authorized_keys/$U.keys" /tmp/keys.before
+state0="$(stack_state)"
+python3 "$W/tools/test/drive_setup.py" "$I" 127.0.0.1:7823 /dev/null /tmp/setupq-wrong.out --qr "$WRONG_QRS" > /tmp/setupq-wrong.res 2>&1
+sed 's/^/    | /' /tmp/setupq-wrong.res
+check "a computer without the phone's secret: done:false, and the phone refused without effect" \
+  bash -c "grep -q '^RESULT done=false' /tmp/setupq-wrong.res && grep -q 'qr: commit refused (proof)' /tmp/p7823.log && ! grep -q '^qr: commit$' /tmp/p7823.log"
+check "nothing pinned, the stack unchanged" \
+  bash -c "[ \"\$(cksum < /tmp/keys.before)\" = \"\$(cksum < /etc/authorized_keys/$U.keys)\" ] && [ '$state0' = \"\$($(declare -f stack_state); TARGET='$TARGET'; stack_state)\" ]"
+# A relay in front of the phone, passing every byte: the proof covers where the computer dialled.
+python3 "$W/tools/test/mock_agent.py" --port 7824 --relay-to 127.0.0.1:7823 > /tmp/relay7824.log 2>&1 &
+sleep 1
+python3 "$W/tools/test/drive_setup.py" "$I" 127.0.0.1:7824 /dev/null /tmp/setupq-relay.out --qr "$QRS" > /tmp/setupq-relay.res 2>&1
+check "through a relay: refused by the phone, nothing pinned" \
+  bash -c "grep -q '^RESULT done=false' /tmp/setupq-relay.res && [ \"\$(cksum < /tmp/keys.before)\" = \"\$(cksum < /etc/authorized_keys/$U.keys)\" ]"
+pkill -f -- "--port 7824 " 2>/dev/null
+( python3 "$W/tools/test/drive_setup.py" "$I" 127.0.0.1:7823 /dev/null /tmp/setupq-ok.out --qr "$QRS" > /tmp/setupq-ok.res 2>&1 ) &
+qpid=$!
+# The installer and pair.py, not this test's own driver (which is handed the secret to play the
+# desktop app) or the awk doing the looking.
+seen=0
+for _ in $(seq 1 400); do
+  ps -eo args | awk -v s="$QRS" 'index($0, s) && !/drive_setup|awk/ {f=1} END {exit !f}' && seen=1
+  kill -0 $qpid 2>/dev/null || break; sleep 0.05
+done
+wait $qpid
+sed 's/^/    | /' /tmp/setupq-ok.res
+check "by QR: done:true, nothing asked, every step in order" \
+  grep -q '^RESULT done=true attestation=Key NOT hardware-attested.*asked= steps=pairing:start,pairing:ok,install:start,install:ok,test:start,test:ok,apply:start,apply:ok$' /tmp/setupq-ok.res
+check "the secret was on no command line while it ran" [ "$seen" = 0 ]
+check "the phone that scanned is the one pinned" \
+  bash -c "[ \"\$(awk '{print \$2}' /etc/authorized_keys/$U.keys)\" = \"\$(awk '{print \$2}' /tmp/p7823.pub)\" ] && grep -q 'pairing: done (qr)' /tmp/p7823.log"
+check "and the secret is not left on disk" bash -c "! grep -rlsF '$QRS' /tmp/sudostamp.* /var/lib/sudostamp 2>/dev/null | grep -q ."
+check "sudo works via that phone with NO password" as_user_sudo ""
+pkill -f -- "--port 7823 " 2>/dev/null; sleep 0.5
+
 step "14. uninstall"
 # A foreign key in the user's file, and a second user's file that is only SudoStamp's.
 echo "$EVIL_PUB" >> "/etc/authorized_keys/$U.keys"

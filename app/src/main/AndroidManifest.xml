@@ -75,6 +75,18 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- A computer's pairing code (QrLink): verified against
+                 https://sudostamp.ritwickverma.dev/.well-known/assetlinks.json, so the camera
+                 opens it here and not in a browser. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:host="sudostamp.ritwickverma.dev" />
+                <data android:path="/pair" />
+                <data android:path="/pair/" />
+            </intent-filter>
         </activity>
 
         <receiver

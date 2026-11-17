@@ -46,6 +46,30 @@ class StableAddress(unittest.TestCase):
         self.assertEqual(P.split_addr("[fd00::1]:7777"), ("fd00::1", 7777))
 
 
+class ProtocolQr(unittest.TestCase):
+    """qr-v1: the same vectors as QrPairingTest.kt."""
+    key = bytes.fromhex("0000001365636473612d736861322d6e69737470323536000000086e6973747032353600000041"
+                        "040102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+                        "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40")
+    np_, nh = bytes(range(32)), bytes(range(32, 64))
+    d = bytes.fromhex("00000000000000000000ffffc0a801141e61")
+    st = bytes.fromhex("fd6c5c9300231f7e445b9bfffe36628a1e61")
+    secret = bytes(range(100, 116))
+
+    def test_vectors(self):
+        self.assertEqual(P.qr_hello(self.secret).hex(), "31f4cea57d62d633c97c53e9d334977711d78786b42dd0284f6e366000e1a4e4")
+        self.assertEqual(P.qr_commit_mac(self.secret, self.nh, self.d).hex(), "3bf5b2c6b26a47adacf03c1bad1e01e5b44e8e307eeffaa47903663fbf56aad9")
+        self.assertEqual(P.qr_phone_mac(self.secret, self.nh, self.key, self.np_, self.d, self.st).hex(),
+                         "8cb878e9ec27f7b7464167117bff19f3cbaf37d163177cb0514d16094217bd9b")
+        self.assertEqual(P.qr_done_mac(self.secret, self.nh, self.key).hex(), "85497f963bbac992724f61dc216216d337c3bf7d00a0a27b2367e99e0229f2d9")
+
+    def test_secret_text(self):
+        self.assertEqual(P.qr_secret("ZGVmZ2hpamtsbW5vcHFycw\n"), self.secret)
+        for bad in ("", "ZGVmZ2hpamtsbW5vcHFyc", "ZGVmZ2hpamtsbW5vcHFycwA", "ZGVmZ2hpamtsbW5vcHFyct", "ZGVmZ2hpamtsbW5vcHFycw==",
+                    "+GVmZ2hpamtsbW5vcHFycw", " " * 22, "x" * 200):
+            self.assertIsNone(P.qr_secret(bad), bad)
+
+
 class ProtocolV2(unittest.TestCase):
     """The same vectors as PairingTest.kt: the phone and this computer must agree byte for byte."""
     key = bytes.fromhex("0000001365636473612d736861322d6e69737470323536000000086e6973747032353600000041"

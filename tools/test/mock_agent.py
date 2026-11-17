@@ -122,6 +122,9 @@ def main():
     ap.add_argument("--attest", choices=("software", "none"), default="software")
     # A relay that passes everything through to this address, changing nothing.
     ap.add_argument("--relay-to")
+    # Pairing by QR code: the phone "scanned" the secret in this file (read at each message, so a
+    # test can write it late). Without it, the QR messages are refused like an unarmed phone.
+    ap.add_argument("--qr-secret-file")
     a = ap.parse_args()
     if a.host not in ("127.0.0.1", "::1", "localhost"):
         sys.exit("mock_agent binds loopback only")
@@ -197,6 +200,45 @@ def main():
                 with open(a.pubkey_out, "w") as f:
                     f.write(line(session["blob"]))
             print("pairing: done", flush=True)
+            return bytes([SUCCESS])
+        if name in (P.EXT_QR_HELLO, P.EXT_QR_COMMIT, P.EXT_QR_DONE):
+            secret = None
+            if a.qr_secret_file and os.path.exists(a.qr_secret_file):
+                secret = P.qr_secret(open(a.qr_secret_file).read())
+            if secret is None:
+                return bytes([FAILURE])
+            if name == P.EXT_QR_HELLO:
+                tag, _ = P.take(body, o)
+                ok = not session and P.hmac.compare_digest(tag, P.qr_hello(secret))
+                return bytes([SUCCESS if ok else FAILURE])
+            if name == P.EXT_QR_COMMIT:
+                nh, o = P.take(body, o)
+                mac, _ = P.take(body, o)
+                d = P.endpoint(conn.getsockname())
+                if not P.hmac.compare_digest(mac, P.qr_commit_mac(secret, nh, d)):
+                    print("qr: commit refused (proof)", flush=True)
+                    return bytes([FAILURE])                 # no effect on the session
+                if session:                                 # a second valid commit stops it
+                    session["dead"] = True
+                    return bytes([FAILURE])
+                session["key"], session["blob"] = new_key()
+                session["np"], session["nh"], session["d"] = os.urandom(32), nh, d
+                session["st"] = P.endpoint(P.split_addr(a.stable)) if a.stable else d
+                session["qr"] = True
+                print("qr: commit", flush=True)
+                return bytes([SUCCESS]) + P.s(session["blob"]) + P.s(session["np"]) + P.s(d) + P.s(session["st"]) + \
+                    P.s(P.qr_phone_mac(secret, nh, session["blob"], session["np"], d, session["st"]))
+            nh, o = P.take(body, o)
+            mac, _ = P.take(body, o)
+            if not session.get("qr") or session.get("dead") or session.get("nh") != nh or \
+                    not P.hmac.compare_digest(mac, P.qr_done_mac(secret, nh, session["blob"])):
+                return bytes([FAILURE])
+            keys[session["blob"]] = session["key"]
+            session["done"] = True
+            if a.pubkey_out:
+                with open(a.pubkey_out, "w") as f:
+                    f.write(line(session["blob"]))
+            print("pairing: done (qr)", flush=True)
             return bytes([SUCCESS])
         if name == P.EXT_ATTEST:
             # Only after done, only for this session's key, like the app.

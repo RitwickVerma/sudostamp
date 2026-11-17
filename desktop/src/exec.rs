@@ -42,12 +42,32 @@ fn spawn(cmd: &mut Command) -> io::Result<Child> {
 /// Returns the exit status (`None` = timed out, killed or signalled), stdout and stderr.
 type Captured = (Option<i32>, Vec<u8>, Vec<u8>);
 
-fn capture(mut cmd: Command, timeout: Duration, max: usize) -> io::Result<Captured> {
+fn capture(cmd: Command, timeout: Duration, max: usize) -> io::Result<Captured> {
+    capture_with(cmd, None, timeout, max)
+}
+
+/// `capture`, with `input` written to the program's stdin (then closed): how a secret reaches
+/// a program without being on its command line, which every user can read.
+fn capture_with(
+    mut cmd: Command,
+    input: Option<&[u8]>,
+    timeout: Duration,
+    max: usize,
+) -> io::Result<Captured> {
     let mut child = spawn(
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped()),
+        cmd.stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped()),
     )?;
+    if let (Some(data), Some(mut stdin)) = (input, child.stdin.take()) {
+        // A few bytes into a fresh pipe: this cannot block. A program that exited first is
+        // its own failure, reported by its status.
+        let _ = stdin.write_all(data);
+    }
     let bufs = [
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(Vec::new())),
@@ -119,14 +139,19 @@ pub fn doctor(installer: &Path) -> Result<Report, String> {
     doctor::parse(&String::from_utf8_lossy(&out))
 }
 
-/// `pair.py discover`, unprivileged: phones whose "Pair a computer" screen is open. Exit 1 only
-/// means none were found.
-pub fn discover(pair_py: &Path) -> Result<Vec<Phone>, String> {
+/// `pair.py discover`, unprivileged: phones whose "Pair a computer" screen is open, and, given
+/// the secret of this window's QR code (`qr`, sent on stdin), which of them scanned it. Exit 1
+/// only means none were found.
+pub fn discover(pair_py: &Path, qr: Option<&str>) -> Result<Vec<Phone>, String> {
     let mut cmd = Command::new("python3");
     cmd.arg("-I")
         .arg(pair_py)
         .args(["discover", "--timeout", "3"]);
-    let (status, out, _) = capture(cmd, DISCOVER_TIMEOUT, MAX_OUTPUT)
+    if qr.is_some() {
+        cmd.arg("--qr-stdin");
+    }
+    let input = qr.map(|s| format!("{s}\n").into_bytes());
+    let (status, out, _) = capture_with(cmd, input.as_deref(), DISCOVER_TIMEOUT, MAX_OUTPUT)
         .map_err(|e| format!("cannot run python3: {e}"))?;
     match status {
         Some(0 | 1) => Ok(setup::parse_discover(&String::from_utf8_lossy(&out))),
@@ -218,7 +243,7 @@ pub enum SetupMsg {
     Exit(Option<i32>),
 }
 
-/// A running `pkexec <installer> setup --phone <addr> --json`.
+/// A running `pkexec <installer> setup --phone <addr> --json [--qr]`.
 pub struct SetupProc {
     /// `None` once stopped: the reaping happens on a thread of its own.
     child: Option<Child>,
@@ -256,13 +281,23 @@ fn read_line<R: BufRead>(r: &mut R) -> Option<String> {
 }
 
 impl SetupProc {
-    pub fn start(installer: &Path, phone: &Phone, env: Env) -> Result<Self, String> {
-        let args = [
+    /// With `qr` (the secret of the code the phone scanned), pairing needs no typed code: the
+    /// secret goes to the installer as its first line of stdin.
+    pub fn start(
+        installer: &Path,
+        phone: &Phone,
+        qr: Option<&str>,
+        env: Env,
+    ) -> Result<Self, String> {
+        let mut args = vec![
             "setup".to_string(),
             "--phone".into(),
             phone.addr.to_string(),
             "--json".into(),
         ];
+        if qr.is_some() {
+            args.push("--qr".into());
+        }
         let mut child = spawn(
             privileged(installer, &args, env)?
                 .stdin(Stdio::piped())
@@ -270,7 +305,13 @@ impl SetupProc {
                 .stderr(Stdio::null()),
         )
         .map_err(|e| format!("cannot run pkexec: {e}"))?;
-        let stdin = child.stdin.take();
+        let mut stdin = child.stdin.take();
+        if let (Some(secret), Some(s)) = (qr, stdin.as_mut()) {
+            // Read by the installer only after polkit's prompt, from the pipe's buffer.
+            let _ = s
+                .write_all(format!("{secret}\n").as_bytes())
+                .and_then(|()| s.flush());
+        }
         let mut out = io::BufReader::new(child.stdout.take().ok_or("no stdout")?);
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -445,8 +486,9 @@ echo "{\"v\":1,\"done\":true,\"attestation\":\"a\",\"phone\":\"1.2.3.4:7777\",\"
         let phone = Phone {
             addr: "1.2.3.4:7777".parse().unwrap(),
             name: "t".into(),
+            scanned: false,
         };
-        let mut run = SetupProc::start(&p, &phone, &stub).unwrap();
+        let mut run = SetupProc::start(&p, &phone, None, &stub).unwrap();
         let mut st = setup::Setup::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut sent = false;
@@ -464,6 +506,59 @@ echo "{\"v\":1,\"done\":true,\"attestation\":\"a\",\"phone\":\"1.2.3.4:7777\",\"
             d.ok && d.text == "got 123456" && d.phone == "1.2.3.4:7777",
             "{d:?}"
         );
+    }
+
+    #[test]
+    fn by_qr_the_secret_goes_on_stdin_never_on_the_command_line() {
+        // The "installer" reports its arguments and the first line of its stdin.
+        let p = script(
+            "setupqr",
+            r#"read s
+echo "{\"v\":1,\"done\":true,\"attestation\":\"\",\"phone\":\"$*\",\"text\":\"$s\"}""#,
+        );
+        let stub = |k: &str| (k == "SUDOSTAMP_PKEXEC").then(|| "/usr/bin/env".to_string());
+        let phone = Phone {
+            addr: "1.2.3.4:7777".parse().unwrap(),
+            name: "t".into(),
+            scanned: true,
+        };
+        // The protocol's public test vector (QrPairingTest.kt).
+        let vector = "ZGVmZ2hpamtsbW5vcHFycw";
+        let run = SetupProc::start(&p, &phone, Some(vector), &stub).unwrap();
+        let mut st = setup::Setup::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while st.done.is_none() && Instant::now() < deadline {
+            if let Ok(SetupMsg::Line(l)) = run.rx.recv_timeout(Duration::from_millis(100)) {
+                st.feed(&l);
+            }
+        }
+        let d = st.done.expect("the stub installer finished");
+        assert_eq!(d.text, vector);
+        assert_eq!(d.phone, "setup --phone 1.2.3.4:7777 --json --qr");
+        assert!(!d.phone.contains(vector));
+    }
+
+    #[test]
+    fn discovery_hands_the_secret_over_on_stdin() {
+        // A stand-in pair.py: python3 -I runs it, so it must be Python.
+        let d = std::env::temp_dir().join(format!("sudostamp-disc-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let py = d.join("pair.py");
+        fs::write(
+            &py,
+            "import sys\nassert sys.argv[1:] == ['discover', '--timeout', '3', '--qr-stdin']\n\
+             s = sys.stdin.readline().strip()\n\
+             print('192.168.1.20:7777\\tPixel\\t' + ('qr' if s == 'SECRET' else 'no'))\n",
+        )
+        .unwrap();
+        if Command::new("python3").arg("-V").output().is_err() {
+            return; // no python3 in this test environment: nothing to run it with
+        }
+        let p = discover(&py, Some("SECRET")).unwrap();
+        assert_eq!(p.len(), 1);
+        assert!(p[0].scanned);
+        assert!(!discover(&py, Some("OTHER")).unwrap()[0].scanned);
+        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

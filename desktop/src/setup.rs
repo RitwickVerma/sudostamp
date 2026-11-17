@@ -169,13 +169,19 @@ impl Setup {
 pub struct Phone {
     pub addr: SocketAddr,
     pub name: String,
+    /// It answered this window's QR code (`discover --qr-stdin`): it is the phone that scanned it.
+    pub scanned: bool,
 }
 
-/// `pair.py discover` prints `address:port<TAB>name` per phone. The name is network text.
+/// `pair.py discover` prints `address:port<TAB>name[<TAB>qr]` per phone; `qr` marks the phone
+/// that scanned the code. The name is network text.
 pub fn parse_discover(out: &str) -> Vec<Phone> {
     let mut phones: Vec<Phone> = Vec::new();
     for line in out.lines().take(32) {
-        let (addr, name) = line.split_once('\t').unwrap_or((line, ""));
+        let mut fields = line.splitn(3, '\t');
+        let addr = fields.next().unwrap_or("");
+        let name = fields.next().unwrap_or("");
+        let scanned = fields.next() == Some("qr");
         let Ok(addr) = addr.trim().parse::<SocketAddr>() else {
             continue;
         };
@@ -190,6 +196,7 @@ pub fn parse_discover(out: &str) -> Vec<Phone> {
             } else {
                 name
             },
+            scanned,
         });
     }
     phones
@@ -369,9 +376,14 @@ mod tests {
 
     #[test]
     fn discover_output() {
-        let out = "192.168.1.20:7777\tPixel 9\n[fd00::5]:7777\tTab\u{202e}let\n192.168.1.20:7777\tdup\nnot-an-address\tx\n10.0.0.1:0\tzero\n10.0.0.2:7777\n";
+        let out = "192.168.1.20:7777\tPixel 9\n[fd00::5]:7777\tTab\u{202e}let\tqr\n192.168.1.20:7777\tdup\nnot-an-address\tx\n10.0.0.1:0\tzero\n10.0.0.2:7777\n10.0.0.3:7777\tz\tqrx\n";
         let p = parse_discover(out);
-        assert_eq!(p.len(), 3);
+        assert_eq!(p.len(), 4);
+        assert_eq!(
+            p.iter().map(|x| x.scanned).collect::<Vec<_>>(),
+            [false, true, false, false],
+            "only an exact third field qr"
+        );
         assert_eq!(
             (p[0].addr.to_string().as_str(), p[0].name.as_str()),
             ("192.168.1.20:7777", "Pixel 9")
