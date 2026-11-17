@@ -1,0 +1,1 @@
+Pair by scanning a code. The SudoStamp desktop app shows a QR code: point this phone's camera at it, tap Pair, and the computer finds the phone by itself. Nothing to type. The code is a one-time secret, new every two minutes. Typing the 6-digit code still works.

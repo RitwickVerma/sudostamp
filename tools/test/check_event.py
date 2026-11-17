@@ -33,6 +33,7 @@ def main():
     want = [e for e in a.events.split(",") if e]
     bad = []
     got = []
+    shown = []                   # the events with their reasons, for the message: "skipped(away)"
     for l in lines:
         if len(l) > 2048:
             bad.append("datagram of %d bytes" % len(l))
@@ -42,6 +43,7 @@ def main():
             bad.append("not UTF-8 JSON: %r" % l[:80])
             continue
         got.append(ev.get("event"))
+        shown.append("%s(%s)" % (ev.get("event"), ev.get("reason")) if ev.get("reason") else str(ev.get("event")))
         fields = {"v", "event", "sudo_pid", "tty", "command", "phone", "ts"}
         if ev.get("event") == "skipped":
             fields.add("reason")
@@ -72,7 +74,7 @@ def main():
         if a.reason is not None and ev.get("reason") != a.reason and ev["event"] == "skipped":
             bad.append("reason %r, want %r" % (ev.get("reason"), a.reason))
     if got != want:
-        bad.append("events %s, want %s" % (got, want))
+        bad.append("events %s, want %s" % (shown, want))
     if bad:
         print("; ".join(bad))
         return 1

@@ -83,7 +83,8 @@ cd desktop && cargo fmt --check && cargo clippy --all-targets --locked -- -D war
 | `Limiter.kt` | When a paired computer's request is refused unprompted: 3 s after an approval, per-computer cooldown, global cap |
 | `SshSig.kt` | SSH key blob, authorized_keys line, DER -> SSH signature blob; no crypto |
 | `MainActivity.kt` | Setup screen + approval flow; `sync()` is the single place that reconciles UI and prompt with the service |
-| `Pairing.kt`, `PairingSession.kt` | Pairing protocol v2 (commitment over key, nonce and addresses + 6-digit code) and the phone's one-attempt-per-tap state machine; a second commit cancels, even after done. Also `attest-v1@sudostamp` (the new key's attestation chain, only after done, only while open) and `attestChallenge` |
+| `QrLink.kt` | The pairing QR code's link (`https://sudostamp.ritwickverma.dev/pair#1.<S>.<name>`, or `?k=` from the site's intent button): parsed exactly or not at all |
+| `Pairing.kt`, `PairingSession.kt` | Pairing protocol v2 and `qr-v1` (the QR secret replaces the code; refused without effect when unproven; the modes never mix) (commitment over key, nonce and addresses + 6-digit code) and the phone's one-attempt-per-tap state machine; a second commit cancels, even after done. Also `attest-v1@sudostamp` (the new key's attestation chain, only after done, only while open) and `attestChallenge` |
 | `StartReceiver.kt` | Restarts the listener on boot and app update |
 | `Ui.kt` | The design system: colours, type, cards, pills, buttons, checklist rows, the width-capped column |
 | `FingerprintView.kt`, `ResultMark.kt` | The animated mark (radar, or countdown ring on approval); the drawn check/cross result |
@@ -197,8 +198,11 @@ installer built: `uninstall` removes only that, `doctor` reads the patch state f
 19. The installer must never let root open, copy or chmod a path inside a user-owned directory:
     read it with `sudo -u "$TARGET_USER" cat`, write the result as root. Root temp files go in
     `root_tmp`. Python as root is `python3 -I`.
-20. Pairing (Pairing.kt, PairingSession.kt, tools/pair.py) has test vectors in PairingTest that
-    tools/pair.py must reproduce: change both sides together. Never allow a second exchange per
+20. Pairing (Pairing.kt, PairingSession.kt, tools/pair.py) has test vectors in PairingTest (and
+    QrPairingTest for qr-v1) that tools/pair.py must reproduce: change both sides together. The QR
+    secret never goes on a command line (stdin only: `discover --qr-stdin`, `setup --json --qr`).
+    `site/` (its own site, CI job `site`) must keep naming QrLink.HOST and the release certificate:
+    `site/build.py --check` fails otherwise. Never allow a second exchange per
     arming (it re-enables the grinding attack). pair.py reads the code byte by byte from fd 0, so
     a scripted `code\nyes\n` reaches both prompts.
 21. Android's mDNS responder ignores legacy-unicast queries and rate-limits multicast replies

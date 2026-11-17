@@ -205,3 +205,39 @@ refuse with `--require-attestation`), or a genuine chain that disagrees (refuse)
 kept in `/etc/authorized_keys/<user>.attestation`, beside the key file because pam_rssh reads
 every line of that one, and shown by `install.sh status`. A phone that cannot attest, or an app
 before 1.5, makes the key without a challenge and the computer says `NOT hardware-attested`.
+
+## Pairing by QR code (1.7, `qr-v1`)
+
+Same file, same vectors in both test suites. The desktop app shows a QR code holding
+`https://sudostamp.ritwickverma.dev/pair#1.<S>.<name>`: S is 16 random bytes, fresh for every
+attempt and every two minutes. The phone's camera opens it as a verified app link (the site's
+`assetlinks.json` names the release certificate), the person taps **Pair**, and S takes the place
+of the person comparing codes:
+
+- the computer finds the phone that scanned (`pair-qr-hello-v1` with `H(tag, S)` and its nonce Nq):
+  the phone answers with a fresh nonce Nc for that one connection and `HMAC(S, tag, Nq, Nc)`, so
+  a device that merely says SUCCESS is not taken for it,
+- proves S, on the same connection, over Nc and the address it dialled (`pair-qr-v1`: Nh,
+  `HMAC(S, tag, Nh, Nc, R)`); the phone checks that against where it was dialled, so a relay fails,
+  and spends Nc. Anything without S is refused *without effect*, and so is a commit copied off the
+  network and sent again on another connection (its Nc is not that connection's): nobody without S
+  can cancel, spend or slow a pairing,
+- the phone answers with K, Np, D, S and `HMAC(S, tag, Nh, Nc, K, Np, D, S)`; the computer checks it
+  and D == R, then confirms with `HMAC(S, tag, Nh, K)` on the same connection. Attestation follows
+  unchanged.
+
+What it does not do: anyone who sees the code holds S as fully as the person. Someone watching
+the screen (over a shoulder, a screen share) and on the same LAN with SudoStamp could have their
+phone found first. Hence two minutes per code, a new one after every attempt, refusing when two
+phones answer one code, the window naming the phone it found, and asking the person to check that
+their own phone now says Paired (pairing again replaces the key). The typed code, which this attack
+cannot beat, stays: "Pair with a 6-digit code instead".
+
+The secret never appears on a command line (they are world-readable): the desktop app hands it to
+`pair.py discover --qr-stdin` and to `pkexec install.sh setup --json --qr` on stdin, and the
+installer keeps it in its private 0700 directory, deleted when it exits. In a browser (no app yet)
+the link loads a static page that never receives S (it is after `#`), strips it from the address
+bar, and offers "Open in SudoStamp" (an intent carrying it as `?k=`) and Google Play.
+
+The site, `site/`, belongs to this repository alone: CI job `site` deploys it to its own Cloudflare
+Pages project with a token that can deploy Pages and nothing else, from the homelab's address only.

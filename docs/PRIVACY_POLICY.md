@@ -1,6 +1,7 @@
 # SudoStamp Privacy Policy
 
-**Effective date:** 24 October 2026 (applies to SudoStamp 1.4 and later)
+**Effective date:** 16 November 2026 (applies to SudoStamp 1.7 and later; earlier versions: the
+same, without pairing by QR code and without the website)
 **Developer:** Ritwick Verma — verma1997@gmail.com
 **App:** SudoStamp (`com.ritwick.sudostamp`), free and open source (MIT),
 source at https://gitlab.com/ritwick7/sudostamp
@@ -21,12 +22,21 @@ you pair it with, on your own local network.
 | Requests from your computers | A computer you paired sends a random 32-byte challenge; the phone signs it after your fingerprint and sends the signature back to that computer. | Over your local network only, directly between the phone and that computer. Nothing is stored. |
 | Local network | The app listens on TCP port 7777 for paired computers, and serves only devices on the same Wi-Fi or Ethernet network. While you pair a computer it announces itself on that network (mDNS) so the computer can find it. | Nothing goes to the internet. |
 | Notifications | Shows "Approve sudo?" for each request, and an ongoing notice while the listener runs (Android requires it). | — |
+| Pairing codes | A computer's pairing QR code holds a one-time secret and the computer's name. Your camera app opens it as a link to SudoStamp, which uses the secret once, over your local network, to pair with that computer. | Never stored or sent anywhere else; it stops working after two minutes. If the link opens in a browser instead, it stays in the part of the link that browsers never send (see "The website" below). |
 
 ## What the app does not do
 
 No data is sold, shared, or sent to the developer or any third party. There are no third-party
 libraries in the app at all. The app does not access contacts, location, files, the camera, the
 microphone or your accounts.
+
+## The website
+
+https://sudostamp.ritwickverma.dev, where this policy and the pairing link live, is a static site
+served by Cloudflare Pages. It sets no cookies, runs no analytics and loads nothing from anyone
+else. Cloudflare, which serves it, sees what any web server sees (your IP address and browser) and
+keeps it under its own policy. The pairing page reads the secret only in your browser, to offer an
+"Open in SudoStamp" button, and removes it from the address bar at once.
 
 ## Children
 

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Drive `install.sh setup --phone ADDR --json` the way the desktop app does, for the e2e test.
 
-    drive_setup.py INSTALL_SH ADDR CODEFILE TRANSCRIPT [--wrong-code]
+    drive_setup.py INSTALL_SH ADDR CODEFILE TRANSCRIPT [--wrong-code] [--qr SECRET]
+
+With --qr, `setup --json --qr` gets SECRET as its first line of stdin (the desktop app's QR code)
+and nothing asks for a code.
 
 Reads stdout line by line, answers `ask` events (the code from CODEFILE, which the mock phone
 writes in place of the person reading its screen; `yes` to confirmations) and checks the protocol
@@ -22,8 +25,12 @@ STATUS = {"start", "ok", "fail"}
 def main():
     install, addr, codefile, transcript = sys.argv[1:5]
     wrong = "--wrong-code" in sys.argv[5:]
-    p = subprocess.Popen([install, "setup", "--phone", addr, "--json"], stdin=subprocess.PIPE,
-                         stdout=subprocess.PIPE, stderr=open(transcript + ".stderr", "wb"))
+    qr = sys.argv[sys.argv.index("--qr") + 1] if "--qr" in sys.argv[5:] else None
+    p = subprocess.Popen([install, "setup", "--phone", addr, "--json"] + (["--qr"] if qr else []),
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(transcript + ".stderr", "wb"))
+    if qr:
+        p.stdin.write((qr + "\n").encode())
+        p.stdin.flush()
     done = None
     asked = []
     steps = []

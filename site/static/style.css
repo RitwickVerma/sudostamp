@@ -1,0 +1,38 @@
+:root {
+  --bg: #0b0d12; --surface: #141821; --surface-hi: #1c2230; --outline: #252c3b;
+  --fg: #e7edf7; --muted: #8a97ad; --soft: #a3afc2; --accent: #4ade80; --on-accent: #06210f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); }
+body {
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+  min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+  padding: 32px 20px 48px;
+}
+main { width: 100%; max-width: 640px; }
+header.brand { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+header.brand img { width: 28px; height: 28px; }
+header.brand a { color: var(--fg); text-decoration: none; font-weight: 600; font-size: 18px; }
+h1 { font-size: 28px; line-height: 1.2; margin: 0 0 12px; }
+h2 { font-size: 19px; margin: 32px 0 8px; }
+p, li { color: var(--soft); }
+a { color: var(--accent); }
+.card { background: var(--surface); border: 1px solid var(--outline); border-radius: 18px; padding: 22px; margin: 18px 0; }
+.buttons { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; }
+.button {
+  display: block; text-align: center; padding: 14px 18px; border-radius: 14px; font-weight: 600;
+  text-decoration: none; border: 1px solid var(--outline); background: var(--surface-hi); color: var(--fg);
+}
+.button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.muted { color: var(--muted); font-size: 14px; }
+.card .muted { margin: 0; }
+code { background: var(--surface-hi); padding: 1px 6px; border-radius: 6px; font-size: 0.92em; }
+.table { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 15px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 8px; border-top: 1px solid var(--outline); }
+th { color: var(--fg); }
+td { color: var(--soft); }
+[hidden] { display: none !important; }
+footer { margin-top: 36px; color: var(--muted); font-size: 14px; }
+footer a { color: var(--muted); }

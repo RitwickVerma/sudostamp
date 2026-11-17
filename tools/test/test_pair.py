@@ -46,6 +46,48 @@ class StableAddress(unittest.TestCase):
         self.assertEqual(P.split_addr("[fd00::1]:7777"), ("fd00::1", 7777))
 
 
+class ProtocolQr(unittest.TestCase):
+    """qr-v1: the same vectors as QrPairingTest.kt."""
+    key = bytes.fromhex("0000001365636473612d736861322d6e69737470323536000000086e6973747032353600000041"
+                        "040102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+                        "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40")
+    np_, nh, nc, nq = bytes(range(32)), bytes(range(32, 64)), bytes(range(64, 96)), bytes(range(128, 160))
+    d = bytes.fromhex("00000000000000000000ffffc0a801141e61")
+    st = bytes.fromhex("fd6c5c9300231f7e445b9bfffe36628a1e61")
+    secret = bytes(range(100, 116))
+
+    def test_vectors(self):
+        self.assertEqual(P.qr_hello(self.secret).hex(), "31f4cea57d62d633c97c53e9d334977711d78786b42dd0284f6e366000e1a4e4")
+        self.assertEqual(P.qr_hello_reply_mac(self.secret, self.nq, self.nc).hex(), "a4547293a70d9c16047a8932dc6314c3febe25fddd315bd34859a459226b52d0")
+        self.assertEqual(P.qr_commit_mac(self.secret, self.nh, self.nc, self.d).hex(), "9c9912bdfd7aadba73ad7120151aa9ad69836e4ca744056ae7d932dc51a3a87f")
+        self.assertEqual(P.qr_phone_mac(self.secret, self.nh, self.nc, self.key, self.np_, self.d, self.st).hex(),
+                         "bec2517a399f3d3b4ef3810c65762e4979989e63e9827a797b0cdd796b1e8983")
+        self.assertEqual(P.qr_done_mac(self.secret, self.nh, self.key).hex(), "85497f963bbac992724f61dc216216d337c3bf7d00a0a27b2367e99e0229f2d9")
+
+    def test_secret_text(self):
+        self.assertEqual(P.qr_secret("ZGVmZ2hpamtsbW5vcHFycw\n"), self.secret)
+        for bad in ("", "ZGVmZ2hpamtsbW5vcHFyc", "ZGVmZ2hpamtsbW5vcHFycwA", "ZGVmZ2hpamtsbW5vcHFyct",
+                    "ZGVmZ2hpamtsbW5vcHFycw==", "+GVmZ2hpamtsbW5vcHFycw", " " * 22, "x" * 200):
+            self.assertIsNone(P.qr_secret(bad), bad)
+
+    def test_hello_needs_a_proof_not_just_success(self):
+        """A device that answers every hello with SUCCESS, or with a proof under another secret,
+        is not 'the phone that scanned'."""
+        class Liar:
+            def __init__(self, reply): self.reply = reply
+            def ext(self, name, payload, limit=4096): return self.reply(payload)
+        s = self.secret
+        def honest(payload):
+            tag, o = P.take(payload, 0)
+            nq, _ = P.take(payload, o)
+            return P.s(self.nc) + P.s(P.qr_hello_reply_mac(s, nq, self.nc)) if tag == P.qr_hello(s) else None
+        self.assertEqual(P.qr_hello_on(Liar(honest), s), self.nc)
+        for lie in (lambda p: b"", lambda p: P.s(self.nc), lambda p: P.s(self.nc) + P.s(bytes(32)),
+                    lambda p: P.s(self.nc) + P.s(P.qr_hello_reply_mac(bytes(16), P.take(p, P.take(p, 0)[1])[0], self.nc)),
+                    lambda p: P.s(self.nc[:31]) + P.s(bytes(32)), lambda p: b"\x00\x00"):
+            self.assertIsNone(P.qr_hello_on(Liar(lie), s))
+
+
 class ProtocolV2(unittest.TestCase):
     """The same vectors as PairingTest.kt: the phone and this computer must agree byte for byte."""
     key = bytes.fromhex("0000001365636473612d736861322d6e69737470323536000000086e6973747032353600000041"

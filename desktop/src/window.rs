@@ -14,6 +14,7 @@ use crate::exec::{self, SetupMsg, SetupProc};
 use crate::history::{self, Entry, Outcome};
 use crate::paths::{self, Env};
 use crate::setup::{self, Phone, Prompt, Setup, StepStatus};
+use crate::ticket::{self, Ticket};
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Layout,
     Margin, Pos2, RichText, Sense, Stroke, TextStyle, TextureHandle, Vec2, vec2,
@@ -64,7 +65,8 @@ enum Tab {
 /// What a background thread reports back.
 enum Done {
     Doctor(Result<Report, String>),
-    Discover(Result<Vec<Phone>, String>),
+    /// The phones found, and the QR secret they were asked about (to tell a stale answer).
+    Discover(Result<Vec<Phone>, String>, Option<String>),
     Repair(Result<String, String>),
 }
 
@@ -79,8 +81,14 @@ struct App {
     tx: Sender<Done>,
     rx: Receiver<Done>,
     mark: TextureHandle,
-    /// The Google Play link as QR modules, computed once.
-    play_qr: Vec<Vec<bool>>,
+    /// This computer's name, as the phone will show it.
+    host: String,
+    /// The pairing code on screen: its secret, and its modules. Replaced every two minutes and
+    /// after every attempt; `None` if no random secret could be made (then only the typed code).
+    ticket: Option<Ticket>,
+    pair_qr: Vec<Vec<bool>>,
+    /// The running setup is pairing by QR code (nothing to type).
+    qr_run: bool,
 
     doctor: Option<Result<Report, String>>,
     doctor_busy: bool,
@@ -421,30 +429,6 @@ fn ghost(text: &str) -> egui::Button<'static> {
         .min_size(vec2(0.0, 30.0))
 }
 
-/// One short instruction, with a dot in the accent colour: steps read better as a list than as
-/// one sentence with three actions in it.
-fn bullet(ui: &mut egui::Ui, text: &str) {
-    ui.horizontal_top(|ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(14.0, 18.0), Sense::hover());
-        ui.painter().circle_filled(r.center(), 3.0, ACCENT);
-        ui.add(egui::Label::new(RichText::new(text).color(SOFT)).wrap());
-    });
-}
-
-/// The phone app, for a computer whose person does not have it yet.
-const PLAY_URL: &str = "https://play.google.com/store/apps/details?id=com.ritwick.sudostamp";
-
-/// Open a web page in the person's browser (as them, never privileged); a missing xdg-open is
-/// not an error worth a dialog: the QR code next to the button does the same job.
-fn open_url(url: &str) {
-    let _ = std::process::Command::new("/usr/bin/xdg-open")
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-}
-
 /// A QR code's modules, drawn dark on a white tile with a quiet zone, as phone cameras expect.
 fn qr(ui: &mut egui::Ui, code: &[Vec<bool>], size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
@@ -634,6 +618,18 @@ impl App {
         self.history_read = Some(SystemTime::now());
     }
 
+    /// A code on screen that is still fresh, or a new one.
+    fn fresh_ticket(&mut self) {
+        if self.ticket.as_ref().is_some_and(|t| !t.stale()) {
+            return;
+        }
+        self.ticket = Ticket::new(&self.host).ok();
+        self.pair_qr = self
+            .ticket
+            .as_ref()
+            .map_or_else(Vec::new, |t| qr_modules(&t.link()));
+    }
+
     fn find_phones(&mut self) {
         self.last_search = Some(Instant::now());
         let Some(script) = self.pair_script.clone() else {
@@ -648,10 +644,11 @@ impl App {
         self.discovering = true;
         self.discovered_once = true;
         self.discover_error = None;
-        self.spawn(move || Done::Discover(exec::discover(&script)));
+        let qr = self.ticket.as_ref().map(Ticket::secret_text);
+        self.spawn(move || Done::Discover(exec::discover(&script, qr.as_deref()), qr));
     }
 
-    fn start_pairing(&mut self, phone: Phone) {
+    fn start_pairing(&mut self, phone: Phone, qr: Option<String>) {
         let Some(installer) = self.installer.clone() else {
             self.pair_error = Some("The SudoStamp installer is not installed.".into());
             return;
@@ -659,10 +656,11 @@ impl App {
         self.pair_error = None;
         self.setup = Setup::new();
         self.code.clear();
-        match SetupProc::start(&installer, &phone, &self.env_for_exec()) {
+        match SetupProc::start(&installer, &phone, qr.as_deref(), &self.env_for_exec()) {
             Ok(run) => {
                 self.run = Some(run);
                 self.pairing = Some(phone);
+                self.qr_run = qr.is_some();
             }
             Err(e) => self.pair_error = Some(e),
         }
@@ -688,10 +686,13 @@ impl App {
                     self.doctor_busy = false;
                     self.doctor = Some(r);
                 }
-                Done::Discover(r) => {
+                Done::Discover(r, asked) => {
                     self.discovering = false;
                     match r {
-                        Ok(p) => self.phones = p,
+                        Ok(p) => {
+                            self.phones = p;
+                            self.on_scanned(asked);
+                        }
                         Err(e) => self.discover_error = Some(e),
                     }
                 }
@@ -727,6 +728,43 @@ impl App {
         }
         if self.setup.done.is_some() {
             self.run = None; // the process is over (or no longer matters): reap it
+        }
+    }
+
+    /// After a search with the code's secret: the phone that scanned it, if exactly one did, is
+    /// paired at once. The code is spent either way: a secret is never used twice.
+    fn on_scanned(&mut self, asked: Option<String>) {
+        // Only for the code on screen now: not an older one, not one past its two minutes, not
+        // while a pairing runs, and never from another tab (no password prompt out of nowhere).
+        let current = self
+            .ticket
+            .as_ref()
+            .filter(|t| !t.stale())
+            .map(Ticket::secret_text);
+        if asked.is_none()
+            || asked != current
+            || self.tab != Tab::Pair
+            || self.pairing.is_some()
+            || self.run.is_some()
+        {
+            return;
+        }
+        let scanned: Vec<Phone> = self.phones.iter().filter(|p| p.scanned).cloned().collect();
+        match scanned.as_slice() {
+            [] => {}
+            [phone] => {
+                self.ticket = None;
+                self.start_pairing(phone.clone(), asked);
+            }
+            _ => {
+                // Two phones proved the secret: someone else saw the code. Pair neither.
+                self.ticket = None;
+                self.pair_error = Some(
+                    "Two phones answered the same code, so neither was paired: someone else may \
+                     have seen it. Scan the new code with your phone only."
+                        .into(),
+                );
+            }
         }
     }
 
@@ -1177,7 +1215,7 @@ impl App {
                     (
                         "2",
                         "Pair once",
-                        "The phone shows a 6-digit code; you type it on this computer.",
+                        "Scan the code this window shows with the phone's camera.",
                     ),
                     (
                         "3",
@@ -1222,183 +1260,212 @@ impl App {
             self.progress_ui(ui);
             return;
         }
-        // Look again every few seconds while no phone is listed: the person is busy with the
-        // phone, and a "Search again" button would be one more thing to find.
+        self.fresh_ticket();
+        // Look every few seconds: for the phone that scanned the code (it is paired at once), and
+        // for phones whose pairing screen is open, for the typed code below.
         if !self.discovering
-            && self.phones.is_empty()
             && self
                 .last_search
-                .is_none_or(|t| t.elapsed() >= Duration::from_secs(5))
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(3))
         {
             self.find_phones();
         }
-        card(ui, |ui| {
-            Self::step_label(ui, "1", "Get the app on your phone");
-            ui.add_space(4.0);
-            ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width((ui.available_width() - 216.0).max(180.0));
-                    bullet(
-                        ui,
-                        "Scan the code with your phone's camera to get SudoStamp from Google Play.",
-                    );
-                    bullet(ui, "Open the app and tap Pair a computer.");
-                    bullet(
-                        ui,
-                        "Keep the app's pairing screen open until this window says Paired.",
-                    );
+        // The countdown and the next search need frames even when nothing moves.
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        let have_code = !self.pair_qr.is_empty();
+        if have_code {
+            card(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.label(title("Scan this code with your phone", 20.0));
+                    ui.add_space(8.0);
+                    qr(ui, &self.pair_qr, 232.0);
                     ui.add_space(4.0);
-                    if ui
-                        .add(secondary("Open Google Play here instead"))
-                        .on_hover_text(PLAY_URL)
-                        .clicked()
-                    {
-                        open_url(PLAY_URL);
-                    }
-                });
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    // The code and its caption as one column of the code's width, caption centred.
-                    ui.allocate_ui_with_layout(
-                        vec2(196.0, 230.0),
-                        Layout::top_down(Align::Center),
-                        |ui| {
-                            qr(ui, &self.play_qr, 196.0);
-                            ui.add_space(4.0);
-                            ui.label(RichText::new("Scan to get the app").size(12.5).color(SOFT));
-                        },
+                    let left = self.ticket.as_ref().map_or(0, |t| t.left().as_secs());
+                    ui.label(
+                        RichText::new(format!(
+                            "This code renews in {}:{:02}",
+                            left / 60,
+                            left % 60
+                        ))
+                        .size(13.0)
+                        .color(SOFT),
                     );
                 });
-            });
-        });
-        ui.add_space(10.0);
-        let mut chosen = None;
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                Self::step_label(ui, "2", "Choose your phone");
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if self.discovering {
-                        ui.spinner();
-                    } else if ui.add(secondary("Search again")).clicked() {
-                        self.find_phones();
-                    }
-                });
-            });
-            ui.add_space(4.0);
-
-            if let Some(e) = &self.discover_error {
-                ui.label(RichText::new(e).color(WARN));
-            }
-            if self.phones.is_empty() && self.discover_error.is_none() {
+                ui.add_space(8.0);
+                Self::numbered(ui, "1", "Point your phone's camera at the code.");
+                Self::numbered(ui, "2", "On the phone, tap Pair.");
+                Self::numbered(
+                    ui,
+                    "3",
+                    "This window finds your phone. Your computer then asks for its own password, \
+                     in a separate window.",
+                );
+                ui.add(
+                    egui::Label::new(muted(
+                        "No SudoStamp on the phone yet? The code opens Google Play: install it, \
+                         then scan again.",
+                    ))
+                    .wrap(),
+                );
+                ui.add_space(8.0);
+                hairline(ui);
                 ui.horizontal_top(|ui| {
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
                     ui.put(rect, egui::Spinner::new().size(16.0).color(ACCENT));
                     ui.add(
-                        egui::Label::new(muted(
-                            "Waiting for your phone. It appears here once its pairing screen is \
-                             open, on the same Wi-Fi as this computer.",
-                        ))
+                        egui::Label::new(RichText::new(
+                            "Waiting for your phone. It must be on the same Wi-Fi as this computer.",
+                        ).color(SOFT))
                         .wrap(),
                     );
                 });
-            }
-            for p in &self.phones {
-                // A phone: one row you can press, like a list item on the phone.
-                let resp = egui::Frame::new()
-                    .fill(SURFACE_HI)
-                    .stroke(Stroke::new(1.0, OUTLINE))
-                    .corner_radius(CornerRadius::same(14))
-                    .inner_margin(Margin::symmetric(14, 10))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(22.0, 32.0), Sense::hover());
-                            ui.painter().rect_stroke(
-                                r.shrink(2.0),
-                                CornerRadius::same(5),
-                                Stroke::new(1.8, ACCENT),
-                                egui::StrokeKind::Inside,
-                            );
-                            ui.painter().line_segment(
-                                [
-                                    Pos2::new(r.center().x - 3.0, r.bottom() - 6.0),
-                                    Pos2::new(r.center().x + 3.0, r.bottom() - 6.0),
-                                ],
-                                Stroke::new(1.6, ACCENT),
-                            );
-                            ui.add_space(4.0);
-                            ui.vertical(|ui| {
-                                ui.label(title(&p.name, 14.5));
-                                ui.label(
-                                    RichText::new(p.addr.to_string()).monospace().color(MUTED),
-                                );
-                            });
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                // The row is the button; this says so (one style for "Pair").
-                                egui::Frame::new()
-                                    .fill(ACCENT)
-                                    .corner_radius(CornerRadius::same(10))
-                                    .inner_margin(Margin::symmetric(14, 6))
-                                    .show(ui, |ui| {
-                                        ui.label(title("Pair", 13.5).color(ON_ACCENT));
-                                    });
-                            });
-                        });
-                    })
-                    .response
-                    .interact(Sense::click())
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                if resp.clicked() {
-                    chosen = Some(p.clone());
+                if let Some(e) = &self.discover_error {
+                    ui.label(RichText::new(e).color(WARN));
                 }
-                ui.add_space(4.0);
-            }
-            hairline(ui);
+            });
+            ui.add_space(10.0);
+        }
+        let mut chosen = None;
+        card(ui, |ui| {
             egui::CollapsingHeader::new(
-                RichText::new("Enter the phone's address by hand")
-                    .font(medium(13.5))
-                    .color(MUTED),
+                RichText::new(if have_code {
+                    "Pair with a 6-digit code instead"
+                } else {
+                    "Pair with a 6-digit code"
+                })
+                .font(medium(14.0))
+                .color(if have_code { MUTED } else { FG }),
             )
-            .id_salt("manual-address")
-            .default_open(!self.manual.is_empty())
+            .id_salt("by-code")
+            .default_open(!have_code)
             .show(ui, |ui| {
-                let label = ui.label(muted("The address the phone's pairing screen shows:"));
-                ui.horizontal(|ui| {
-                    // Named by its label, for screen readers (accesskit) and AT-SPI tools.
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.manual)
-                            .hint_text(RichText::new("e.g. 192.168.1.20:7777").color(FAINT))
-                            .font(TextStyle::Monospace)
-                            .margin(Margin::symmetric(10, 8)),
-                    )
-                    .labelled_by(label.id);
-                    let addr = setup::manual_address(&self.manual);
-                    if ui.add_enabled(addr.is_some(), secondary("Pair")).clicked() {
-                        chosen = addr.map(|addr| Phone {
-                            addr,
-                            name: "the phone".into(),
-                        });
+                ui.add(
+                    egui::Label::new(muted(
+                        "On the phone, open SudoStamp and tap Pair a computer; it appears here. \
+                         You then type the code the phone shows.",
+                    ))
+                    .wrap(),
+                );
+                ui.add_space(6.0);
+                for p in self.phones.iter().filter(|p| !p.scanned) {
+                    // A phone: one row you can press, like a list item on the phone.
+                    let resp = egui::Frame::new()
+                        .fill(SURFACE_HI)
+                        .stroke(Stroke::new(1.0, OUTLINE))
+                        .corner_radius(CornerRadius::same(14))
+                        .inner_margin(Margin::symmetric(14, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let (r, _) =
+                                    ui.allocate_exact_size(vec2(22.0, 32.0), Sense::hover());
+                                ui.painter().rect_stroke(
+                                    r.shrink(2.0),
+                                    CornerRadius::same(5),
+                                    Stroke::new(1.8, ACCENT),
+                                    egui::StrokeKind::Inside,
+                                );
+                                ui.painter().line_segment(
+                                    [
+                                        Pos2::new(r.center().x - 3.0, r.bottom() - 6.0),
+                                        Pos2::new(r.center().x + 3.0, r.bottom() - 6.0),
+                                    ],
+                                    Stroke::new(1.6, ACCENT),
+                                );
+                                ui.add_space(4.0);
+                                ui.vertical(|ui| {
+                                    ui.label(title(&p.name, 14.5));
+                                    ui.label(
+                                        RichText::new(p.addr.to_string()).monospace().color(MUTED),
+                                    );
+                                });
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    // The row is the button; this says so (one style for "Pair").
+                                    egui::Frame::new()
+                                        .fill(ACCENT)
+                                        .corner_radius(CornerRadius::same(10))
+                                        .inner_margin(Margin::symmetric(14, 6))
+                                        .show(ui, |ui| {
+                                            ui.label(title("Pair", 13.5).color(ON_ACCENT));
+                                        });
+                                });
+                            });
+                        })
+                        .response
+                        .interact(Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if resp.clicked() {
+                        chosen = Some(p.clone());
                     }
+                    ui.add_space(4.0);
+                }
+                egui::CollapsingHeader::new(
+                    RichText::new("Enter the phone's address by hand")
+                        .font(medium(13.5))
+                        .color(MUTED),
+                )
+                .id_salt("manual-address")
+                .default_open(!self.manual.is_empty())
+                .show(ui, |ui| {
+                    let label = ui.label(muted("The address the phone's pairing screen shows:"));
+                    ui.horizontal(|ui| {
+                        // Named by its label, for screen readers (accesskit) and AT-SPI tools.
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.manual)
+                                .hint_text(RichText::new("e.g. 192.168.1.20:7777").color(FAINT))
+                                .font(TextStyle::Monospace)
+                                .margin(Margin::symmetric(10, 8)),
+                        )
+                        .labelled_by(label.id);
+                        let addr = setup::manual_address(&self.manual);
+                        if ui.add_enabled(addr.is_some(), secondary("Pair")).clicked() {
+                            chosen = addr.map(|addr| Phone {
+                                addr,
+                                name: "the phone".into(),
+                                scanned: false,
+                            });
+                        }
+                    });
                 });
             });
+        });
+        if !have_code {
             ui.add_space(10.0);
             ui.horizontal_top(|ui| {
                 disc(ui, Glyph::Info, MUTED, 20.0);
                 ui.add(
                     egui::Label::new(muted(
-                        "Next, your computer asks for your password in its own secure window, \
-                         never in this one: pairing changes how sudo signs you in.",
+                        "Your computer asks for its password in its own window, never in this \
+                         one: pairing changes how sudo signs you in.",
                     ))
                     .wrap(),
                 );
             });
-        });
+        }
         if let Some(e) = &self.pair_error {
             ui.add_space(6.0);
             ui.label(RichText::new(e).color(DANGER));
         }
         if let Some(p) = chosen {
-            self.start_pairing(p);
+            self.start_pairing(p, None);
         }
+    }
+
+    /// A numbered instruction: a small accent disc with the number, then the text.
+    fn numbered(ui: &mut egui::Ui, n: &str, text: &str) {
+        ui.horizontal_top(|ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+            ui.painter().circle_filled(rect.center(), 10.0, ACCENT);
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                n,
+                medium(12.0),
+                ON_ACCENT,
+            );
+            ui.add(egui::Label::new(RichText::new(text).color(SOFT)).wrap());
+        });
+        ui.add_space(4.0);
     }
 
     fn steps(&self, ui: &mut egui::Ui) {
@@ -1561,6 +1628,18 @@ impl App {
                     ui.add_space(8.0);
                     ui.add(egui::Label::new(title(&d.text, 15.0)).wrap());
                 }
+                if d.ok && self.qr_run {
+                    // Whoever saw the code could have scanned it too: the owner's own phone is the
+                    // check. Pairing again replaces the key, so the fix is one more scan.
+                    ui.add_space(6.0);
+                    ui.add(
+                        egui::Label::new(muted(
+                            "Check your phone: it should now say Paired. If it does not, a \
+                             different phone was paired. Pair again to replace it.",
+                        ))
+                        .wrap(),
+                    );
+                }
                 if d.ok && !d.attestation.is_empty() {
                     ui.add_space(6.0);
                     hairline(ui);
@@ -1583,7 +1662,7 @@ impl App {
                 }
                 ui.add_space(12.0);
                 close = ui
-                    .add(primary(if d.ok { "Done" } else { "Back" }).min_size(vec2(0.0, 44.0)))
+                    .add(primary(if d.ok { "Close" } else { "Back" }).min_size(vec2(0.0, 44.0)))
                     .clicked();
             });
             if d.ok && !self.setup.steps.is_empty() {
@@ -1716,7 +1795,10 @@ pub fn run(env: Env) -> i32 {
                 tx,
                 rx,
                 mark,
-                play_qr: qr_modules(PLAY_URL),
+                host: ticket::hostname(),
+                ticket: None,
+                pair_qr: Vec::new(),
+                qr_run: false,
                 doctor: None,
                 doctor_busy: false,
                 repair_busy: false,

@@ -150,7 +150,21 @@ mod tests {
         assert!(matches!(bind(&dir, &sock).unwrap(), Bind::AlreadyRunning));
         drop(first); // the file stays behind, like after a crash
         assert!(fs::symlink_metadata(&sock).unwrap().file_type().is_socket());
-        assert!(matches!(bind(&dir, &sock).unwrap(), Bind::Bound(_)));
+        // Other tests spawn processes from parallel threads, and a child that is forked but has
+        // not exec'd yet holds a copy of every descriptor, this socket's too: for that moment the
+        // socket is still bound, and AlreadyRunning is the right answer. (CI saw it once,
+        // pipeline 3076968898.) It must turn into Bound as soon as that copy is gone.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let rebound = loop {
+            match bind(&dir, &sock).unwrap() {
+                Bind::Bound(s) => break Some(s),
+                Bind::AlreadyRunning if std::time::Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Bind::AlreadyRunning => break None,
+            }
+        };
+        assert!(rebound.is_some(), "a stale socket was never replaced");
         fs::remove_dir_all(&root).unwrap();
     }
 

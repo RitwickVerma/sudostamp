@@ -19,6 +19,7 @@ pub mod pause;
 pub mod setup;
 pub mod state;
 pub mod text;
+pub mod ticket;
 pub mod track;
 
 // Edges.

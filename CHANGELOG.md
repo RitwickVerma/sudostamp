@@ -2,6 +2,28 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
+## 1.7.0 — unreleased
+
+Pair by scanning a code: nothing to type.
+
+### Pairing
+- **Scan to pair.** The desktop app shows one QR code. Point the phone's camera at it, tap **Pair**,
+  and the computer finds the phone by itself and asks for its own password: no list of phones, no
+  code to type. Without SudoStamp on the phone yet, the code opens Google Play first. The code is
+  a one-time secret, new every two minutes; both sides prove it over the address dialled, so a relay
+  fails, and a message without it is refused without effect. Typing the 6-digit code stays, as
+  "Pair with a 6-digit code instead", and is still what the terminal setup does
+  ([docs/DESIGN.md](docs/DESIGN.md), *Pairing by QR code*).
+- **SudoStamp's own site**, https://sudostamp.ritwickverma.dev: the pairing link's page, the proof
+  that lets the camera open that link in the app, and the privacy policy, built from this repository
+  (`site/`) and deployed by CI to a project of its own.
+
+### Computer
+- `sudo sudostamp apply` reuses the phone address of the block it updates: `--phone` is only needed
+  for a new one. `status` and `doctor` now both point there for a block an older version wrote.
+- The desktop window: a bigger code that renews itself, the steps in one place, "Close" after
+  pairing.
+
 ## 1.6.0 — 2026-11-16
 
 SudoStamp on the desktop, and a safe way for agents to ask for root.

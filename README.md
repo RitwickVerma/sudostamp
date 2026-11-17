@@ -108,6 +108,23 @@ before you rely on it. Reviews are very welcome.
 
 ## Setup
 
+**Easiest, on a Linux desktop: scan a code.** Install the desktop app (on Arch: `yay -S
+sudostamp-desktop`, which brings the installer along), open **SudoStamp** from the applications
+menu and choose **Pair a phone**. Point your phone's camera at the code it shows and tap **Pair**:
+the window finds the phone by itself and your computer asks for its password in its own window.
+No phone app yet? The code opens Google Play first. Nothing to type ([Pairing by QR
+code](docs/DESIGN.md#pairing-by-qr-code-17-qr-v1)).
+
+<table>
+  <tr>
+    <td align="center" width="40%"><img src="docs/images/desktop-pair.png" alt="The desktop app's Pair a phone tab: a large QR code, three numbered steps, and Waiting for your phone"></td>
+    <td align="center" width="30%"><img src="docs/images/pair-qr.png" alt="The phone after scanning: Pair with edith? with a Pair button and Cancel"></td>
+    <td align="center" width="30%"><img src="docs/images/pair-qr-done.png" alt="The phone: Paired, edith now has its own key on this phone"></td>
+  </tr>
+</table>
+
+From a terminal, or on a server:
+
 **1. Phone.** Install the app from
 [Google Play](https://play.google.com/store/apps/details?id=com.ritwick.sudostamp), from the
 [Releases](https://gitlab.com/ritwick7/sudostamp/-/releases) page, or let
@@ -249,6 +266,16 @@ the phone states the address it was reached at, and it is not the relay's. You *
 it really gets compared. The protocol is documented in
 [`Pairing.kt`](app/src/main/java/com/ritwick/sudostamp/Pairing.kt) and tested in CI, with a
 simulated man in the middle and a relay, on every supported distribution.
+
+### Pairing by QR code
+
+The desktop app can skip the code: its QR code carries a one-time secret (new every two minutes)
+that the phone's camera hands to the app. Both sides then prove that secret, bound to the address
+the computer dialled and to that one connection, so a relay fails the same way, and a device
+without the secret cannot even interrupt (not by replaying a message it saw, either). The trade: whoever can see the computer's screen holds the secret too, so the window
+says which phone it found, refuses when two phones answer one code, and asks you to check that
+your own phone says Paired. If that worries you (a shared screen), use the code:
+it is still there, one click away.
 
 ### Key attestation
 

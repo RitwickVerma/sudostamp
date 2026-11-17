@@ -23,6 +23,7 @@ Properties, per call and under a hard time limit (a hang is a failure, not a slo
 Size: SUDOSTAMP_FUZZ_ITERATIONS (default 20000) cases per property; SUDOSTAMP_FUZZ_SEED replays.
 The bash-driven property runs iterations/100 cases (min 200): each is a process.
 """
+import base64
 import contextlib
 import importlib.util
 import io
@@ -345,7 +346,7 @@ class Fuzz(unittest.TestCase):
             out = io.StringIO()
             try:
                 with contextlib.redirect_stdout(out), deadline():
-                    P.cmd_discover(type("A", (), {"timeout": 1.0, "verbose": False})())
+                    P.cmd_discover(type("A", (), {"timeout": 1.0, "verbose": False, "qr_stdin": False})())
             except MDNS_OK:
                 self.fail("cmd_discover let a malformed answer escape: %r" % (found,))
             finally:
@@ -535,7 +536,7 @@ class Fuzz(unittest.TestCase):
         def typed_code(self):
             return P.code(P_KEY, self.np, self.nh, self.dialled, self.stable)
 
-    def pair_once(self, phone, typed=None, addr_out=None):
+    def pair_once(self, phone, typed=None, addr_out=None, qr_secret_file=None):
         real_agent, real_read = P.Agent, P.read_line
         P.Agent = phone
         P.read_line = lambda: typed if typed is not None else phone.typed_code()
@@ -543,7 +544,7 @@ class Fuzz(unittest.TestCase):
         # Every pair.py option at its default, as argparse would give it; attestation is not required.
         args = type("A", (), {"phone": "192.168.1.50:7777", "label": "host", "addr_out": addr_out,
                               "attest_out": None, "require_attestation": False, "check_revocation": False,
-                              "json_fd": None, "fail_out": None})()
+                              "json_fd": None, "fail_out": None, "qr_secret_file": qr_secret_file})()
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), deadline(5):
                 P.cmd_pair(args)
@@ -604,6 +605,116 @@ class Fuzz(unittest.TestCase):
             self.assertEqual(out, "", "pinned a key on garbage: %r" % out)
             self.assertIsNotNone(code)
         cases("pair/cmd_pair-noise", 10, max(200, ITER // 20), body)
+
+    # -------------------------------------------------------------- cmd_pair by QR code (qr-v1)
+
+    QR = bytes(range(100, 116))
+
+    class QrPhone(Phone):
+        """The phone that scanned the code, as pair.py meets it: answers pair-qr and
+        pair-qr-done. It checks the computer's proof like the app does; `fault` corrupts one
+        thing of its own answer."""
+        def ext(self, name, payload, limit=4096):
+            f, s = self.fault, Fuzz.QR
+            if name == getattr(P, "EXT_ATTEST", None):
+                return None
+            if name == P.EXT_QR_HELLO:
+                tag, o = P.take(payload, 0)
+                nq, _ = P.take(payload, o)
+                if f == "refuse-hello" or tag != P.qr_hello(s):
+                    return None
+                self.nc = bytes(range(200, 232))
+                m = P.qr_hello_reply_mac(s, nq, self.nc)
+                if f == "liar-hello":            # says SUCCESS without knowing the secret
+                    m = bytes(32)
+                return P.s(self.nc) + P.s(m)
+            if name == P.EXT_QR_COMMIT:
+                nh, o = P.take(payload, 0)
+                mac, _ = P.take(payload, o)
+                # Where the phone was really dialled: a relay's computer proved the secret over
+                # the relay's address, so the honest phone refuses (as the app does).
+                where = P.endpoint(("192.168.1.66", 7777)) if f == "relay" else self.dialled
+                if f == "refuse-commit" or not P.hmac.compare_digest(mac, P.qr_commit_mac(s, nh, self.nc, where)):
+                    return None
+                self.nh = nh
+                key, np_, d, st = P_KEY, self.np, self.dialled, self.stable
+                m = P.qr_phone_mac(s, nh, self.nc, key, np_, d, st)
+                if f == "flip-mac":
+                    m = flip(m, self.r)
+                if f == "flip-key":
+                    key = flip(key, self.r)
+                if f == "flip-np":
+                    np_ = flip(np_, self.r)
+                if f == "flip-dialled":
+                    d = flip(d, self.r)
+                if f == "flip-stable":
+                    st = flip(st, self.r)
+                if f == "wrong-secret":
+                    m = P.qr_phone_mac(bytes(16), nh, self.nc, key, np_, d, st)
+                if f == "liar-dialled":       # claims the address we dialled, with a valid proof: still must match
+                    d = P.endpoint(("192.168.1.66", 7777))
+                    m = P.qr_phone_mac(s, nh, self.nc, key, np_, d, st)
+                body = P.s(key) + P.s(np_) + P.s(d) + P.s(st) + P.s(m)
+                return body[:-3] if f == "truncated" else body
+            if name == P.EXT_QR_DONE:
+                nh, o = P.take(payload, 0)
+                mac, _ = P.take(payload, o)
+                if f == "refuse-done" or nh != self.nh or not P.hmac.compare_digest(mac, P.qr_done_mac(Fuzz.QR, nh, P_KEY)):
+                    return None
+                return b""
+            raise AssertionError(name)
+
+    def qr_file(self, d):
+        path = os.path.join(d, "qr")
+        with open(path, "w") as fh:
+            fh.write(base64.urlsafe_b64encode(Fuzz.QR).decode().rstrip("=") + "\n")
+        return path
+
+    def test_cmd_pair_by_qr_pins_only_the_phone_that_proves_the_secret(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            q = self.qr_file(d)
+            code, out, err = self.pair_once(Fuzz.QrPhone(), typed="", qr_secret_file=q)
+            self.assertIsNone(code, err)
+            self.assertTrue(out.startswith("ecdsa-sha2-nistp256 ") and out.count("\n") == 1, out)
+            for fault in ["refuse-hello", "liar-hello", "refuse-commit", "relay", "flip-mac", "flip-key", "flip-np", "flip-dialled", "flip-stable",
+                          "wrong-secret", "liar-dialled", "truncated", "refuse-done"]:
+                for n in range(8):
+                    code, out, err = self.pair_once(Fuzz.QrPhone(fault, random.Random(n)), typed="", qr_secret_file=q)
+                    self.assertEqual(out, "", "%s: a key line was printed (pinned): %r / %s" % (fault, out, err))
+                    self.assertIsNotNone(code, "%s: cmd_pair returned as if it succeeded" % fault)
+            # A malformed secret file: refused before the phone is even dialled.
+            for bad in ["", "short", "A" * 23, base64.urlsafe_b64encode(Fuzz.QR).decode()]:
+                p = os.path.join(d, "bad")
+                with open(p, "w") as fh:
+                    fh.write(bad + "\n")
+                code, out, err = self.pair_once(Fuzz.QrPhone(), typed="", qr_secret_file=p)
+                self.assertEqual(out, "", bad)
+                self.assertIsNotNone(code, bad)
+
+    def test_cmd_pair_by_qr_random_answers_never_pin(self):
+        import tempfile
+
+        class Noise(Fuzz.QrPhone):
+            def ext(self, name, payload, limit=4096):
+                r = self.r
+                k = r.randrange(4)
+                if k == 0:
+                    return None
+                if k == 1:
+                    return rbytes(r, r.randrange(0, 300))
+                if k == 2:
+                    return b"".join(P.s(rbytes(r, r.choice([0, 32, 18, 104, 65]))) for _ in range(r.randrange(0, 6)))
+                return P.s(P_KEY) + P.s(rbytes(r, 32)) + P.s(P.endpoint(("192.168.1.50", 7777))) * 2 + P.s(rbytes(r, 32))
+
+        with tempfile.TemporaryDirectory() as d:
+            q = self.qr_file(d)
+
+            def body(i, r):
+                code, out, err = self.pair_once(Noise(rnd=r), typed="", qr_secret_file=q)
+                self.assertEqual(out, "", "pinned a key on garbage: %r" % out)
+                self.assertIsNotNone(code)
+            cases("pair/cmd_pair-qr-noise", 11, max(200, ITER // 20), body)
 
     # -------------------------------------------------------------- install.sh --phone
 

@@ -131,6 +131,9 @@ hygiene:
     - shellcheck -S warning tools/*.sh tools/test/*.sh scripts/*.sh
     - python3 -m py_compile tools/*.py tools/test/*.py && rm -rf tools/__pycache__ tools/test/__pycache__
     - python3 -I tools/test/test_pair.py && rm -rf tools/test/__pycache__ tools/__pycache__
+    # The site (site/build.py): the app-link proof names the release certificate and the host the
+    # app verifies, the privacy page carries every word of docs/PRIVACY_POLICY.md, nothing external.
+    - python3 -I site/build.py --check && rm -rf site/out
     - python3 -I tools/test/test_ask.py && rm -rf tools/test/__pycache__ tools/__pycache__
     - python3 -I tools/test/test_attest.py && rm -rf tools/test/__pycache__ tools/__pycache__
     # Fuzz and property tests of pair.py's parsers and of install.sh's --phone check: seeded, stdlib
@@ -219,6 +222,39 @@ gitleaks:
     # directories, so refs fetched by another branch's job got scanned here too (master pipeline
     # 3059201575 failed on test fixtures that exist only on upgrade/attestation).
     - gitleaks git . --redact --no-banner --log-opts=HEAD
+
+# ---------------------------------------------------------------- the site
+# https://sudostamp.ritwickverma.dev (site/build.py): SudoStamp's own pages -- the pairing link,
+# the app-link proof and the privacy policy -- deployed from master to the Cloudflare Pages project
+# `sudostamp`. The token can deploy Pages and nothing else, works only from the homelab's address,
+# and is a protected variable scoped to the protected environment `site`: this job, on master,
+# alone gets it. Every master pipeline deploys (wrangler uploads only what changed), and the job is
+# not interruptible, so a deploy cannot be cancelled away by the next push. wrangler and its whole
+# tree come from site/package-lock.json (npm ci), not from whatever npx resolves that day. After the
+# upload it reads the live app-link proof back: the camera-to-app step depends on it.
+site:
+  stage: verify
+  image: node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
+  cache: []
+  before_script: []
+  interruptible: false
+  environment:
+    name: site
+    url: https://sudostamp.ritwickverma.dev
+  resource_group: site
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "master" && $CI_PIPELINE_SOURCE == "push"'
+  variables:
+    WRANGLER_SEND_METRICS: "false"
+  script:
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends python3 curl ca-certificates >/dev/null
+    - python3 -I site/build.py --check
+    - npm ci --prefix site --ignore-scripts --no-audit --no-fund
+    - site/node_modules/.bin/wrangler pages deploy site/out --project-name=sudostamp --branch=master --commit-hash="$CI_COMMIT_SHA" --commit-dirty=true
+    - 'for i in 1 2 3 4 5 6; do curl -fsS https://sudostamp.ritwickverma.dev/.well-known/assetlinks.json | cmp -s - site/out/.well-known/assetlinks.json && exit 0; sleep 10; done; echo "the live assetlinks.json is not the one just built" >&2; exit 1'
 
 # ---------------------------------------------------------------- releases
 # docs/RELEASING.md. CI never signs and never publishes: the release key, the installer key and the

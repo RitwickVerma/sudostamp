@@ -44,10 +44,13 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
 3. **Pause on this computer.** Tray toggle: *Pause until resumed* / *for 1 hour*. While paused the
    probe exits non-zero before dialling the phone, so sudo goes straight to the password (and the
    phone sees nothing). The flag lives in `/run/user/<uid>` (tmpfs: a reboot or logout resumes). Anyone running as the user can set it: the only effect is "use the password".
-4. **Pairing and repair window.** A small window (egui) that lists phones found on the network
-   (`pair.py discover`, unprivileged), runs `pkexec /usr/bin/sudostamp setup --phone <addr> --json`,
-   shows the 6-digit code entry when the installer asks for it, and shows the result including the
-   key's attestation. One reviewed privileged path: the installer itself.
+4. **Pairing and repair window.** A small window (egui). Since 1.7 it shows a QR code
+   (`ticket.rs`, a fresh secret every two minutes; protocol in DESIGN.md, *Pairing by QR code*),
+   asks `pair.py discover --qr-stdin` every 3 s which phone scanned it, and pairs that one at once:
+   `pkexec /usr/bin/sudostamp setup --phone <addr> --json --qr`, the secret on stdin. "Pair with a
+   6-digit code instead" keeps the 1.6 way: the phones found, an address typed by hand, the code
+   entry when the installer asks. It shows the result including the key's attestation. One reviewed
+   privileged path: the installer itself.
 5. **Health centre.** The same window's other tab renders `sudostamp doctor --json` as a
    checklist; each failing check offers its fix (a `pkexec` command, or "Pair again" which opens
    feature 4). It also lists the last 100 sudo events this desktop saw (feature 2), kept in
@@ -135,6 +138,8 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
   "needs root" warning, so the two always agree; for a non-root plain `doctor` that is a new exit 2.
   `pinned-key` and the others never need root: their files are world-readable.
 - **`setup --json`.** `--phone` is required (the app lists phones itself): without it, `done:false`.
+  With `--qr` (only with `--json`) the first line of stdin is the QR code's secret (22 characters of
+  base64url) and nothing asks for a code.
   Steps are `pairing`, `install`, `test` and `apply`, each `start` then `ok`; a failure is one
   `fail` for the step that was running, then `done:false` with the reason in `text` (nothing
   follows `done`). `ask:"confirm"` is asked for the same questions the interactive run asks (an
