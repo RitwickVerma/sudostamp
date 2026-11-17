@@ -94,10 +94,23 @@ push() {
     cat "$w/push.err" >&2
     die "push refused. Load the AUR key into the agent (ssh-add ~/.ssh/aur), then: scripts/publish-aur.sh $VERSION"
   }
-  # Read it back: the AUR's own copy, not our clone.
-  for _ in $(seq 1 12); do [ "$(served "$pkg")" = "$VERSION" ] && break; sleep 5; done
-  [ "$(served "$pkg")" = "$VERSION" ] || die "pushed $pkg, but the AUR still serves $(served "$pkg")"
-  echo "AUR serves $pkg $VERSION"
+  touch "$w/pushed"
+  echo "pushed $pkg $VERSION"
+}
+
+# verify PKG: read a pushed package back from the AUR's own copy, not our clone. After pushing
+# everything: the RPC has lagged a push by more than a minute (1.7.0), and stopping at the first
+# slow read-back left the next package unpushed. Five minutes, then the git ref as a last word.
+verify() {
+  local pkg="$1" w="$W/$1"
+  [ -f "$w/pushed" ] || return 0
+  for _ in $(seq 1 60); do [ "$(served "$pkg")" = "$VERSION" ] && { echo "AUR serves $pkg $VERSION"; return 0; }; sleep 5; done
+  # The AUR's git has the commit we pushed: the package is published, its API is just behind.
+  if [ "$(git ls-remote "https://aur.archlinux.org/$pkg.git" HEAD 2>/dev/null | cut -f1)" = "$(git -C "$w/aur" rev-parse HEAD)" ]; then
+    echo "publish-aur: the AUR's git has $pkg $VERSION; its API still says $(served "$pkg") (it catches up)" >&2
+    return 0
+  fi
+  die "pushed $pkg, but the AUR serves $(served "$pkg") and its git is not at our commit"
 }
 
 # Both built before either is pushed: a desktop build that fails never leaves the AUR with sudostamp
@@ -107,6 +120,8 @@ build sudostamp packaging/aur usr/lib/sudostamp/install.sh
 build sudostamp-desktop packaging/aur-desktop usr/bin/sudostamp-desktop
 push sudostamp
 push sudostamp-desktop
+verify sudostamp
+verify sudostamp-desktop
 
 # Keep the repository's copies in step (packaging/aur*/), through a merge request.
 if [ "$(sed -n 's/^pkgver=//p' packaging/aur/PKGBUILD)" != "$VERSION" ] || \
