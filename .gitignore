@@ -40,3 +40,7 @@ dist/
 # Rust (desktop/)
 desktop/target/
 .cargo-home/
+
+# site/build.py
+site/out/
+.wrangler/

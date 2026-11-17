@@ -131,6 +131,9 @@ hygiene:
     - shellcheck -S warning tools/*.sh tools/test/*.sh scripts/*.sh
     - python3 -m py_compile tools/*.py tools/test/*.py && rm -rf tools/__pycache__ tools/test/__pycache__
     - python3 -I tools/test/test_pair.py && rm -rf tools/test/__pycache__ tools/__pycache__
+    # The site (site/build.py): the app-link proof names the release certificate and the host the
+    # app verifies, the privacy page carries every word of docs/PRIVACY_POLICY.md, nothing external.
+    - python3 -I site/build.py --check && rm -rf site/out
     - python3 -I tools/test/test_ask.py && rm -rf tools/test/__pycache__ tools/__pycache__
     - python3 -I tools/test/test_attest.py && rm -rf tools/test/__pycache__ tools/__pycache__
     # Fuzz and property tests of pair.py's parsers and of install.sh's --phone check: seeded, stdlib
@@ -219,6 +222,38 @@ gitleaks:
     # directories, so refs fetched by another branch's job got scanned here too (master pipeline
     # 3059201575 failed on test fixtures that exist only on upgrade/attestation).
     - gitleaks git . --redact --no-banner --log-opts=HEAD
+
+# ---------------------------------------------------------------- the site
+# https://sudostamp.ritwickverma.dev (site/build.py): SudoStamp's own pages -- the pairing link,
+# the app-link proof and the privacy policy -- deployed from master to the Cloudflare Pages project
+# `sudostamp`. The token is a CI variable scoped to the environment `site`, so this job alone gets it
+# (not every job of a protected ref). It changes pages only when they change.
+site:
+  stage: verify
+  image: node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
+  cache: []
+  before_script: []
+  environment:
+    name: site
+    url: https://sudostamp.ritwickverma.dev
+  resource_group: site
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      changes:
+        - site/**/*
+        - docs/PRIVACY_POLICY.md
+        - app/src/main/AndroidManifest.xml
+        - app/src/main/java/com/ritwick/sudostamp/QrLink.kt
+        - scripts/release.sh
+  variables:
+    WRANGLER_VERSION: "4.151.0"
+  script:
+    - export DEBIAN_FRONTEND=noninteractive
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends python3 >/dev/null
+    - python3 -I site/build.py --check
+    - npx --yes "wrangler@$WRANGLER_VERSION" pages deploy site/out --project-name=sudostamp --branch=master --commit-hash="$CI_COMMIT_SHA" --commit-dirty=true
 
 # ---------------------------------------------------------------- releases
 # docs/RELEASING.md. CI never signs and never publishes: the release key, the installer key and the
