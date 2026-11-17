@@ -53,16 +53,20 @@ import javax.crypto.spec.SecretKeySpec
  * name. S then stands in for the person comparing codes: whoever knows it is the person at that
  * screen, and nobody else can know it. Nh, Np, K, D and S as above; S_ is the secret.
  *
- *   computer -> phone     pair-qr-hello-v1(H(hello-tag || S_))   "is it you?": SUCCESS only from
- *                                                                the phone that scanned S_
- *   computer -> phone     pair-qr-v1(Nh, macC)                   macC = HMAC(S_, c-tag || Nh || R)
- *                                                                R: where the computer dialled
+ *   computer -> phone     pair-qr-hello-v1(H(hello-tag || S_), Nq)        "is it you?"
+ *   phone    -> computer  Nc, HMAC(S_, hr-tag || Nq || Nc)                 only from the phone that
+ *                                                                         scanned S_, and proving it
+ *   computer -> phone     pair-qr-v1(Nh, macC), ON THE SAME CONNECTION     macC = HMAC(S_, c-tag ||
+ *                                                                         Nh || Nc || R)
+ *                         R: where the computer dialled. Nc is the phone's, fresh for that one
+ *                         connection and spent by the commit: a commit copied off the network and
+ *                         sent again on another connection has no Nc there, and is refused.
  *   phone                 checks macC with D for R: what it saw itself dialled on. A relay that
  *                         answered in its place dialled it from elsewhere, and fails here.
  *                         A message that fails is refused and changes nothing: without S_ nobody
- *                         can cancel, spend or slow a pairing.
- *   phone    -> computer  K, Np, D, S, macP                      macP = HMAC(S_, p-tag || Nh || K
- *                                                                       || Np || D || S)
+ *                         can cancel, spend or slow a pairing, not even by replaying ours.
+ *   phone    -> computer  K, Np, D, S, macP                      macP = HMAC(S_, p-tag || Nh || Nc
+ *                                                                       || K || Np || D || S)
  *   computer              checks macP and D == R, then:
  *   computer -> phone     pair-qr-done-v1(Nh, macD)              macD = HMAC(S_, d-tag || Nh || K)
  *                         on the same connection; then attest-v1 exactly as above.
@@ -108,19 +112,23 @@ object Pairing {
     private val CODE_TAG = "sudostamp-pair-code-v2\u0000".toByteArray(Charsets.US_ASCII)
     private val ATTEST_TAG = "sudostamp-attest-challenge-v1\u0000".toByteArray(Charsets.US_ASCII)
     private val QR_HELLO_TAG = "sudostamp-qr-hello-v1\u0000".toByteArray(Charsets.US_ASCII)
+    private val QR_HR_TAG = "sudostamp-qr-hello-reply-v1\u0000".toByteArray(Charsets.US_ASCII)
     private val QR_C_TAG = "sudostamp-qr-commit-v1\u0000".toByteArray(Charsets.US_ASCII)
     private val QR_P_TAG = "sudostamp-qr-phone-v1\u0000".toByteArray(Charsets.US_ASCII)
     private val QR_D_TAG = "sudostamp-qr-done-v1\u0000".toByteArray(Charsets.US_ASCII)
 
     fun qrHello(secret: ByteArray): ByteArray = sha256(QR_HELLO_TAG, secret)
 
-    fun qrCommitMac(secret: ByteArray, hostNonce: ByteArray, reached: ByteArray): ByteArray =
-        hmac(secret, QR_C_TAG, hostNonce, reached)
+    fun qrHelloReplyMac(secret: ByteArray, queryNonce: ByteArray, connNonce: ByteArray): ByteArray =
+        hmac(secret, QR_HR_TAG, queryNonce, connNonce)
+
+    fun qrCommitMac(secret: ByteArray, hostNonce: ByteArray, connNonce: ByteArray, reached: ByteArray): ByteArray =
+        hmac(secret, QR_C_TAG, hostNonce, connNonce, reached)
 
     fun qrPhoneMac(
-        secret: ByteArray, hostNonce: ByteArray, keyBlob: ByteArray, phoneNonce: ByteArray,
+        secret: ByteArray, hostNonce: ByteArray, connNonce: ByteArray, keyBlob: ByteArray, phoneNonce: ByteArray,
         dialled: ByteArray, stable: ByteArray,
-    ): ByteArray = hmac(secret, QR_P_TAG, hostNonce, keyBlob, phoneNonce, dialled, stable)
+    ): ByteArray = hmac(secret, QR_P_TAG, hostNonce, connNonce, keyBlob, phoneNonce, dialled, stable)
 
     fun qrDoneMac(secret: ByteArray, hostNonce: ByteArray, keyBlob: ByteArray): ByteArray =
         hmac(secret, QR_D_TAG, hostNonce, keyBlob)

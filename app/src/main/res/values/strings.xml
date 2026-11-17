@@ -83,8 +83,9 @@
     <string name="pair_qr_confirm">Pair</string>
     <string name="pair_qr_waiting">Waiting for %1$s</string>
     <string name="pair_qr_working">Pairing with %1$s</string>
-    <string name="pair_qr_waiting_body">Keep this screen open. %1$s finds this phone by itself. That computer may first ask for its administrator password.</string>
+    <string name="pair_qr_waiting_body">Keep this screen open, for up to two minutes. %1$s finds this phone by itself. That computer may first ask for its administrator password.</string>
     <string name="pair_qr_again">To try again, scan the new code on your computer\'s screen.</string>
+    <string name="pair_qr_need_fingerprint">Set up a fingerprint on this phone first, then scan the code on your computer again.</string>
     <string name="pair_qr_bad_link">That is not a SudoStamp pairing code. Scan the code on your computer\'s screen again.</string>
     <string name="reset_key">Unpair all computers</string>
 

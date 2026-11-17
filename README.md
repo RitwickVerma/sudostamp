@@ -271,8 +271,8 @@ simulated man in the middle and a relay, on every supported distribution.
 
 The desktop app can skip the code: its QR code carries a one-time secret (new every two minutes)
 that the phone's camera hands to the app. Both sides then prove that secret, bound to the address
-the computer dialled, so a relay fails the same way, and a device without the secret cannot even
-interrupt. The trade: whoever can see the computer's screen holds the secret too, so the window
+the computer dialled and to that one connection, so a relay fails the same way, and a device
+without the secret cannot even interrupt (not by replaying a message it saw, either). The trade: whoever can see the computer's screen holds the secret too, so the window
 says which phone it found, refuses when two phones answer one code, and asks you to check that
 your own phone says Paired. If that worries you (a shared screen), use the code:
 it is still there, one click away.

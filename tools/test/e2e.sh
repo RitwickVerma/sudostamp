@@ -642,6 +642,17 @@ expect_not_paused() {   # $1 = name. The phone is asked as normal
   local n0 rc
   n0="$(ph_calls)"; ev_reset
   sudo_marker /tmp/e2e.empty q-ok; rc=$?
+  # Not what this section tests: the phone check running out of its 4 s on a loaded runner
+  # ("skipped away"; the phone WAS dialled). It made openSUSE fail once (pipeline 3076895489). One
+  # more try then; a "skipped paused" is the bug this looks for, and still fails at once.
+  if [ "$rc" != 0 ]; then
+    ev_wait 2
+    if grep -q '"reason": *"away"' "$EVLOG" && ! grep -q '"reason": *"paused"' "$EVLOG"; then
+      echo "    (the phone check timed out on this runner: trying once more)"
+      n0="$(ph_calls)"; ev_reset
+      sudo_marker /tmp/e2e.empty q-ok; rc=$?
+    fi
+  fi
   check "$1: not paused: sudo ran with no password (the phone approved)" test "$rc" = 0
   check "$1: the phone was asked" test "$(ph_calls)" -gt "$n0"
   ev_wait 1
@@ -972,18 +983,24 @@ step "15b. setup --json --qr: pairing by the desktop's QR code, no code typed"
 QRS="ZGVmZ2hpamtsbW5vcHFycw"; WRONG_QRS="AAECAwQFBgcICQoLDA0ODw"
 echo "$QRS" > /tmp/qr7823.secret
 pairing_phone 7823 --qr-secret-file /tmp/qr7823.secret
-check "the phone that scanned answers the hello, and only to its own secret" \
+check "the phone that scanned proves it to the hello, and only for its own secret" \
   python3 -I -c "
 import importlib.util; s = importlib.util.spec_from_file_location('p', '$W/tools/pair.py'); P = importlib.util.module_from_spec(s); s.loader.exec_module(P)
-assert P.scanned('127.0.0.1:7823', P.qr_hello(P.qr_secret('$QRS')))
-assert not P.scanned('127.0.0.1:7823', P.qr_hello(P.qr_secret('$WRONG_QRS')))"
+assert P.scanned('127.0.0.1:7823', P.qr_secret('$QRS'))
+assert not P.scanned('127.0.0.1:7823', P.qr_secret('$WRONG_QRS'))"
 check "--qr is only for setup --json" bash -c "echo $QRS | bash '$I' setup --phone 127.0.0.1:7823 --qr >/dev/null 2>&1; [ \$? = 2 ]"
 cp "/etc/authorized_keys/$U.keys" /tmp/keys.before
 state0="$(stack_state)"
 python3 "$W/tools/test/drive_setup.py" "$I" 127.0.0.1:7823 /dev/null /tmp/setupq-wrong.out --qr "$WRONG_QRS" > /tmp/setupq-wrong.res 2>&1
 sed 's/^/    | /' /tmp/setupq-wrong.res
-check "a computer without the phone's secret: done:false, and the phone refused without effect" \
-  bash -c "grep -q '^RESULT done=false' /tmp/setupq-wrong.res && grep -q 'qr: commit refused (proof)' /tmp/p7823.log && ! grep -q '^qr: commit$' /tmp/p7823.log"
+check "a computer without the phone's secret: done:false, stopped at the hello, the phone made no key" \
+  bash -c "grep -q '^RESULT done=false' /tmp/setupq-wrong.res && grep -q 'did not prove it scanned' /tmp/setupq-wrong.out && ! grep -q '^qr: commit$' /tmp/p7823.log"
+check "a forged commit (no hello, or a wrong secret) is refused without effect" \
+  python3 -I -c "
+import importlib.util; s = importlib.util.spec_from_file_location('p', '$W/tools/pair.py'); P = importlib.util.module_from_spec(s); s.loader.exec_module(P)
+ag = P.Agent('127.0.0.1:7823'); nh = bytes(32); R = P.endpoint(ag.sock.getpeername())
+assert ag.ext(P.EXT_QR_COMMIT, P.s(nh) + P.s(P.qr_commit_mac(P.qr_secret('$QRS'), nh, bytes(32), R))) is None
+ag.close()"
 check "nothing pinned, the stack unchanged" \
   bash -c "[ \"\$(cksum < /tmp/keys.before)\" = \"\$(cksum < /etc/authorized_keys/$U.keys)\" ] && [ '$state0' = \"\$($(declare -f stack_state); TARGET='$TARGET'; stack_state)\" ]"
 # A relay in front of the phone, passing every byte: the proof covers where the computer dialled.

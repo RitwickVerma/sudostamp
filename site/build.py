@@ -112,6 +112,18 @@ def check():
         manifest = f.read()
     if 'android:host="%s"' % host not in manifest or 'android:autoVerify="true"' not in manifest:
         problems.append("the manifest does not verify %s" % host)
+    # The headers that protect the pages (static/_headers): what the site promises the browser.
+    with open(os.path.join(OUT, "_headers"), encoding="utf-8") as f:
+        headers = f.read()
+    for want in ("Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'",
+                 "Referrer-Policy: no-referrer", "X-Content-Type-Options: nosniff", "frame-ancestors 'none'",
+                 "/.well-known/assetlinks.json\n  Content-Type: application/json"):
+        if want not in headers:
+            problems.append("_headers lost: %s" % want.split("\n")[0])
+    with open(os.path.join(OUT, "pair", "pair.js"), encoding="utf-8") as f:
+        js = f.read()
+    if '"intent://%s/pair?k="' % host not in js or "location.host" in js:
+        problems.append("pair.js must open the app on %s itself, never on whatever host served it" % host)
     # Every word of the policy reaches the page.
     with open(os.path.join(ROOT, "docs", "PRIVACY_POLICY.md"), encoding="utf-8") as f:
         words = set(re.findall(r"[A-Za-z]{4,}", f.read()))

@@ -1082,21 +1082,22 @@ do_apply() {
 
 cmd_setup() {
   need_root setup; need_platform; need_user
+  root_tmp >/dev/null
+  if [ "$QR" = 1 ]; then
+    # FIRST, before anything can touch stdin (base_deps runs package managers, whose scripts
+    # could read it). Into the private directory (0700, root), deleted the moment pairing is over.
+    local qr_secret=""
+    IFS= read -r qr_secret || true
+    [[ "$qr_secret" =~ ^[A-Za-z0-9_-]{22}$ ]] || { LAST_BAD="setup --qr: no pairing secret on stdin"; echo "$LAST_BAD" >&2; exit 2; }
+    (umask 077; printf '%s\n' "$qr_secret" > "$ROOT_TMP/qr-secret")
+    qr_secret=""
+  fi
   say "=== SudoStamp setup ($FAMILY) ==="
   base_deps >/dev/null || die "could not install base dependencies (python3, ssh-keygen, git)"
   root_tmp >/dev/null
   if [ -z "$PHONE_ADDR" ] && [ "$JSON" = 1 ]; then
     # Nobody to ask which phone: the caller (the desktop app) lists them first.
     LAST_BAD="setup --json needs --phone <address>:7777"; echo "$LAST_BAD" >&2; exit 2
-  fi
-  if [ "$QR" = 1 ]; then
-    # Read before anything else can touch stdin. Into the private directory (0700, root), and
-    # gone with it when this exits.
-    local qr_secret=""
-    IFS= read -r qr_secret || true
-    [[ "$qr_secret" =~ ^[A-Za-z0-9_-]{22}$ ]] || { LAST_BAD="setup --qr: no pairing secret on stdin"; echo "$LAST_BAD" >&2; exit 2; }
-    (umask 077; printf '%s\n' "$qr_secret" > "$ROOT_TMP/qr-secret")
-    qr_secret=""
   fi
   [ -n "$PHONE_ADDR" ] || find_phone
   need_phone
@@ -1106,10 +1107,12 @@ cmd_setup() {
   jstep pairing start "Pairing with the phone at $PHONE_ADDR"
   local key why
   key="$(acquire_key)" || {
+    rm -f "$ROOT_TMP/qr-secret"
     # --json: pair.py left the reason in a file (the subshell above could not set LAST_BAD).
     why=""; [ -f "$ROOT_TMP/pair-fail" ] && why="$(tr '\n' ' ' < "$ROOT_TMP/pair-fail")"
     die "${why:-not paired; nothing on this computer was changed}"
   }
+  rm -f "$ROOT_TMP/qr-secret"        # spent: nothing after pairing needs it
   adopt_paired_addr
   ok "the phone will be reached at $PHONE_ADDR"
   jstep pairing ok "Paired: the phone will be reached at $PHONE_ADDR"

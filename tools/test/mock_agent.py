@@ -156,6 +156,7 @@ def main():
         return "deny"
 
     session = {}
+    hello_nonces = {}
 
     def ext(body, conn):
         name, o = P.take(body, 1)
@@ -208,14 +209,19 @@ def main():
             if secret is None:
                 return bytes([FAILURE])
             if name == P.EXT_QR_HELLO:
-                tag, _ = P.take(body, o)
-                ok = not session and P.hmac.compare_digest(tag, P.qr_hello(secret))
-                return bytes([SUCCESS if ok else FAILURE])
+                tag, o = P.take(body, o)
+                nq, _ = P.take(body, o)
+                if session.get("dead") or not P.hmac.compare_digest(tag, P.qr_hello(secret)) or len(nq) != 32:
+                    return bytes([FAILURE])
+                nc = os.urandom(32)
+                hello_nonces[id(conn)] = nc                 # this connection's, spent by its commit
+                return bytes([SUCCESS]) + P.s(nc) + P.s(P.qr_hello_reply_mac(secret, nq, nc))
             if name == P.EXT_QR_COMMIT:
                 nh, o = P.take(body, o)
                 mac, _ = P.take(body, o)
                 d = P.endpoint(conn.getsockname())
-                if not P.hmac.compare_digest(mac, P.qr_commit_mac(secret, nh, d)):
+                nc = hello_nonces.pop(id(conn), None)
+                if nc is None or not P.hmac.compare_digest(mac, P.qr_commit_mac(secret, nh, nc, d)):
                     print("qr: commit refused (proof)", flush=True)
                     return bytes([FAILURE])                 # no effect on the session
                 if session:                                 # a second valid commit stops it
@@ -227,7 +233,7 @@ def main():
                 session["qr"] = True
                 print("qr: commit", flush=True)
                 return bytes([SUCCESS]) + P.s(session["blob"]) + P.s(session["np"]) + P.s(d) + P.s(session["st"]) + \
-                    P.s(P.qr_phone_mac(secret, nh, session["blob"], session["np"], d, session["st"]))
+                    P.s(P.qr_phone_mac(secret, nh, nc, session["blob"], session["np"], d, session["st"]))
             nh, o = P.take(body, o)
             mac, _ = P.take(body, o)
             if not session.get("qr") or session.get("dead") or session.get("nh") != nh or \

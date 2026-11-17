@@ -23,6 +23,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -105,8 +106,16 @@ class MainActivity : Activity() {
 
     private enum class Screen { SETUP, APPROVAL, RESULT, PAIRING, QR_CONFIRM, HISTORY, LOCKED }
 
-    /** A computer's pairing code, scanned and opened here, waiting for the person to confirm. */
+    /** A computer's pairing code, scanned and opened here, waiting for the person to confirm, and
+     *  when it came (elapsedRealtime). It lives as long as the code does: two minutes. */
     private var pendingLink: QrLink.Link? = null
+    private var linkAt = 0L
+
+    /** The scanned code still waiting for its tap, if it is still fresh; a stale one is dropped. */
+    private fun liveLink(): QrLink.Link? {
+        if (pendingLink != null && SystemClock.elapsedRealtime() - linkAt >= Pairing.CODE_TTL_MS) pendingLink = null
+        return pendingLink
+    }
 
     /** Whether the last pairing started from a scanned code: what "try again" means differs. */
     private var lastQr = false
@@ -126,9 +135,14 @@ class MainActivity : Activity() {
      *  onDestroy disarms. */
     private var backCallback: OnBackInvokedCallback? = null
 
-    /** Back from a screen that has somewhere to go: pairing is cancelled, history closes. */
+    /** Back from a screen that has somewhere to go: pairing is cancelled, history closes, a
+     *  scanned code is let go. */
     private fun onBackFromSubScreen() {
-        if (screen == Screen.HISTORY) render() else cancelPairing()
+        when (screen) {
+            Screen.HISTORY -> render()
+            Screen.QR_CONFIRM -> { pendingLink = null; render() }
+            else -> cancelPairing()
+        }
     }
 
     // Lint wants OnBackPressedDispatcher, which is AndroidX. With enableOnBackInvokedCallback the
@@ -138,7 +152,8 @@ class MainActivity : Activity() {
     @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
     override fun onBackPressed() {
         // Below API 33 there is no OnBackInvokedCallback: the platform calls this instead.
-        if (screen == Screen.HISTORY || screen == Screen.PAIRING) onBackFromSubScreen() else super.onBackPressed()
+        if (screen == Screen.HISTORY || screen == Screen.PAIRING || screen == Screen.QR_CONFIRM) onBackFromSubScreen()
+        else super.onBackPressed()
     }
 
     private fun interceptBack(on: Boolean) {
@@ -221,6 +236,9 @@ class MainActivity : Activity() {
     private var notifiedRequest = -1L
 
     private fun takeRequest(i: Intent?) {
+        // A link (a scanned code, or anything a web page sends) never names a request: only our
+        // own notification does. The activity is BROWSABLE now; its extras are not to be trusted.
+        if (i?.action == Intent.ACTION_VIEW) return
         val id = i?.getLongExtra(AgentService.EXTRA_REQUEST, -1L) ?: -1L
         if (id >= 0) {
             tappedRequest = id
@@ -244,14 +262,26 @@ class MainActivity : Activity() {
             return false
         }
         pendingLink = link
+        linkAt = SystemClock.elapsedRealtime()
+        // A pairing that was open is over: the person is now pairing by this code. Left armed,
+        // it would sit there with no screen, discoverable, until it timed out.
+        if (AgentService.pairing.armed()) {
+            AgentService.pairing.disarm()
+            AgentService.discardAbandoned(this)
+            stopAdvertising()
+        }
         return true
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (takeLink(intent)) {
-            // A request being approved comes first; the code waits on screen until it is done.
-            if (AgentService.currentRequest()?.isResolved != false) renderQrConfirm()
+            // A request being approved comes first; the code waits until it is done (render()
+            // shows it then). A result flash about to close the app must not take the code along.
+            if (AgentService.currentRequest()?.isResolved != false) {
+                ui.removeCallbacksAndMessages(null)
+                renderQrConfirm()
+            }
             return
         }
         takeRequest(intent)
@@ -498,11 +528,8 @@ class MainActivity : Activity() {
             // The request ended (timed out, denied elsewhere) while the approval was over the
             // lock screen: there is nothing else to show there, so leave rather than draw setup.
             p == null && screen == Screen.APPROVAL && overKeyguard -> finishAndRemoveTask()
-            p == null && screen == Screen.APPROVAL -> when {
-                AgentService.pairing.armed() -> renderPairing()
-                pendingLink != null -> renderQrConfirm()
-                else -> render()
-            }
+            p == null && screen == Screen.APPROVAL ->
+                if (AgentService.pairing.armed()) renderPairing() else render()
             // Unlocked since the blank screen was drawn: draw the real one.
             screen == Screen.LOCKED && !deviceLocked() -> render()
             screen == Screen.SETUP && shownSetup != setupState() -> render()
@@ -642,6 +669,9 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------------- setup
 
     private fun render() {
+        // A scanned code waiting for its tap is what the person came for: shown first, once the
+        // phone is unlocked (show() keeps it off the lock screen in any case).
+        if (!deviceLocked() && liveLink() != null) return renderQrConfirm()
         interceptBack(false)
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val state = setupState()
@@ -859,8 +889,11 @@ class MainActivity : Activity() {
      * "refused", with the reason visible nowhere.
      */
     private fun startPairing(link: QrLink.Link? = null) {
-        pendingLink = null
-        if (biometricStatus() != BiometricManager.BIOMETRIC_SUCCESS) { render(); return }
+        if (biometricStatus() != BiometricManager.BIOMETRIC_SUCCESS) {
+            // Setup shows how to enroll one; the code would be stale by then.
+            if (link != null) { pendingLink = null; toast(getString(R.string.pair_qr_need_fingerprint)) }
+            render(); return
+        }
         if (!hardwareChecked) {
             val probe = "sudostamp-probe"
             try {
@@ -877,6 +910,7 @@ class MainActivity : Activity() {
         // Pairing needs the port: tapping Pair a computer is a deliberate resume.
         if (AwayControl.view(this).away) AwayControl.resume(this)
         else runCatching { startForegroundService(Intent(this, AgentService::class.java)) }
+        pendingLink = null
         lastQr = link != null
         if (link != null) AgentService.pairing.armQr(link.secret, link.label) else AgentService.pairing.arm()
         startAdvertising()
@@ -889,10 +923,11 @@ class MainActivity : Activity() {
      * not be enough on its own to let a computer pair with this phone.
      */
     private fun renderQrConfirm() {
-        val link = pendingLink ?: return render()
+        val link = liveLink() ?: return render()
         screen = Screen.QR_CONFIRM
         interceptBack(true)
         tick.removeCallbacksAndMessages(null)
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         show(frame(centered = true) {
             addView(text(getString(R.string.pair_overline), Type.OVERLINE, Ui.ACCENT, center = true), matchWrap())
             addView(mark(150, top = dp(12), bottom = dp(4)))
@@ -965,7 +1000,10 @@ class MainActivity : Activity() {
                         countDown(v.deadline - Pairing.CODE_TTL_MS, Pairing.CODE_TTL_MS)
                     })
                     addView(text(getString(if (found) R.string.pair_qr_working else R.string.pair_qr_waiting, v.label ?: ""),
-                        Type.DISPLAY, center = true), matchWrap())
+                        Type.DISPLAY, center = true).apply {
+                        // Waiting -> pairing is the one change a screen reader user must hear.
+                        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+                    }, matchWrap())
                     addView(text(getString(R.string.pair_qr_waiting_body, v.label ?: ""), Type.BODY, Ui.MUTED, center = true),
                         matchWrap(top = dp(10)))
                     addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(16)))
@@ -1261,7 +1299,10 @@ class MainActivity : Activity() {
             ui.postDelayed({
                 // Nothing pending => this approval is genuinely over, so close. (The check is
                 // belt-and-braces: a new request also cancels this callback outright.)
-                if (AgentService.currentRequest()?.isResolved != false) finishAfterApproval()
+                if (AgentService.currentRequest()?.isResolved != false) {
+                    // A code scanned meanwhile is still to be confirmed: stay for it.
+                    if (liveLink() != null) render() else finishAfterApproval()
+                }
             }, APPROVAL_FLASH_MS)
         } else {
             ui.postDelayed({ if (screen == Screen.RESULT) render() }, REFUSAL_FLASH_MS)

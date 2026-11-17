@@ -64,6 +64,7 @@ EXT_QR_HELLO = b"pair-qr-hello-v1@sudostamp"
 EXT_QR_COMMIT = b"pair-qr-v1@sudostamp"
 EXT_QR_DONE = b"pair-qr-done-v1@sudostamp"
 QR_HELLO_TAG = b"sudostamp-qr-hello-v1\x00"
+QR_HR_TAG = b"sudostamp-qr-hello-reply-v1\x00"
 QR_C_TAG = b"sudostamp-qr-commit-v1\x00"
 QR_P_TAG = b"sudostamp-qr-phone-v1\x00"
 QR_D_TAG = b"sudostamp-qr-done-v1\x00"
@@ -124,12 +125,34 @@ def qr_hello(secret):
     return hashlib.sha256(framed(QR_HELLO_TAG, secret)).digest()
 
 
-def qr_commit_mac(secret, nh, reached):
-    return hmac.new(secret, framed(QR_C_TAG, nh, reached), hashlib.sha256).digest()
+def qr_hello_reply_mac(secret, nq, nc):
+    return hmac.new(secret, framed(QR_HR_TAG, nq, nc), hashlib.sha256).digest()
 
 
-def qr_phone_mac(secret, nh, key, np_, dialled, stable):
-    return hmac.new(secret, framed(QR_P_TAG, nh, key, np_, dialled, stable), hashlib.sha256).digest()
+def qr_commit_mac(secret, nh, nc, reached):
+    return hmac.new(secret, framed(QR_C_TAG, nh, nc, reached), hashlib.sha256).digest()
+
+
+def qr_phone_mac(secret, nh, nc, key, np_, dialled, stable):
+    return hmac.new(secret, framed(QR_P_TAG, nh, nc, key, np_, dialled, stable), hashlib.sha256).digest()
+
+
+def qr_hello_on(ag, secret):
+    """pair-qr-hello on an open connection: the phone's nonce for this connection if the phone
+    PROVES it holds the secret, else None. Anything can answer SUCCESS; only the phone that
+    scanned the code can answer with this MAC."""
+    nq = os.urandom(NONCE)
+    r = ag.ext(EXT_QR_HELLO, s(qr_hello(secret)) + s(nq), limit=256)
+    if r is None:
+        return None
+    try:
+        nc, o = take(r, 0)
+        mac, o = take(r, o)
+    except ValueError:
+        return None
+    if len(nc) != NONCE or o != len(r) or not hmac.compare_digest(mac, qr_hello_reply_mac(secret, nq, nc)):
+        return None
+    return nc
 
 
 def qr_done_mac(secret, nh, key):
@@ -405,8 +428,13 @@ def pair_qr(a, secret):
         sys.exit("cannot reach the phone at %s: %s" % (a.phone, e))
     try:
         reached = endpoint(ag.sock.getpeername())
+        # The hello first, on this connection: its nonce is what the commit is bound to.
+        nc = qr_hello_on(ag, secret)
+        if nc is None:
+            sys.exit("the phone at %s did not prove it scanned this computer's code. Scan the code again "
+                     "(each one works once, for two minutes)." % a.phone)
         nh = os.urandom(NONCE)
-        r = ag.ext(EXT_QR_COMMIT, s(nh) + s(qr_commit_mac(secret, nh, reached)))
+        r = ag.ext(EXT_QR_COMMIT, s(nh) + s(qr_commit_mac(secret, nh, nc, reached)))
         if r is None:
             sys.exit("the phone refused to pair. It may not be the phone that scanned this computer's code, "
                      "its pairing screen may have closed, or something on this network answered in its place. "
@@ -417,7 +445,7 @@ def pair_qr(a, secret):
         stable, o = take(r, o)
         mac, o = take(r, o)
         if len(np_) != NONCE or len(dialled) != ENDPOINT or len(stable) != ENDPOINT or \
-                not hmac.compare_digest(qr_phone_mac(secret, nh, key, np_, dialled, stable), mac):
+                not hmac.compare_digest(qr_phone_mac(secret, nh, nc, key, np_, dialled, stable), mac):
             sys.exit("the phone's answer does not prove the code -- NOT pinned. "
                      "Something between this computer and the phone is interfering.")
         if not valid_key(key):
@@ -691,34 +719,57 @@ def display_name(name):
     return "".join(ch for ch in name if " " <= ch <= "~")[:64] or "a phone"
 
 
-def scanned(addr, tag):
-    """Whether the phone at addr is the one that scanned the code whose hello tag this is."""
+def scanned(addr, secret):
+    """Whether the phone at addr proves it is the one that scanned the code with this secret."""
     try:
         ag = Agent(addr, timeout=2)
     except OSError:
         return False
     try:
-        return ag.ext(EXT_QR_HELLO, s(tag), limit=16) is not None
+        return qr_hello_on(ag, secret) is not None
     except (OSError, ValueError, ConnectionError):
         return False
     finally:
         ag.close()
 
 
+QR_PROBES = 8          # phones asked per search, at most: a flood of fake answers cannot stall it
+
+
+def scanned_all(addrs, secret, budget=3.0):
+    """scanned() for each address, in parallel, within budget seconds overall; the set of those
+    that proved it. Addresses beyond QR_PROBES are not asked (and so are never marked)."""
+    import threading
+    found, lock = set(), threading.Lock()
+
+    def probe(a):
+        if scanned(a, secret):
+            with lock:
+                found.add(a)
+    threads = [threading.Thread(target=probe, args=(a,), daemon=True) for a in addrs[:QR_PROBES]]
+    for t in threads:
+        t.start()
+    end = time.monotonic() + budget
+    for t in threads:
+        t.join(max(0.0, end - time.monotonic()))
+    with lock:
+        return set(found)
+
+
 def cmd_discover(a):
-    tag = None
+    secret = None
     if a.qr_stdin:
         secret = qr_secret(read_line())
         if secret is None:
             sys.exit("discover --qr-stdin: no valid secret on stdin")
-        tag = qr_hello(secret)
     found, method = via_avahi(min(a.timeout, 3)), "avahi"
     if not found:
         found, method = via_mdns(a.timeout), "mdns"
-    found = [(addr, display_name(name)) for addr, name in found if plausible(addr)]
-    for addr, name in dict.fromkeys(found):
-        # A third field "qr": this phone scanned the code (only with --qr-stdin).
-        print("%s\t%s%s" % (addr, name, "\tqr" if tag is not None and scanned(addr, tag) else ""))
+    found = list(dict.fromkeys((addr, display_name(name)) for addr, name in found if plausible(addr)))
+    proved = scanned_all([addr for addr, _ in found], secret) if secret is not None else set()
+    for addr, name in found:
+        # A third field "qr": this phone proved it scanned the code (only with --qr-stdin).
+        print("%s\t%s%s" % (addr, name, "\tqr" if addr in proved else ""))
     if found and a.verbose:
         print("found via %s" % method, file=sys.stderr)
     return 0 if found else 1

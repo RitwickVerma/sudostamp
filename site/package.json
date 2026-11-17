@@ -1,0 +1,8 @@
+{
+  "name": "sudostamp-site",
+  "private": true,
+  "description": "Deploy tooling for site/ (CI job `site`): wrangler only, pinned by package-lock.json.",
+  "devDependencies": {
+    "wrangler": "4.151.0"
+  }
+}

@@ -214,12 +214,16 @@ attempt and every two minutes. The phone's camera opens it as a verified app lin
 `assetlinks.json` names the release certificate), the person taps **Pair**, and S takes the place
 of the person comparing codes:
 
-- the computer finds the phone that scanned (`pair-qr-hello-v1`: SUCCESS only to `H(tag, S)`),
-- proves S over the address it dialled (`pair-qr-v1`: Nh, `HMAC(S, tag, Nh, R)`); the phone checks
-  that against where it was dialled, so a relay fails, and refuses anything without S *without
-  effect* -- nobody without S can cancel, spend or slow a pairing,
-- the phone answers with K, Np, D, S and `HMAC(S, tag, Nh, K, Np, D, S)`; the computer checks it and
-  D == R, then confirms with `HMAC(S, tag, Nh, K)` on the same connection. Attestation follows
+- the computer finds the phone that scanned (`pair-qr-hello-v1` with `H(tag, S)` and its nonce Nq):
+  the phone answers with a fresh nonce Nc for that one connection and `HMAC(S, tag, Nq, Nc)`, so
+  a device that merely says SUCCESS is not taken for it,
+- proves S, on the same connection, over Nc and the address it dialled (`pair-qr-v1`: Nh,
+  `HMAC(S, tag, Nh, Nc, R)`); the phone checks that against where it was dialled, so a relay fails,
+  and spends Nc. Anything without S is refused *without effect*, and so is a commit copied off the
+  network and sent again on another connection (its Nc is not that connection's): nobody without S
+  can cancel, spend or slow a pairing,
+- the phone answers with K, Np, D, S and `HMAC(S, tag, Nh, Nc, K, Np, D, S)`; the computer checks it
+  and D == R, then confirms with `HMAC(S, tag, Nh, K)` on the same connection. Attestation follows
   unchanged.
 
 What it does not do: anyone who sees the code holds S as fully as the person. Someone watching

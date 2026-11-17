@@ -539,8 +539,11 @@ class AgentService : Service() {
                 if (id != null) AgentProtocol.success() else AgentProtocol.failure()
             }
             Pairing.EXT_QR_HELLO -> {
-                // Only "yes, I scanned you" or nothing: no state, no log line per probe.
-                if (pairing.qrHello(r.blob())) AgentProtocol.success() else AgentProtocol.failure()
+                // "Yes, I scanned you", proven, or nothing; no log line per probe.
+                val tag = r.blob()
+                val nq = r.blob()
+                val h = pairing.qrHello(conn.id, tag, nq)
+                if (h != null) AgentProtocol.success(h.connNonce, h.mac) else AgentProtocol.failure()
             }
             Pairing.EXT_QR_COMMIT -> {
                 val nh = r.blob()

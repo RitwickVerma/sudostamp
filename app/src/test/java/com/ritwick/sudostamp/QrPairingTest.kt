@@ -28,23 +28,28 @@ class QrPairingTest {
     private val dialled = hex("00000000000000000000ffffc0a801141e61")
     private val stable = hex("fd6c5c9300231f7e445b9bfffe36628a1e61")
     private val secret = ByteArray(16) { (it + 100).toByte() }
+    private val ncV = ByteArray(32) { (it + 64).toByte() }
+    private val nqV = ByteArray(32) { (it + 128).toByte() }
 
     @Test
     fun `the derivations match the Python implementation`() {
         assertArrayEquals(hex("31f4cea57d62d633c97c53e9d334977711d78786b42dd0284f6e366000e1a4e4"), Pairing.qrHello(secret))
-        assertArrayEquals(hex("3bf5b2c6b26a47adacf03c1bad1e01e5b44e8e307eeffaa47903663fbf56aad9"), Pairing.qrCommitMac(secret, nh, dialled))
-        assertArrayEquals(hex("8cb878e9ec27f7b7464167117bff19f3cbaf37d163177cb0514d16094217bd9b"),
-            Pairing.qrPhoneMac(secret, nh, key, np, dialled, stable))
+        assertArrayEquals(hex("a4547293a70d9c16047a8932dc6314c3febe25fddd315bd34859a459226b52d0"), Pairing.qrHelloReplyMac(secret, nqV, ncV))
+        assertArrayEquals(hex("9c9912bdfd7aadba73ad7120151aa9ad69836e4ca744056ae7d932dc51a3a87f"), Pairing.qrCommitMac(secret, nh, ncV, dialled))
+        assertArrayEquals(hex("bec2517a399f3d3b4ef3810c65762e4979989e63e9827a797b0cdd796b1e8983"),
+            Pairing.qrPhoneMac(secret, nh, ncV, key, np, dialled, stable))
         assertArrayEquals(hex("85497f963bbac992724f61dc216216d337c3bf7d00a0a27b2367e99e0229f2d9"), Pairing.qrDoneMac(secret, nh, key))
     }
 
     @Test
     fun `each proof is bound to its own role and inputs`() {
         val other = secret.copyOf().also { it[0] = 1 }
-        assertFalse(Pairing.same(Pairing.qrCommitMac(secret, nh, dialled), Pairing.qrCommitMac(other, nh, dialled)))
-        assertFalse(Pairing.same(Pairing.qrCommitMac(secret, nh, dialled), Pairing.qrCommitMac(secret, nh, stable)))
-        assertFalse("a done proof is not a commit proof",
-            Pairing.same(Pairing.qrDoneMac(secret, nh, dialled), Pairing.qrCommitMac(secret, nh, dialled)))
+        assertFalse(Pairing.same(Pairing.qrCommitMac(secret, nh, ncV, dialled), Pairing.qrCommitMac(other, nh, ncV, dialled)))
+        assertFalse(Pairing.same(Pairing.qrCommitMac(secret, nh, ncV, dialled), Pairing.qrCommitMac(secret, nh, ncV, stable)))
+        assertFalse("bound to the connection's nonce",
+            Pairing.same(Pairing.qrCommitMac(secret, nh, ncV, dialled), Pairing.qrCommitMac(secret, nh, nqV, dialled)))
+        assertFalse("a hello reply is not a commit proof",
+            Pairing.same(Pairing.qrHelloReplyMac(secret, nh, ncV), Pairing.qrCommitMac(secret, nh, ncV, ByteArray(0))))
         assertFalse(Pairing.same(null, ByteArray(32)))
         assertFalse(Pairing.same(ByteArray(31), ByteArray(32)))
     }
@@ -112,10 +117,21 @@ class QrPairingTest {
 
     private var t = 0L
     private var made = 0
-    private fun session() = PairingSession({ t }, { n -> ByteArray(n) { it.toByte() } })
+    private var rnd = 0
+    /** Each call to the session's random source gives different bytes (as SecureRandom would). */
+    private fun session() = PairingSession({ t }, { n -> ByteArray(n) { (it + rnd).toByte() }.also { rnd += 7 } })
     private val newKey = { _: ByteArray -> PairingSession.NewKey("%016x".format(++made), key) }
-    private fun PairingSession.go(client: String = "10.0.0.2", conn: Long = 1, s: ByteArray = secret, at: ByteArray = dialled) =
-        qrCommit(client, conn, nh, Pairing.qrCommitMac(s, nh, at), dialled, stable, newKey)
+    /** The hello on [conn]: the phone's nonce for it, or null. Checks the phone's proof. */
+    private fun PairingSession.hello(conn: Long, s: ByteArray = secret): ByteArray? {
+        val r = qrHello(conn, Pairing.qrHello(s), nqV) ?: return null
+        assertArrayEquals("the phone proves the secret", Pairing.qrHelloReplyMac(secret, nqV, r.connNonce), r.mac)
+        return r.connNonce
+    }
+    /** hello then commit on one connection, as pair.py does. */
+    private fun PairingSession.go(client: String = "10.0.0.2", conn: Long = 1, s: ByteArray = secret, at: ByteArray = dialled): PairingSession.QrReply? {
+        val nc = hello(conn) ?: return null
+        return qrCommit(client, conn, nh, Pairing.qrCommitMac(s, nh, nc, at), dialled, stable, newKey)
+    }
     private fun PairingSession.finish(client: String = "10.0.0.2", conn: Long = 1, s: ByteArray = secret) =
         qrDone(client, conn, nh, Pairing.qrDoneMac(s, nh, key))
     private fun armed() = session().apply { armQr(secret, "edith") }
@@ -126,14 +142,11 @@ class QrPairingTest {
         assertEquals("edith", p.view().label)
         assertTrue(p.view().qr)
         assertTrue(p.discoverable())
-        assertTrue(p.qrHello(Pairing.qrHello(secret)))
         val r = p.go()!!
         assertArrayEquals(key, r.keyBlob)
         assertArrayEquals(dialled, r.dialled)
         assertArrayEquals(stable, r.stable)
-        assertArrayEquals(Pairing.qrPhoneMac(secret, nh, key, r.phoneNonce, dialled, stable), r.mac)
         assertFalse("found: no longer discoverable", p.discoverable())
-        assertFalse("nor says yes to hello", p.qrHello(Pairing.qrHello(secret)))
         assertEquals("0000000000000001", p.finish())
         assertEquals(PairingSession.State.DONE, p.view().state)
         assertEquals("edith", p.view().label)
@@ -145,11 +158,14 @@ class QrPairingTest {
     fun `without the secret nothing has any effect`() {
         val p = armed()
         val wrong = secret.copyOf().also { it[15] = 0 }
-        assertFalse(p.qrHello(Pairing.qrHello(wrong)))
-        assertFalse(p.qrHello(ByteArray(0)))
+        assertNull(p.qrHello(1, Pairing.qrHello(wrong), nqV))
+        assertNull(p.qrHello(1, ByteArray(0), nqV))
+        assertNull("a short query nonce", p.qrHello(1, Pairing.qrHello(secret), ByteArray(3)))
         assertNull(p.go(s = wrong))
-        assertNull(p.qrCommit("10.0.0.66", 1, nh, ByteArray(32), dialled, stable, newKey))
-        assertNull(p.qrCommit("10.0.0.66", 1, nh, ByteArray(0), dialled, stable, newKey))
+        assertNull("no hello on this connection", p.qrCommit("10.0.0.66", 2, nh, ByteArray(32), dialled, stable, newKey))
+        p.hello(3)
+        assertNull(p.qrCommit("10.0.0.66", 3, nh, ByteArray(32), dialled, stable, newKey))
+        assertNull(p.qrCommit("10.0.0.66", 3, nh, ByteArray(0), dialled, stable, newKey))
         assertEquals("no key made", 0, made)
         assertEquals("still waiting", PairingSession.State.WAITING, p.view().state)
         p.go()!!
@@ -169,6 +185,27 @@ class QrPairingTest {
         assertNull(p.go(at = relay))
         assertEquals(PairingSession.State.WAITING, p.view().state)
         assertEquals(0, made)
+    }
+
+    @Test
+    fun `a commit copied off the network and sent again changes nothing`() {
+        // The attack the review found: a passive listener resends the computer's commit, byte for
+        // byte, on its own connection. That connection's nonce (if it said hello at all) is not
+        // the one the commit is bound to.
+        val p = armed()
+        val nc = p.hello(1)!!
+        val mac = Pairing.qrCommitMac(secret, nh, nc, dialled)
+        p.qrCommit("10.0.0.2", 1, nh, mac, dialled, stable, newKey)!!
+        p.finish()!!
+        for (conn in listOf(9L, 10L)) {
+            if (conn == 10L) assertNull("a hello with no secret gets no nonce", p.qrHello(conn, ByteArray(32), nqV))
+            assertNull(p.qrCommit("10.0.0.66", conn, nh, mac, dialled, stable, newKey))
+        }
+        assertEquals("the finished pairing stands", PairingSession.State.DONE, p.view().state)
+        assertEquals("and its key is kept", emptyList<String>(), p.drainDiscarded())
+        assertNull("even on the original connection, the nonce is spent", p.qrCommit("10.0.0.2", 1, nh, mac, dialled, stable, newKey))
+        assertEquals(PairingSession.State.DONE, p.view().state)
+        assertEquals(1, made)
     }
 
     @Test
@@ -212,7 +249,7 @@ class QrPairingTest {
         assertEquals(1, made)
 
         val c = session().apply { arm() }
-        assertFalse(c.qrHello(Pairing.qrHello(secret)))
+        assertNull(c.hello(1))
         assertNull(c.go())
         assertFalse(c.view().qr)
         assertEquals(PairingSession.State.WAITING, c.view().state)
@@ -228,7 +265,7 @@ class QrPairingTest {
         q.disarm()
         assertNull(q.go())
         q.arm()
-        assertFalse("re-armed for a code, the old secret is gone", q.qrHello(Pairing.qrHello(secret)))
+        assertNull("re-armed for a code, the old secret is gone", q.hello(1))
         val r = armed()
         r.go()!!
         t += Pairing.CODE_TTL_MS
@@ -240,7 +277,8 @@ class QrPairingTest {
     fun `the attestation goes to the computer that paired, after done`() {
         val withAtt = { c: ByteArray -> PairingSession.NewKey("k", key, PairingSession.Attestation(c, listOf(byteArrayOf(1)))) }
         val p = armed()
-        p.qrCommit("10.0.0.2", 1, nh, Pairing.qrCommitMac(secret, nh, dialled), dialled, stable, withAtt)!!
+        val nc = p.hello(1)!!
+        p.qrCommit("10.0.0.2", 1, nh, Pairing.qrCommitMac(secret, nh, nc, dialled), dialled, stable, withAtt)!!
         assertNull(p.attestation("10.0.0.2"))
         p.finish()!!
         assertNull(p.attestation("10.0.0.3"))
@@ -250,8 +288,10 @@ class QrPairingTest {
     @Test
     fun `malformed lengths are refused before anything`() {
         val p = armed()
-        assertNull(p.qrCommit("10.0.0.2", 1, ByteArray(31), Pairing.qrCommitMac(secret, ByteArray(31), dialled), dialled, stable, newKey))
-        assertNull(p.qrCommit("10.0.0.2", 1, nh, Pairing.qrCommitMac(secret, nh, ByteArray(4)), ByteArray(4), stable, newKey))
+        val n1 = p.hello(1)!!
+        assertNull(p.qrCommit("10.0.0.2", 1, ByteArray(31), Pairing.qrCommitMac(secret, ByteArray(31), n1, dialled), dialled, stable, newKey))
+        val n2 = p.hello(2)!!
+        assertNull(p.qrCommit("10.0.0.2", 2, nh, Pairing.qrCommitMac(secret, nh, n2, ByteArray(4)), ByteArray(4), stable, newKey))
         assertEquals(0, made)
         assertEquals(PairingSession.State.WAITING, p.view().state)
     }

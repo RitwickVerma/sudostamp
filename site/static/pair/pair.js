@@ -13,7 +13,8 @@
   // query parameter k, inside the intent only: no request is made with it. Without the app,
   // Google Play opens instead.
   var play = "https://play.google.com/store/apps/details?id=com.ritwick.sudostamp";
-  document.getElementById("open").href = "intent://" + location.host + "/pair?k=" + frag +
+  // The host the app verifies (QrLink.HOST), whatever host served this page.
+  document.getElementById("open").href = "intent://sudostamp.ritwickverma.dev/pair?k=" + frag +
     "#Intent;scheme=https;package=com.ritwick.sudostamp;S.browser_fallback_url=" +
     encodeURIComponent(play) + ";end";
 })();

@@ -618,17 +618,27 @@ class Fuzz(unittest.TestCase):
             f, s = self.fault, Fuzz.QR
             if name == getattr(P, "EXT_ATTEST", None):
                 return None
+            if name == P.EXT_QR_HELLO:
+                tag, o = P.take(payload, 0)
+                nq, _ = P.take(payload, o)
+                if f == "refuse-hello" or tag != P.qr_hello(s):
+                    return None
+                self.nc = bytes(range(200, 232))
+                m = P.qr_hello_reply_mac(s, nq, self.nc)
+                if f == "liar-hello":            # says SUCCESS without knowing the secret
+                    m = bytes(32)
+                return P.s(self.nc) + P.s(m)
             if name == P.EXT_QR_COMMIT:
                 nh, o = P.take(payload, 0)
                 mac, _ = P.take(payload, o)
                 # Where the phone was really dialled: a relay's computer proved the secret over
                 # the relay's address, so the honest phone refuses (as the app does).
                 where = P.endpoint(("192.168.1.66", 7777)) if f == "relay" else self.dialled
-                if f == "refuse-commit" or not P.hmac.compare_digest(mac, P.qr_commit_mac(s, nh, where)):
+                if f == "refuse-commit" or not P.hmac.compare_digest(mac, P.qr_commit_mac(s, nh, self.nc, where)):
                     return None
                 self.nh = nh
                 key, np_, d, st = P_KEY, self.np, self.dialled, self.stable
-                m = P.qr_phone_mac(s, nh, key, np_, d, st)
+                m = P.qr_phone_mac(s, nh, self.nc, key, np_, d, st)
                 if f == "flip-mac":
                     m = flip(m, self.r)
                 if f == "flip-key":
@@ -640,10 +650,10 @@ class Fuzz(unittest.TestCase):
                 if f == "flip-stable":
                     st = flip(st, self.r)
                 if f == "wrong-secret":
-                    m = P.qr_phone_mac(bytes(16), nh, key, np_, d, st)
+                    m = P.qr_phone_mac(bytes(16), nh, self.nc, key, np_, d, st)
                 if f == "liar-dialled":       # claims the address we dialled, with a valid proof: still must match
                     d = P.endpoint(("192.168.1.66", 7777))
-                    m = P.qr_phone_mac(s, nh, key, np_, d, st)
+                    m = P.qr_phone_mac(s, nh, self.nc, key, np_, d, st)
                 body = P.s(key) + P.s(np_) + P.s(d) + P.s(st) + P.s(m)
                 return body[:-3] if f == "truncated" else body
             if name == P.EXT_QR_DONE:
@@ -667,7 +677,7 @@ class Fuzz(unittest.TestCase):
             code, out, err = self.pair_once(Fuzz.QrPhone(), typed="", qr_secret_file=q)
             self.assertIsNone(code, err)
             self.assertTrue(out.startswith("ecdsa-sha2-nistp256 ") and out.count("\n") == 1, out)
-            for fault in ["refuse-commit", "relay", "flip-mac", "flip-key", "flip-np", "flip-dialled", "flip-stable",
+            for fault in ["refuse-hello", "liar-hello", "refuse-commit", "relay", "flip-mac", "flip-key", "flip-np", "flip-dialled", "flip-stable",
                           "wrong-secret", "liar-dialled", "truncated", "refuse-done"]:
                 for n in range(8):
                     code, out, err = self.pair_once(Fuzz.QrPhone(fault, random.Random(n)), typed="", qr_secret_file=q)

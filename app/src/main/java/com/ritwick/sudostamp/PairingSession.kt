@@ -67,6 +67,11 @@ class PairingSession(
     private var code: String? = null
     /** Set in QR mode only: the secret the scanned code carried. */
     private var qr: ByteArray? = null
+    /** QR mode: the nonce each connection's hello was answered with (Nc), spent by its commit.
+     *  A handful at most: the computer probes now and then; the oldest go first. */
+    private val helloNonces = object : LinkedHashMap<Long, ByteArray>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, ByteArray>?) = size > 8
+    }
     private val discarded = ArrayList<String>()
 
     /** The user asked to pair: allow one exchange for [Pairing.CODE_TTL_MS]. */
@@ -81,8 +86,8 @@ class PairingSession(
      *  the computer that holds [secret], named [computer] (from the code; display text). */
     @Synchronized
     fun armQr(secret: ByteArray, computer: String) {
-        abandon()
         require(secret.size == Pairing.QR_SECRET_BYTES)
+        abandon()
         state = State.WAITING
         deadline = now() + Pairing.CODE_TTL_MS
         qr = secret.copyOf()
@@ -205,22 +210,34 @@ class PairingSession(
         return key?.attestation
     }
 
-    /** pair-qr-hello: true only while waiting in QR mode for the computer whose secret hashes to
-     *  [tag]. Changes nothing either way. */
+    /** What the phone answers a hello with: its nonce for this connection, and the proof. */
+    class QrHelloReply(val connNonce: ByteArray, val mac: ByteArray)
+
+    /** pair-qr-hello on [connId]: answered only in QR mode, to the computer whose secret hashes to
+     *  [tag], with a fresh nonce for this connection (the one its commit must carry) and proof of
+     *  the secret over the computer's nonce [nq]. Changes nothing else. Answered while the arming
+     *  lasts, not only while waiting: a second holder of the secret must still be able to commit,
+     *  which stops the pairing (see [qrCommit]). */
     @Synchronized
-    fun qrHello(tag: ByteArray): Boolean {
+    fun qrHello(connId: Long, tag: ByteArray, nq: ByteArray): QrHelloReply? {
         expire()
-        val s = qr ?: return false
-        return state == State.WAITING && Pairing.same(tag, Pairing.qrHello(s))
+        val s = qr ?: return null
+        val open = state == State.WAITING || state == State.COMMITTED || (state == State.DONE && now() < deadline)
+        if (!open || nq.size != Pairing.NONCE_BYTES || !Pairing.same(tag, Pairing.qrHello(s))) return null
+        val nc = random(Pairing.NONCE_BYTES)
+        helloNonces[connId] = nc
+        return QrHelloReply(nc.copyOf(), Pairing.qrHelloReplyMac(s, nq, nc))
     }
 
     /** What the phone answers a valid pair-qr commit with. */
     class QrReply(val keyBlob: ByteArray, val phoneNonce: ByteArray, val dialled: ByteArray, val stable: ByteArray, val mac: ByteArray)
 
     /**
-     * pair-qr from [fromClient] on [connId]: the computer's nonce and its proof of the secret over
-     * where it dialled, checked against [dialledAt] (where this phone was dialled). Returns the
-     * reply, or null to refuse. Refusing a message that does not prove the secret changes nothing.
+     * pair-qr from [fromClient] on [connId], after a hello on the same connection: the computer's
+     * nonce and its proof of the secret over this connection's nonce and where it dialled, checked
+     * against [dialledAt] (where this phone was dialled). Returns the reply, or null to refuse.
+     * Refusing a message that does not prove the secret changes nothing: a commit replayed on
+     * another connection finds no nonce of its own, or another one, and is refused like a forgery.
      */
     @Synchronized
     fun qrCommit(
@@ -229,9 +246,10 @@ class PairingSession(
     ): QrReply? {
         expire()
         val s = qr ?: return null
+        val nc = helloNonces.remove(connId) ?: return null
         if (nh.size != Pairing.NONCE_BYTES || dialledAt.size != Pairing.ENDPOINT_BYTES ||
             stableAt.size != Pairing.ENDPOINT_BYTES) return null
-        if (!Pairing.same(mac, Pairing.qrCommitMac(s, nh, dialledAt))) return null
+        if (!Pairing.same(mac, Pairing.qrCommitMac(s, nh, nc, dialledAt))) return null
         when (state) {
             State.WAITING -> Unit
             State.COMMITTED -> { interrupt(); return null }
@@ -249,7 +267,7 @@ class PairingSession(
         phoneNonce = np
         hostNonce = nh.copyOf()
         return QrReply(k.blob.copyOf(), np.copyOf(), dialledAt.copyOf(), stableAt.copyOf(),
-            Pairing.qrPhoneMac(s, nh, k.blob, np, dialledAt, stableAt))
+            Pairing.qrPhoneMac(s, nh, nc, k.blob, np, dialledAt, stableAt))
     }
 
     /** pair-qr-done: on the commit's own connection, proving the secret over the key. Returns the
@@ -302,6 +320,6 @@ class PairingSession(
 
     private fun clear() {
         label = null; client = null; conn = -1; key = null; dialled = null; stable = null
-        phoneNonce = null; hostNonce = null; code = null; qr = null
+        phoneNonce = null; hostNonce = null; code = null; qr = null; helloNonces.clear()
     }
 }

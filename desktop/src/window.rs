@@ -734,9 +734,20 @@ impl App {
     /// After a search with the code's secret: the phone that scanned it, if exactly one did, is
     /// paired at once. The code is spent either way: a secret is never used twice.
     fn on_scanned(&mut self, asked: Option<String>) {
-        let current = self.ticket.as_ref().map(Ticket::secret_text);
-        if asked.is_none() || asked != current || self.pairing.is_some() || self.run.is_some() {
-            return; // an answer about an older code, or one already being paired
+        // Only for the code on screen now: not an older one, not one past its two minutes, not
+        // while a pairing runs, and never from another tab (no password prompt out of nowhere).
+        let current = self
+            .ticket
+            .as_ref()
+            .filter(|t| !t.stale())
+            .map(Ticket::secret_text);
+        if asked.is_none()
+            || asked != current
+            || self.tab != Tab::Pair
+            || self.pairing.is_some()
+            || self.run.is_some()
+        {
+            return;
         }
         let scanned: Vec<Phone> = self.phones.iter().filter(|p| p.scanned).cloned().collect();
         match scanned.as_slice() {
@@ -746,7 +757,7 @@ impl App {
                 self.start_pairing(phone.clone(), asked);
             }
             _ => {
-                // Two phones hold the secret: someone else saw the code. Pair neither.
+                // Two phones proved the secret: someone else saw the code. Pair neither.
                 self.ticket = None;
                 self.pair_error = Some(
                     "Two phones answered the same code, so neither was paired: someone else may \

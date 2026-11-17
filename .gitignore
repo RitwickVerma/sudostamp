@@ -44,3 +44,4 @@ desktop/target/
 # site/build.py
 site/out/
 .wrangler/
+site/node_modules/
