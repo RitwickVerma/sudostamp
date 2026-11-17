@@ -79,11 +79,11 @@
     <string name="pair_again">Try again</string>
     <string name="nsd_name">SudoStamp on %1$s</string>
     <string name="pair_qr_confirm_title">Pair with %1$s?</string>
-    <string name="pair_qr_confirm_body">Only if you just scanned this code on your own computer\'s screen. That computer then finds this phone on your Wi-Fi by itself.</string>
+    <string name="pair_qr_confirm_body">Only if you scanned this code with this phone, from your own computer\'s screen just now. That computer then finds this phone on your Wi-Fi.</string>
     <string name="pair_qr_confirm">Pair</string>
     <string name="pair_qr_waiting">Waiting for %1$s</string>
     <string name="pair_qr_working">Pairing with %1$s</string>
-    <string name="pair_qr_waiting_body">Keep this screen open. %1$s finds this phone by itself; it may ask for its own password first.</string>
+    <string name="pair_qr_waiting_body">Keep this screen open. %1$s finds this phone by itself. That computer may first ask for its administrator password.</string>
     <string name="pair_qr_again">To try again, scan the new code on your computer\'s screen.</string>
     <string name="pair_qr_bad_link">That is not a SudoStamp pairing code. Scan the code on your computer\'s screen again.</string>
     <string name="reset_key">Unpair all computers</string>

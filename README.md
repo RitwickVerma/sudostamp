@@ -115,6 +115,14 @@ the window finds the phone by itself and your computer asks for its password in 
 No phone app yet? The code opens Google Play first. Nothing to type ([Pairing by QR
 code](docs/DESIGN.md#pairing-by-qr-code-17-qr-v1)).
 
+<table>
+  <tr>
+    <td align="center" width="40%"><img src="docs/images/desktop-pair.png" alt="The desktop app's Pair a phone tab: a large QR code, three numbered steps, and Waiting for your phone"></td>
+    <td align="center" width="30%"><img src="docs/images/pair-qr.png" alt="The phone after scanning: Pair with edith? with a Pair button and Cancel"></td>
+    <td align="center" width="30%"><img src="docs/images/pair-qr-done.png" alt="The phone: Paired, edith now has its own key on this phone"></td>
+  </tr>
+</table>
+
 From a terminal, or on a server:
 
 **1. Phone.** Install the app from
