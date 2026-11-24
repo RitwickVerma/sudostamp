@@ -10,7 +10,10 @@ Only this command needs it; sudo and pairing do not.
 """
 import hashlib
 import hmac
+import os
+import stat
 import struct
+import sys
 
 REQUEST_TAG = b"sudostamp-secret-request-v1\0"
 ANSWER_TAG = b"sudostamp-secret-answer-v1\0"
@@ -139,3 +142,72 @@ def hpke_open(sk_r, enc, ct, inf, aad=b""):
     key = _le(_HPKE_SUITE, secret, b"key", ctx, 16)
     nonce = _le(_HPKE_SUITE, secret, b"base_nonce", ctx, 12)
     return AESGCM(key).decrypt(nonce, ct, aad)
+
+
+# ---------------------------------------------------------------- the host key H
+# This computer's identity for secret requests: P-256, one per user, made by `keygen` as that
+# user (tools/install.sh runs it before pairing, which hands the phone its public half). Anything
+# running as this user can read it and ask the phone; the phone names the computer, not the program.
+
+def key_path():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "sudostamp", "host-key.pem")
+
+
+def load_host_key(path=None):
+    """The private key, or ValueError if the file is not ours to trust: not a regular file, not
+    owned by this user, or readable or writable by anyone else (like ssh with an identity file)."""
+    from cryptography.hazmat.primitives import serialization
+    path = path or key_path()
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+            raise ValueError("%s must be a file of yours that only you can read (chmod 600)" % path)
+        with os.fdopen(fd, "rb") as f:
+            fd = None
+            k = serialization.load_pem_private_key(f.read(), password=None)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    if not isinstance(k, _ec().EllipticCurvePrivateKey) or k.curve.name != "secp256r1":
+        raise ValueError("%s is not a P-256 key" % path)
+    return k
+
+
+def keygen(path=None):
+    """Makes the host key if there is none (0600, in a 0700 directory) and returns its public
+    point. An existing one is kept: pairing again must not change who this computer is."""
+    from cryptography.hazmat.primitives import serialization
+    path = path or key_path()
+    if not os.path.lexists(path):
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        k = _ec().generate_private_key(_ec().SECP256R1())
+        pem = k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                              serialization.NoEncryption())
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(pem)
+    return point(load_host_key(path).public_key())
+
+
+def main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(prog="sudostamp-secret", description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("keygen", help="make this user's host key if needed; print its public point (hex)")
+    a = ap.parse_args(argv)
+    if a.cmd == "keygen":
+        try:
+            print(keygen().hex())
+        except ImportError:
+            sys.stderr.write("sudostamp: python3-cryptography is not installed\n")
+            return 69
+        except (OSError, ValueError) as e:
+            sys.stderr.write("sudostamp: %s\n" % e)
+            return 77
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

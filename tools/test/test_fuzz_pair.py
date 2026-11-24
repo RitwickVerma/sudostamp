@@ -477,8 +477,10 @@ class Fuzz(unittest.TestCase):
     class Phone:
         """The phone as pair.py meets it: answers pair-commit, pair-reveal, pair-done. `fault`
         corrupts one thing; None is the honest phone."""
-        def __init__(self, fault=None, rnd=None):
+        def __init__(self, fault=None, rnd=None, v3=True):
             self.fault, self.r = fault, rnd or random.Random(0)
+            self.v3 = v3            # False: an app before 2.0, which knows no pairing v3 message
+            self.host = None        # the host key it received (v3)
             self.np = bytes(range(100, 132))
             self.dialled = P.endpoint(("192.168.1.50", 7777))
             if fault == "relay":                       # it committed to where IT was reached: not where we dialled
@@ -511,8 +513,14 @@ class Fuzz(unittest.TestCase):
                 if f == "short-commit":
                     return P.s(c)[:-1]
                 return P.s(c)
-            if name == P.EXT_REVEAL:
-                self.nh, _ = P.take(payload, 0)
+            if name == P.EXT_REVEAL_V3 and not self.v3:
+                return None
+            if name in (P.EXT_REVEAL, P.EXT_REVEAL_V3):
+                self.nh, o = P.take(payload, 0)
+                if name == P.EXT_REVEAL_V3:
+                    self.host, _ = P.take(payload, o)
+                    if f == "mitm-host":            # someone between swapped in their own host key
+                        self.host = flip(self.host, self.r)
                 if f == "refuse-reveal":
                     return None
                 key, np_, d, st = P_KEY, self.np, self.dialled, self.stable
@@ -534,9 +542,9 @@ class Fuzz(unittest.TestCase):
             raise AssertionError(name)
 
         def typed_code(self):
-            return P.code(P_KEY, self.np, self.nh, self.dialled, self.stable)
+            return P.code(P_KEY, self.np, self.nh, self.dialled, self.stable, self.host)
 
-    def pair_once(self, phone, typed=None, addr_out=None, qr_secret_file=None):
+    def pair_once(self, phone, typed=None, addr_out=None, qr_secret_file=None, host_key_pub=None):
         real_agent, real_read = P.Agent, P.read_line
         P.Agent = phone
         P.read_line = lambda: typed if typed is not None else phone.typed_code()
@@ -544,7 +552,8 @@ class Fuzz(unittest.TestCase):
         # Every pair.py option at its default, as argparse would give it; attestation is not required.
         args = type("A", (), {"phone": "192.168.1.50:7777", "label": "host", "addr_out": addr_out,
                               "attest_out": None, "require_attestation": False, "check_revocation": False,
-                              "json_fd": None, "fail_out": None, "qr_secret_file": qr_secret_file})()
+                              "json_fd": None, "fail_out": None, "qr_secret_file": qr_secret_file,
+                              "host_key_pub": host_key_pub})()
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), deadline(5):
                 P.cmd_pair(args)
@@ -582,6 +591,29 @@ class Fuzz(unittest.TestCase):
                 continue                                                    # a spaced correct code is fine
             self.assertEqual(out, "", typed)
             self.assertEqual(code, 1, typed)
+
+    def test_pairing_v3_carries_the_host_key_and_the_code_covers_it(self):
+        code, out, err = self.pair_once(Fuzz.Phone(), host_key_pub=HOST_PUB.hex())
+        self.assertIsNone(code, err)
+        self.assertTrue(out.startswith("ecdsa-sha2-nistp256 "), out)
+        # Someone in between replaces the host key: the phone shows the code for THEIR key, which
+        # is not the code this computer expects. Nothing is pinned.
+        for n in range(8):
+            ph = Fuzz.Phone("mitm-host", random.Random(n))
+            code, out, err = self.pair_once(ph, host_key_pub=HOST_PUB.hex())
+            self.assertEqual(out, "", "pinned with a substituted host key")
+            self.assertEqual(code, 1)
+        # A phone before 2.0: v2, for sudo, and the person is told secrets need an update.
+        ph = Fuzz.Phone(v3=False)
+        code, out, err = self.pair_once(ph, host_key_pub=HOST_PUB.hex())
+        self.assertIsNone(code, err)
+        self.assertIsNone(ph.host)
+        self.assertIn("older than 2.0", err)
+        # A malformed --host-key-pub stops before the phone is dialled.
+        for bad in ["", "04", "05" + HOST_PUB.hex()[2:], HOST_PUB.hex() + "00", "zz" * 65]:
+            code, out, err = self.pair_once(Fuzz.Phone(), host_key_pub=bad or "x")
+            self.assertEqual(out, "")
+            self.assertIsNotNone(code)
 
     def test_cmd_pair_random_phone_answers_never_pin(self):
         class Noise(Fuzz.Phone):
@@ -628,14 +660,26 @@ class Fuzz(unittest.TestCase):
                 if f == "liar-hello":            # says SUCCESS without knowing the secret
                     m = bytes(32)
                 return P.s(self.nc) + P.s(m)
-            if name == P.EXT_QR_COMMIT:
+            if name == P.EXT_QR_COMMIT_V2 and not self.v3:
+                return None
+            if name in (P.EXT_QR_COMMIT, P.EXT_QR_COMMIT_V2):
                 nh, o = P.take(payload, 0)
+                host = None
+                if name == P.EXT_QR_COMMIT_V2:
+                    host, o = P.take(payload, o)
+                    if f == "mitm-host":
+                        host = flip(host, self.r)
                 mac, _ = P.take(payload, o)
+                # Any commit spends this connection's hello nonce, refused or not (as the app's
+                # helloNonces.remove does): a second commit on the connection has none.
+                nc, self.nc = getattr(self, "nc", None), None
                 # Where the phone was really dialled: a relay's computer proved the secret over
                 # the relay's address, so the honest phone refuses (as the app does).
                 where = P.endpoint(("192.168.1.66", 7777)) if f == "relay" else self.dialled
-                if f == "refuse-commit" or not P.hmac.compare_digest(mac, P.qr_commit_mac(s, nh, self.nc, where)):
+                if f == "refuse-commit" or nc is None or not P.hmac.compare_digest(mac, P.qr_commit_mac(s, nh, nc, where, host)):
                     return None
+                self.nc = nc        # the phone's own MAC below is over it
+                self.host = host
                 self.nh = nh
                 key, np_, d, st = P_KEY, self.np, self.dialled, self.stable
                 m = P.qr_phone_mac(s, nh, self.nc, key, np_, d, st)
@@ -691,6 +735,25 @@ class Fuzz(unittest.TestCase):
                 code, out, err = self.pair_once(Fuzz.QrPhone(), typed="", qr_secret_file=p)
                 self.assertEqual(out, "", bad)
                 self.assertIsNotNone(code, bad)
+
+    def test_qr_pairing_v3_carries_the_host_key(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            q = self.qr_file(d)
+            ph = Fuzz.QrPhone()
+            code, out, err = self.pair_once(ph, typed="", qr_secret_file=q, host_key_pub=HOST_PUB.hex())
+            self.assertIsNone(code, err)
+            self.assertEqual(ph.host, HOST_PUB)
+            for n in range(8):              # a swapped host key does not carry the computer's MAC
+                code, out, err = self.pair_once(Fuzz.QrPhone("mitm-host", random.Random(n)), typed="", qr_secret_file=q,
+                                                host_key_pub=HOST_PUB.hex())
+                self.assertEqual(out, "")
+                self.assertIsNotNone(code)
+            ph = Fuzz.QrPhone(v3=False)
+            code, out, err = self.pair_once(ph, typed="", qr_secret_file=q, host_key_pub=HOST_PUB.hex())
+            self.assertIsNone(code, err)
+            self.assertIsNone(ph.host)
+            self.assertIn("older than 2.0", err)
 
     def test_cmd_pair_by_qr_random_answers_never_pin(self):
         import tempfile
@@ -801,6 +864,9 @@ class Fuzz(unittest.TestCase):
 
 # The key blob every honest pairing uses: what the app makes (ecdsa-sha2-nistp256, uncompressed point).
 P_KEY = P.s(b"ecdsa-sha2-nistp256") + P.s(b"nistp256") + P.s(b"\x04" + bytes(range(1, 65)))
+# A computer's host key for pairing v3 (the test key of SecretProtocolTest.kt / test_secret.py).
+HOST_PUB = bytes.fromhex("04b80a6328f448a8796d12339d9c16f4f7c057ba2c7684b396f55b7b95ae6d933c"
+                         "4e308f4b1237f4d7d3798f8c1a834debefacfb70c020e5b2c970916b667e85a8")
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

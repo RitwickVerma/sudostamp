@@ -29,7 +29,16 @@ data class Host(
     val confirmed: Boolean,
     /** The address it paired from, for the record. */
     val pairedFrom: String,
-)
+    /** Pairing v3: the computer's host key (65-byte P-256 point), Base64. Null for a computer
+     *  paired without one: it gets sudo, and every secret request from it is refused unshown.
+     *  A String, not a ByteArray, so Host stays a value (data-class equality). */
+    val hostKey: String? = null,
+) {
+    /** [hostKey] as bytes, or null when there is none or it is not a P-256 point. */
+    fun hostKeyBytes(): ByteArray? = hostKey?.let { k ->
+        runCatching { Base64.getDecoder().decode(k).also { Hpke.publicKey(it) } }.getOrNull()
+    }
+}
 
 object Hosts {
 
@@ -99,15 +108,17 @@ object Hosts {
         listOf(
             h.id, h.pairedAt.toString(), if (h.confirmed) "1" else "0",
             b64e.encodeToString(h.label.toByteArray()), b64e.encodeToString(h.pairedFrom.toByteArray()),
-        ).joinToString("\t")
+        ).plus(listOfNotNull(h.hostKey)).joinToString("\t")
     }
 
-    /** Lines that do not parse are skipped: a damaged entry must not take the others with it. */
+    /** Lines that do not parse are skipped: a damaged entry must not take the others with it.
+     *  Five fields (paired before 2.0, or without a host key) or six (the host key, Base64). */
     fun decode(s: String): List<Host> = s.lineSequence().mapNotNull { line ->
         val f = line.split('\t')
-        if (f.size != 5 || !validId(f[0])) return@mapNotNull null
+        if ((f.size != 5 && f.size != 6) || !validId(f[0])) return@mapNotNull null
         runCatching {
-            Host(f[0], String(b64d.decode(f[3])), f[1].toLong(), f[2] == "1", String(b64d.decode(f[4])))
+            Host(f[0], String(b64d.decode(f[3])), f[1].toLong(), f[2] == "1", String(b64d.decode(f[4])),
+                f.getOrNull(5)?.takeIf { it.isNotEmpty() })
         }.getOrNull()
     }.toList()
 

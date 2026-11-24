@@ -59,6 +59,13 @@ EXT_DONE = b"pair-done-v2@sudostamp"
 EXT_ATTEST = b"attest-v1@sudostamp"
 COMMIT_TAG = b"sudostamp-pair-commit-v2\x00"
 CODE_TAG = b"sudostamp-pair-code-v2\x00"
+# Pairing v3 (2.0): the computer's host key H rides the reveal (code mode) or the commit (QR mode),
+# so the phone can later tell secret requests from this computer (tools/secret.py) from ones made
+# in its name. Pairing.kt has the why. Without --host-key-pub, or with a phone older than 2.0, v2.
+EXT_REVEAL_V3 = b"pair-reveal-v3@sudostamp"
+CODE_TAG_V3 = b"sudostamp-pair-code-v3\x00"
+EXT_QR_COMMIT_V2 = b"pair-qr-v2@sudostamp"
+QR_C_TAG_V2 = b"sudostamp-qr-commit-v2\x00"
 ATTEST_TAG = b"sudostamp-attest-challenge-v1\x00"
 EXT_QR_HELLO = b"pair-qr-hello-v1@sudostamp"
 EXT_QR_COMMIT = b"pair-qr-v1@sudostamp"
@@ -107,8 +114,12 @@ def commitment(key, np_, dialled, stable):
     return hashlib.sha256(COMMIT_TAG + s(key) + s(np_) + s(dialled) + s(stable)).digest()
 
 
-def code(key, np_, nh, dialled, stable):
-    v = int.from_bytes(hashlib.sha256(CODE_TAG + s(key) + s(np_) + s(nh) + s(dialled) + s(stable)).digest()[:8], "big")
+def code(key, np_, nh, dialled, stable, host=None):
+    if host is None:
+        h = hashlib.sha256(CODE_TAG + s(key) + s(np_) + s(nh) + s(dialled) + s(stable))
+    else:
+        h = hashlib.sha256(CODE_TAG_V3 + s(key) + s(np_) + s(nh) + s(dialled) + s(stable) + s(host))
+    v = int.from_bytes(h.digest()[:8], "big")
     return "%06d" % (v % 1000000)
 
 
@@ -129,8 +140,25 @@ def qr_hello_reply_mac(secret, nq, nc):
     return hmac.new(secret, framed(QR_HR_TAG, nq, nc), hashlib.sha256).digest()
 
 
-def qr_commit_mac(secret, nh, nc, reached):
-    return hmac.new(secret, framed(QR_C_TAG, nh, nc, reached), hashlib.sha256).digest()
+def qr_commit_mac(secret, nh, nc, reached, host=None):
+    if host is None:
+        return hmac.new(secret, framed(QR_C_TAG, nh, nc, reached), hashlib.sha256).digest()
+    return hmac.new(secret, framed(QR_C_TAG_V2, nh, nc, reached, host), hashlib.sha256).digest()
+
+
+def host_key_pub(text):
+    """--host-key-pub: 130 hex digits, an uncompressed P-256 point (0x04 || X || Y). Shape only:
+    the phone checks it is on the curve and refuses the reveal or commit otherwise."""
+    try:
+        b = bytes.fromhex(text.strip())
+    except ValueError:
+        return None
+    return b if len(b) == 65 and b[0] == 4 else None
+
+
+def older_phone():
+    say("  The phone's app is older than 2.0: paired for sudo only. Update the app and pair again")
+    say("  to use `sudostamp input`.")
 
 
 def qr_phone_mac(secret, nh, nc, key, np_, dialled, stable):
@@ -355,7 +383,16 @@ def pair_code(a):
                      "(A phone app older than 1.4 cannot pair with this installer: update the app.)")
         c, _ = take(c, 0)
         nh = os.urandom(NONCE)
-        r = ag.ext(EXT_REVEAL, s(nh))
+        r = ag.ext(EXT_REVEAL_V3, s(nh) + s(a.host)) if a.host else None
+        if a.host and r is None:
+            # An app before 2.0 answers FAILURE to a name it does not know and stays where it was;
+            # anything else that refused leaves nothing for the v2 reveal either.
+            a.host = None
+            r = ag.ext(EXT_REVEAL, s(nh))
+            if r is not None:
+                older_phone()
+        elif r is None:
+            r = ag.ext(EXT_REVEAL, s(nh))
         if r is None:
             sys.exit("the phone stopped the pairing. Check the phone's screen, then start again.")
         key, o = take(r, 0)
@@ -382,7 +419,7 @@ def pair_code(a):
                  "Something on this network answered in the phone's place. Pair again, typing the address "
                  "the phone shows." % (endpoint_text(dialled), endpoint_text(reached)))
 
-    expected = code(key, np_, nh, dialled, stable)
+    expected = code(key, np_, nh, dialled, stable, a.host)
     say("")
     say("  Your phone now shows a 6-digit code.")
     say("  Type it here. (Check the phone says '%s'.)" % label.decode("ascii", "replace"))
@@ -434,7 +471,17 @@ def pair_qr(a, secret):
             sys.exit("the phone at %s did not prove it scanned this computer's code. Scan the code again "
                      "(each one works once, for two minutes)." % a.phone)
         nh = os.urandom(NONCE)
-        r = ag.ext(EXT_QR_COMMIT, s(nh) + s(qr_commit_mac(secret, nh, nc, reached)))
+        if a.host:
+            r = ag.ext(EXT_QR_COMMIT_V2, s(nh) + s(a.host) + s(qr_commit_mac(secret, nh, nc, reached, a.host)))
+            if r is None:
+                # A 2.0 phone spent this connection's nonce on that refusal, so a v1 commit after
+                # it is refused too; an older phone ignored the name and still holds it.
+                a.host = None
+                r = ag.ext(EXT_QR_COMMIT, s(nh) + s(qr_commit_mac(secret, nh, nc, reached)))
+                if r is not None:
+                    older_phone()
+        else:
+            r = ag.ext(EXT_QR_COMMIT, s(nh) + s(qr_commit_mac(secret, nh, nc, reached)))
         if r is None:
             sys.exit("the phone refused to pair. It may not be the phone that scanned this computer's code, "
                      "its pairing screen may have closed, or something on this network answered in its place. "
@@ -465,6 +512,11 @@ def pair_qr(a, secret):
 
 def cmd_pair(a):
     global WHY
+    a.host = None
+    if a.host_key_pub:
+        a.host = host_key_pub(a.host_key_pub)
+        if a.host is None:
+            sys.exit("--host-key-pub is not an uncompressed P-256 point (130 hex digits starting 04)")
     if a.qr_secret_file:
         try:
             with open(a.qr_secret_file) as f:
@@ -788,6 +840,7 @@ def main():
     p.add_argument("--json-fd", type=int)
     p.add_argument("--fail-out")
     p.add_argument("--qr-secret-file")
+    p.add_argument("--host-key-pub", help="this computer's host key (tools/secret.py keygen): pairing v3")
     d = sub.add_parser("discover")
     d.add_argument("--timeout", type=float, default=3.0)
     d.add_argument("--verbose", action="store_true")

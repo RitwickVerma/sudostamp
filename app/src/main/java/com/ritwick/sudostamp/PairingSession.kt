@@ -65,6 +65,8 @@ class PairingSession(
     private var phoneNonce: ByteArray? = null
     private var hostNonce: ByteArray? = null
     private var code: String? = null
+    /** Pairing v3: the computer's host key H (a P-256 point), or null for a v2 computer. */
+    private var hostKey: ByteArray? = null
     /** Set in QR mode only: the secret the scanned code carried. */
     private var qr: ByteArray? = null
     /** QR mode: the nonce each connection's hello was answered with (Nc), spent by its commit.
@@ -167,19 +169,24 @@ class PairingSession(
     class Reveal(val keyBlob: ByteArray, val phoneNonce: ByteArray, val dialled: ByteArray, val stable: ByteArray)
 
     /**
-     * pair-reveal: the computer's nonce, on the SAME connection as its commit. From then on the
-     * screen shows the code. Anything else refuses; a reveal from somewhere else interrupts.
+     * pair-reveal: the computer's nonce, on the SAME connection as its commit, and (v3) its host
+     * key [h], which the code then covers. From then on the screen shows the code. Anything else
+     * refuses; a reveal from somewhere else interrupts.
      */
     @Synchronized
-    fun reveal(fromClient: String, connId: Long, nh: ByteArray): Reveal? {
+    fun reveal(fromClient: String, connId: Long, nh: ByteArray, h: ByteArray? = null): Reveal? {
         expire()
         if (state != State.COMMITTED || qr != null) return null
         if (fromClient != client || connId != conn) { interrupt(); return null }
         if (nh.size != Pairing.NONCE_BYTES) return null
+        // A host key that is not a P-256 point stops the pairing: see AgentService for why it is
+        // not refused quietly (the computer would retry without one).
+        if (h != null && !validHostKey(h)) { interrupt(); return null }
         val k = key!!
         val np = phoneNonce!!
         hostNonce = nh.copyOf()
-        code = Pairing.code(k.blob, np, nh, dialled!!, stable!!)
+        hostKey = h?.copyOf()
+        code = Pairing.code(k.blob, np, nh, dialled!!, stable!!, h)
         state = State.CODE
         return Reveal(k.blob.copyOf(), np.copyOf(), dialled!!.copyOf(), stable!!.copyOf())
     }
@@ -196,6 +203,11 @@ class PairingSession(
         state = State.DONE
         return key!!.id
     }
+
+    /** The host key of the pairing that just finished (v3), or null: read by the caller right
+     *  after [done] / [qrDone] succeeded, to record it with the computer. */
+    @Synchronized
+    fun doneHostKey(): ByteArray? = if (state == State.DONE) hostKey?.copyOf() else null
 
     /**
      * attest-v1: the attestation of the key THIS session made, or null. Served only to the
@@ -243,13 +255,15 @@ class PairingSession(
     fun qrCommit(
         fromClient: String, connId: Long, nh: ByteArray, mac: ByteArray,
         dialledAt: ByteArray, stableAt: ByteArray, makeKey: (challenge: ByteArray) -> NewKey?,
+        h: ByteArray? = null,
     ): QrReply? {
         expire()
         val s = qr ?: return null
         val nc = helloNonces.remove(connId) ?: return null
         if (nh.size != Pairing.NONCE_BYTES || dialledAt.size != Pairing.ENDPOINT_BYTES ||
-            stableAt.size != Pairing.ENDPOINT_BYTES) return null
-        if (!Pairing.same(mac, Pairing.qrCommitMac(s, nh, nc, dialledAt))) return null
+            stableAt.size != Pairing.ENDPOINT_BYTES || (h != null && !validHostKey(h))) return null
+        val expected = if (h == null) Pairing.qrCommitMac(s, nh, nc, dialledAt) else Pairing.qrCommitMacV3(s, nh, nc, dialledAt, h)
+        if (!Pairing.same(mac, expected)) return null
         when (state) {
             State.WAITING -> Unit
             State.COMMITTED -> { interrupt(); return null }
@@ -266,6 +280,7 @@ class PairingSession(
         stable = stableAt.copyOf()
         phoneNonce = np
         hostNonce = nh.copyOf()
+        hostKey = h?.copyOf()
         return QrReply(k.blob.copyOf(), np.copyOf(), dialledAt.copyOf(), stableAt.copyOf(),
             Pairing.qrPhoneMac(s, nh, nc, k.blob, np, dialledAt, stableAt))
     }
@@ -320,6 +335,8 @@ class PairingSession(
 
     private fun clear() {
         label = null; client = null; conn = -1; key = null; dialled = null; stable = null
-        phoneNonce = null; hostNonce = null; code = null; qr = null; helloNonces.clear()
+        phoneNonce = null; hostNonce = null; code = null; qr = null; hostKey = null; helloNonces.clear()
     }
+
+    private fun validHostKey(h: ByteArray) = runCatching { Hpke.publicKey(h) }.isSuccess
 }

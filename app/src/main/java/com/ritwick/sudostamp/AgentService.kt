@@ -522,8 +522,12 @@ class AgentService : Service() {
                 Log.i(TAG, if (c != null) "pairing: commit from $client" else "pairing: commit from $client refused")
                 if (c != null) AgentProtocol.success(c) else AgentProtocol.failure()
             }
-            Pairing.EXT_REVEAL -> {
-                val v = pairing.reveal(client, conn.id, r.blob())
+            Pairing.EXT_REVEAL, Pairing.EXT_REVEAL_V3 -> {
+                val nh = r.blob()
+                // A v3 reveal that is not exactly (Nh, H) ends the pairing, like a bad H does: refusing
+                // it quietly would let someone in between push the computer back to v2 (no H).
+                val h = if (name == Pairing.EXT_REVEAL_V3) r.blob().takeIf { r.atEnd() } ?: ByteArray(0) else null
+                val v = if (h != null || r.atEnd()) pairing.reveal(client, conn.id, nh, h) else null
                 Log.i(TAG, if (v != null) "pairing: code shown for $client" else "pairing: reveal from $client refused")
                 if (v != null) AgentProtocol.success(v.keyBlob, v.phoneNonce, v.dialled, v.stable) else AgentProtocol.failure()
             }
@@ -533,7 +537,7 @@ class AgentService : Service() {
                 val id = pairing.done(client, nh)
                 // Recorded as PENDING: trusted only once one of its requests is approved.
                 if (id != null) {
-                    Hosts.add(this, Host(id, label, System.currentTimeMillis(), false, client))
+                    Hosts.add(this, Host(id, label, System.currentTimeMillis(), false, client, hostKeyText()))
                     Log.i(TAG, "pairing: $client paired as $id (pending its first approval)")
                 }
                 if (id != null) AgentProtocol.success() else AgentProtocol.failure()
@@ -545,12 +549,15 @@ class AgentService : Service() {
                 val h = pairing.qrHello(conn.id, tag, nq)
                 if (h != null) AgentProtocol.success(h.connNonce, h.mac) else AgentProtocol.failure()
             }
-            Pairing.EXT_QR_COMMIT -> {
+            Pairing.EXT_QR_COMMIT, Pairing.EXT_QR_COMMIT_V2 -> {
                 val nh = r.blob()
-                val mac = r.blob()
+                val h = if (name == Pairing.EXT_QR_COMMIT_V2) r.blob() else null
+                // Trailing bytes make the MAC fail INSIDE qrCommit, which spends this connection's hello
+                // nonce: no second commit (e.g. a v1 one, without H) can follow on it.
+                val mac = r.blob().takeIf { r.atEnd() } ?: ByteArray(0)
                 val dialled = Net.endpoint(conn.local, conn.localPort)
                 val stable = Net.endpoint(Net.stable() ?: conn.local, PORT)
-                val v = pairing.qrCommit(client, conn.id, nh, mac, dialled, stable, ::newPairingKey)
+                val v = pairing.qrCommit(client, conn.id, nh, mac, dialled, stable, ::newPairingKey, h)
                 Log.i(TAG, if (v != null) "pairing: QR commit from $client" else "pairing: QR commit from $client refused")
                 if (v != null) AgentProtocol.success(v.keyBlob, v.phoneNonce, v.dialled, v.stable, v.mac) else AgentProtocol.failure()
             }
@@ -560,7 +567,7 @@ class AgentService : Service() {
                 val label = pairing.view().label ?: "a computer"
                 val id = pairing.qrDone(client, conn.id, nh, mac)
                 if (id != null) {
-                    Hosts.add(this, Host(id, label, System.currentTimeMillis(), false, client))
+                    Hosts.add(this, Host(id, label, System.currentTimeMillis(), false, client, hostKeyText()))
                     Log.i(TAG, "pairing: $client paired by QR code as $id (pending its first approval)")
                 }
                 if (id != null) AgentProtocol.success() else AgentProtocol.failure()
@@ -579,6 +586,10 @@ class AgentService : Service() {
             else -> AgentProtocol.failure()
         }
     }
+
+    /** The finished pairing's host key as [Host] stores it, or null (a v2 computer). */
+    private fun hostKeyText(): String? =
+        pairing.doneHostKey()?.let { java.util.Base64.getEncoder().encodeToString(it) }
 
     /** A new key for one computer, made while answering its commit (the commitment or MAC
      *  covers it), with its attestation for [challenge]; null if the Keystore cannot. */

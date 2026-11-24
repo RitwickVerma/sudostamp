@@ -100,6 +100,54 @@ class Hpke(unittest.TestCase):
             S.hpke_open(sk, ENC[:-1] + bytes([ENC[-1] ^ 1]), CT0, INFO, b"Count-0")
 
 
+class HostKey(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.d = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.d.name, "cfg", "sudostamp", "host-key.pem")
+
+    def tearDown(self):
+        self.d.cleanup()
+
+    def test_made_private_and_kept(self):
+        pub = S.keygen(self.path)
+        self.assertEqual(len(pub), 65)
+        self.assertEqual(pub[0], 4)
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(os.path.dirname(self.path)).st_mode & 0o777, 0o700)
+        self.assertEqual(S.keygen(self.path), pub, "pairing again must not change who this computer is")
+
+    def test_a_key_others_can_read_is_refused(self):
+        S.keygen(self.path)
+        for mode in (0o640, 0o604, 0o620, 0o602):
+            os.chmod(self.path, mode)
+            with self.assertRaises(ValueError):
+                S.load_host_key(self.path)
+        os.chmod(self.path, 0o600)
+        S.load_host_key(self.path)
+
+    def test_a_symlink_is_refused(self):
+        S.keygen(self.path)
+        link = self.path + ".link"
+        os.symlink(self.path, link)
+        with self.assertRaises(OSError):
+            S.load_host_key(link)
+        with self.assertRaises(OSError):            # and keygen does not follow one to write
+            os.remove(self.path)
+            S.keygen(link)
+
+    def test_another_curve_is_refused(self):
+        from cryptography.hazmat.primitives import serialization
+        os.makedirs(os.path.dirname(self.path), mode=0o700)
+        k = ec.generate_private_key(ec.SECP384R1())
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                    serialization.NoEncryption()))
+        with self.assertRaises(ValueError):
+            S.load_host_key(self.path)
+
+
 class PhonePoint(unittest.TestCase):
     def test_parses_the_pairing_vector(self):
         self.assertEqual(S.phone_point(K), K[-65:])
