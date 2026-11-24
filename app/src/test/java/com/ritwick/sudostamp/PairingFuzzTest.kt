@@ -203,7 +203,7 @@ class PairingFuzzTest {
                         val asked = stage == Stage.CONFIRM
                         if (r.nextInt(3) == 0) {
                             s.reject()
-                            if (asked) { stage = Stage.NONE; assertEquals(State.INTERRUPTED, s.view().state) }
+                            if (asked) { stage = Stage.NONE; assertEquals(State.REJECTED, s.view().state) }
                         } else {
                             val c = s.confirm()
                             assertEquals("confirm succeeds exactly while the phone asks", asked, c != null)

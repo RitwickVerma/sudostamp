@@ -1095,6 +1095,16 @@ class MainActivity : Activity() {
                     tryAgain()
                     addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(8)))
                 }
+                PairingSession.State.REJECTED -> {
+                    addView(ResultMark(context, Ui.MUTED, false, getString(R.string.pair_rejected)).apply {
+                        layoutParams = LinearLayout.LayoutParams(dp(120), dp(120)).apply { gravity = Gravity.CENTER_HORIZONTAL }
+                    })
+                    addView(text(getString(R.string.pair_rejected), Type.DISPLAY, center = true), matchWrap(top = dp(20)))
+                    addView(text(getString(R.string.pair_rejected_detail), Type.BODY, Ui.MUTED, center = true),
+                        matchWrap(top = dp(8)))
+                    tryAgain()
+                    addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(8)))
+                }
                 PairingSession.State.OUTDATED -> {
                     addView(ResultMark(context, Ui.WARN, false, getString(R.string.pair_outdated)).apply {
                         layoutParams = LinearLayout.LayoutParams(dp(120), dp(120)).apply { gravity = Gravity.CENTER_HORIZONTAL }

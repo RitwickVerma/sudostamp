@@ -46,7 +46,7 @@ class PairingSession(
 ) {
     /** OUTDATED: a computer tried the pairing protocol of SudoStamp 1.3 or older, which this
      *  app refuses; the screen tells the person to update the computer's installer. */
-    enum class State { IDLE, WAITING, COMMITTED, CODE, CONFIRM, DONE, INTERRUPTED, EXPIRED, OUTDATED }
+    enum class State { IDLE, WAITING, COMMITTED, CODE, CONFIRM, DONE, INTERRUPTED, REJECTED, EXPIRED, OUTDATED }
 
     /** A code-mode pairing the person confirmed: what the caller records (see [Hosts]). */
     class Confirmed(val id: String, val label: String?, val client: String, val hostKey: ByteArray?)
@@ -232,7 +232,10 @@ class PairingSession(
     @Synchronized
     fun reject() {
         expire()
-        if (state == State.CONFIRM) interrupt()
+        if (state == State.CONFIRM) {
+            interrupt()
+            state = State.REJECTED
+        }
     }
 
     /** The host key of the pairing that just finished (v3), or null: read by the caller right

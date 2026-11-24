@@ -33,6 +33,17 @@ object HistoryScreen {
 
     private const val MUTED_DIM = 0x268A97AD
 
+    /** The sentence under a row. A secret row that was not answered says nothing was sent:
+     *  "signature" and "sensor" are sudo words, and an unopened request never reached the sensor. */
+    fun detail(e: HistoryEntry): Int = when {
+        e.secret == null -> look(e).detail
+        e.verdict == Verdict.APPROVED -> R.string.verdict_secret_sent_detail
+        e.verdict == Verdict.DENIED -> R.string.verdict_secret_denied_detail
+        e.verdict == Verdict.DENIED_NOTIFICATION -> R.string.verdict_secret_denied_notification_detail
+        e.verdict == Verdict.TIMED_OUT -> R.string.verdict_secret_timed_out_detail
+        else -> look(e).detail
+    }
+
     private fun look(e: HistoryEntry): Look = when (e.verdict) {
         Verdict.APPROVED -> Look(R.string.verdict_approved, R.string.verdict_approved_detail,
             Ui.ACCENT, Ui.ACCENT_DIM, R.drawable.ic_check_circle)
@@ -117,7 +128,7 @@ object HistoryScreen {
         val name = name(ctx, e)
         val at = time.format(e.at)
         val verdict = ctx.getString(l.label)
-        val detail = ctx.getString(if (e.secret != null && e.verdict == Verdict.APPROVED) R.string.verdict_secret_sent_detail else l.detail)
+        val detail = ctx.getString(detail(e))
         // A secret request says so first; what was asked for only when it was sent.
         val title = when {
             e.secret == null -> name

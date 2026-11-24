@@ -75,6 +75,8 @@
     <string name="pair_done_detail">%1$s now has its own key on this phone. Approve its test request next: until one of its requests is approved, it is marked as new.</string>
     <string name="pair_finish">Done</string>
     <string name="pair_interrupted">Pairing stopped</string>
+    <string name="pair_rejected">Not paired</string>
+    <string name="pair_rejected_detail">You said the computer did not report a match, so nothing was kept. Start again on the computer if you still want to pair it.</string>
     <string name="pair_interrupted_detail">A second device tried to pair while this pairing was open, so nothing was kept. If that was not you, someone on this network may be trying their luck.</string>
     <string name="pair_outdated">Update the computer first</string>
     <string name="pair_outdated_detail">The computer at %1$s runs a SudoStamp installer from version 1.3 or older, which this app no longer pairs with. Update it (Arch: sudo pacman -Syu sudostamp, or yay -Syu; anywhere else: copy the command again), then tap Try again.</string>
@@ -171,6 +173,9 @@
     <string name="verdict_approved_detail">Your fingerprint signed this one request.</string>
     <string name="verdict_denied_detail">You tapped Deny. No signature was sent.</string>
     <string name="verdict_denied_notification_detail">You denied it from the notification. No signature was sent.</string>
+    <string name="verdict_secret_denied_detail">You tapped Deny. Nothing was sent.</string>
+    <string name="verdict_secret_denied_notification_detail">You denied it from the notification. Nothing was sent.</string>
+    <string name="verdict_secret_timed_out_detail">Nobody answered in time, so nothing was sent.</string>
     <string name="verdict_timed_out_detail">Nobody touched the sensor in time, so it was denied.</string>
     <string name="verdict_cancelled_detail">Dropped while waiting: Away began or the listener stopped.</string>
     <string name="refusal_unknown_key">Not one of your computers: it asked with a key this phone never made for any computer. You were not asked.</string>

@@ -163,7 +163,7 @@ class PairingTest {
         assertNotNull(p.done("10.0.0.66", nh))
         assertNull("nothing to confirm twice over a second done", p.done("10.0.0.66", nh))
         p.reject()
-        assertEquals(PairingSession.State.INTERRUPTED, p.view().state)
+        assertEquals("the person's no, not a second device", PairingSession.State.REJECTED, p.view().state)
         assertNull("no is final", p.confirm())
         assertEquals(listOf("0000000000000001"), p.drainDiscarded())
     }
