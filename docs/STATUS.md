@@ -5,10 +5,10 @@ hardware.** In daily use on one Arch Linux host with a Samsung Galaxy foldable (
 2026-09. This file is the verification log: what was checked, how, and what it showed. Release
 notes are in [CHANGELOG.md](../CHANGELOG.md).
 
-## 2026-11-23 — 2.0 secrets (`sudostamp input`), not yet on a device
+## 2026-11-23 — 2.0 secrets (`sudostamp input`), emulator done, real phone to do
 
-Branch `feat/secret-input`. Checked on the JVM and against a fake phone; **not yet run on an emulator
-or phone** (the build host has no KVM).
+Branch `feat/secret-input`. Checked on the JVM, against a fake phone, and on an emulator (API 34, PIN
+and an enrolled virtual finger, real Keystore). **Not yet run on a real phone.**
 
 | What | How | Result |
 |---|---|---|
@@ -19,9 +19,18 @@ or phone** (the build host has no KVM).
 | mutants, phone | each guard removed once, the named test seen red: `SecretGate` second hello, nonce not spent, no-H allowed, limiter ignored, sigH unchecked; History keeps an unsent name, parses one, merges secret and sudo rows; `Approval` without its answer; answer size; pairing v3 code without H, QR v2 MAC without H, an invalid H refused quietly instead of ending the pairing, H recorded before done, H not validated on load; HPKE point check; pkR outside T; trailing bytes | all red, all compiled |
 | mutants, host | `isatty` check, sigK check, exact answer framing, name and reason checks; `verify`, `phone_point` trailing bytes, `info` without the hash | all red |
 | found and fixed | `input` read the pinned key from `<user>` instead of `<user>.keys`, and the test fixture shared the mistake | fixed in `38af1f4`; a test now ties the name to install.sh's PAM line |
+| emulator: pairing v3 | `pair.py pair --host-key-pub` over adb forward, the code read off the screen | codes match, paired; again after Unpair with a new host key |
+| emulator: approve | `sudostamp input restic --why "weekly backup"` (stdout a pipe), value typed on the phone, finger | rc 0; stdout is exactly the typed bytes (sha256 equal) |
+| emulator: deny, ignore | tap Deny; or leave it | rc 77, stdout empty; timed out after 60 s, rc 77 |
+| emulator: locked | request with the phone locked | the keyguard shows only "e2e asks for a secret · Tap to review", never the field; after the PIN, approved, rc 0 |
+| emulator: screenshot | `adb exec-out screencap -p` on the secret screen, the home screen as control | 0 bytes; control 1,374,137 bytes |
+| emulator: cooldown | a request right after two unanswered ones | refused without a prompt (`RATE_LIMITED`), rc 77 |
+| emulator: history | Request history | Approved row names `restic` and the reason; Denied, Timed out, Refused rows keep no text |
+| found and fixed | a new computer's first secret request warned "if you did not just run sudo there" | its own text: "…did not just ask for a secret there…"; seen on the emulator |
 
-Still to do before a release: the emulator end to end (§9), and one release-signed run on a real
-phone with Autofill and a `screencap` showing the window black.
+Still to do before a release: one release-signed run on a real phone, with Autofill from a password
+manager, non-ASCII typed on its keyboard (`adb input text` cannot type it), and a `screencap` of the
+secret screen.
 
 ## 2026-11-12 — 1.5.0: ten upgrades
 

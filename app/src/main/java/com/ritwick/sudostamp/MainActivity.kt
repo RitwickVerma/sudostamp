@@ -1360,7 +1360,7 @@ class MainActivity : Activity() {
                     background = Ui.rounded(Ui.WARN_DIM, dpf(12f))
                     setPadding(dp(12), dp(10), dp(12), dp(10))
                     addView(icon(R.drawable.ic_warning, Ui.WARN, 18))
-                    addView(text(getString(R.string.approval_new_host), Type.CAPTION, Ui.WARN).apply {
+                    addView(text(getString(R.string.secret_new_host), Type.CAPTION, Ui.WARN).apply {
                         setPadding(dp(10), 0, 0, 0)
                     }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 }, matchWrap(top = dp(14)))
