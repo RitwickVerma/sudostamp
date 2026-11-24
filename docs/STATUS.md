@@ -5,6 +5,24 @@ hardware.** In daily use on one Arch Linux host with a Samsung Galaxy foldable (
 2026-09. This file is the verification log: what was checked, how, and what it showed. Release
 notes are in [CHANGELOG.md](../CHANGELOG.md).
 
+## 2026-11-23 — 2.0 secrets (`sudostamp input`), not yet on a device
+
+Branch `feat/secret-input`. Checked on the JVM and against a fake phone; **not yet run on an emulator
+or phone** (the build host has no KVM).
+
+| What | How | Result |
+|---|---|---|
+| HPKE (`Hpke.kt`) | RFC 9180 A.3.1 vectors; the phone's seal opened by pyca (`verify_secret_seal.py`), with a flipped bit refused | vectors match; opened (1024 bytes); flipped bit refused |
+| shared vectors | T, info, answer message, pairing v3 code and QR MAC: Kotlin and Python hold the same numbers | equal |
+| JVM suite | `./gradlew testDebugUnitTest` | 242 tests, 0 failures |
+| host | `test_secret.py` 12, `test_secret_input.py` 12 (CLI against a fake phone on a socket), `test_pair.py`, `test_fuzz_pair.py`, `test_ask.py` | all OK; pyca 50.0.2, and `test_secret` + the seal check also under pyca 43.0.0 |
+| mutants, phone | each guard removed once, the named test seen red: `SecretGate` second hello, nonce not spent, no-H allowed, limiter ignored, sigH unchecked; History keeps an unsent name, parses one, merges secret and sudo rows; `Approval` without its answer; answer size; pairing v3 code without H, QR v2 MAC without H, an invalid H refused quietly instead of ending the pairing, H recorded before done, H not validated on load; HPKE point check; pkR outside T; trailing bytes | all red, all compiled |
+| mutants, host | `isatty` check, sigK check, exact answer framing, name and reason checks; `verify`, `phone_point` trailing bytes, `info` without the hash | all red |
+| found and fixed | `input` read the pinned key from `<user>` instead of `<user>.keys`, and the test fixture shared the mistake | fixed in `38af1f4`; a test now ties the name to install.sh's PAM line |
+
+Still to do before a release: the emulator end to end (§9), and one release-signed run on a real
+phone with Autofill and a `screencap` showing the window black.
+
 ## 2026-11-12 — 1.5.0: ten upgrades
 
 Built in four parallel branches and integrated by hand; each feature was checked where it runs.

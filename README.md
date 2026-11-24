@@ -380,6 +380,21 @@ sudo's log, the desktop notification and, from 1.6, on the phone's approval scre
 [docs/AGENTS-SUDO.md](docs/AGENTS-SUDO.md) has the details and what the description does and does
 not guarantee.
 
+## Secrets: `sudostamp input`
+
+A program that needs a password you do not want stored on the computer can ask the phone for it:
+
+```sh
+RESTIC_PASSWORD_COMMAND='sudostamp input restic --why "weekly backup"' restic backup ~
+sudostamp input disk --why "open the backup disk" | sudo cryptsetup open --key-file=- /dev/sdX backup
+```
+
+The phone shows which computer asks, the name and the reason. You type the secret or let your
+password manager fill it, then touch the sensor; it goes, encrypted, to that one request and is
+written to the program's pipe. The phone keeps nothing, and the command refuses to print to a
+terminal. Needs `python3-cryptography` on the computer and a pairing made with 2.0
+([docs/design/secrets.md](docs/design/secrets.md); what it does not protect: [SECURITY.md](SECURITY.md)).
+
 ## Development
 
 ```sh

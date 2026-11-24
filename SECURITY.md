@@ -35,8 +35,9 @@ design, so nobody is locked out by a dead phone.
 | The phone app | showing *which computer* is asking, relaying the challenge, encoding the signature | this repo |
 | The LAN | nothing | — |
 
-The app never verifies anything and holds no secret it could leak: the private keys never leave
-the secure hardware.
+For sudo the app verifies nothing and holds no secret it could leak: the private keys never leave
+the secure hardware. Secret requests (2.0, below) are the exception: the app checks the computer's
+signature, and a secret the person types is in its memory for the seconds before it is encrypted.
 
 ## Key attestation (1.5)
 
@@ -66,6 +67,50 @@ show that computer's name. Consequences:
 
 Phones updated from 1.3 keep their single old key as one entry, "Computers paired before 1.4",
 flagged on every request; pair those computers again and remove it.
+
+## Secrets typed on the phone (`sudostamp input`, 2.0)
+
+A program on a paired computer can ask for a secret (`sudostamp input restic --why "weekly
+backup"`); the person types or autofills it on the phone and approves with a fingerprint. The phone
+stores nothing. Design and wire format: [docs/design/secrets.md](docs/design/secrets.md).
+
+Since a released secret is useful to whoever receives it, the phone must know which computer asks.
+Pairing v3 gives each computer a host key H (P-256, `~/.config/sudostamp/host-key.pem`, 0600, made
+as the user), covered by the pairing code or the QR secret. A request is signed by H over a nonce
+the phone chose for this connection; the answer is HPKE-sealed (RFC 9180, DHKEM P-256, HKDF-SHA256,
+AES-128-GCM, composed from platform primitives and checked against the RFC vectors and pyca) to a
+key the computer made for this one request, and signed by that computer's Keystore key, which needs
+the fingerprint.
+
+| Threat | Outcome |
+|---|---|
+| A LAN device asks for a secret in a paired computer's name | **Refused without a prompt**: the request must be signed by that computer's host key over this connection's nonce. |
+| A captured request is replayed | **Refused without a prompt**: its nonce belonged to another connection, and each nonce is spent by the first request. |
+| A man in the middle swaps the computer's encryption key | **Refused**: the key is inside the signed request. |
+| A LAN device answers in the phone's place with a value it chose | **Detected**: the computer requires the phone key's signature over the request and the ciphertext, and writes nothing otherwise (exit 65). |
+| An eavesdropper on the LAN | Sees the name and the reason (chosen by the asker, made to be shown) and a ciphertext under a key that lives for one request. |
+| Malware on the phone without root | Cannot produce an answer: the signature needs the fingerprint, enforced by the TEE. It cannot draw over the screen (as for sudo) or capture it (`FLAG_SECURE`). |
+| A man in the middle at pairing substitutes the host key | **Fails**, one time in a million: the host key is inside what the 6-digit code (or the QR secret) covers. |
+| A computer paired before 2.0 | Cannot ask; nothing shown; pair it again. Sudo keeps working. |
+| Spam for a tired tap | The sudo limiter, shared: per-computer cooldown, global cap. |
+| Someone holding the locked phone | The secret screen is never shown over the lock screen, and the notification says only which computer asks. |
+
+**What it does NOT protect:**
+
+- **The requesting computer gets the secret.** That is the feature. Anything running as that user
+  can read the host key and ask; the phone names the computer, not the program. Root on that
+  computer, or any process that can read the CLI's memory or its consumer's, gets every value
+  released there.
+- **The reason is the asker's word.** Signed by the computer's host key, so it is that computer's
+  word, but any program of that user can write any reason.
+- **The phone sees the value in clear** for the seconds between the field and the encryption, in
+  app memory. Root malware on the phone, an accessibility service, or a third-party keyboard (it
+  receives every typed character) can take it. Autofill from the phone's password manager avoids
+  the keyboard; it does not avoid root.
+- **SudoStamp cannot know the value is right**, or that the person meant this computer: read the
+  name.
+- **A stolen host key lets the thief ask**, named as that computer, until it is paired again. It
+  does not open past answers: each was encrypted to a key that lived for one request.
 
 ## Threat model
 

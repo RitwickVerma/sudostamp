@@ -1,6 +1,6 @@
 # Design: secrets the computer must not store (`sudostamp input`, later `unseal`)
 
-Status: **proposal, not approved, no code.** Target: 2.0 (the wire format and pairing change).
+Status: **`input` implemented** (branch `feat/secret-input`; deviations from the proposal are in §12). `unseal`: not started. Target: 2.0 (the wire format and pairing change).
 
 ## 1. Problem
 
@@ -150,7 +150,7 @@ tools. Only long-standing APIs are used at runtime. `doctor` reports whether it 
 Additive to v2 and `qr-v1`; vectors in both suites, as today.
 
 - The computer generates a host key H (P-256) per paired user before pairing:
-  `$XDG_CONFIG_HOME/sudostamp/host-key.pem`, mode 0600, directory 0700, owned by the user.
+  `~/.config/sudostamp/host-key.pem`, mode 0600, directory 0700, owned by the user.
   Generated as the user, never by root (AGENTS.md pitfall 19).
 - Code pairing: `pair-reveal-v3(Nh, H)`; the code becomes `H(code-tag-v3 || K || Np || Nh || D || S || H)`.
   H is sent after the phone's commitment, so a substituted H changes the code exactly like a
@@ -420,3 +420,25 @@ pairing v3 with the key-substituting man in the middle already in CI, now substi
 **Ship `input` first (recommended), or go straight to `unseal`?** Everything else above follows
 from the code that exists; that choice sets the 2.0 scope, whether the phone keeps any secret at
 rest, and whether section 12 must be solved before release.
+
+## 12. As built: where the code differs from the proposal
+
+- **The host key is always `~/.config/sudostamp/host-key.pem`**, not `$XDG_CONFIG_HOME/...`: setup
+  makes it under `sudo -u <user> -H`, which resets the environment, so a session's
+  `XDG_CONFIG_HOME` would send `input` to a path setup never wrote.
+- **QR pairing v2: `macP` and `macD` do not cover H.** `macC` does, under the QR secret, and the
+  phone refuses (and spends the hello nonce of) a commit whose MAC fails: an H someone else chose
+  never reaches `Hosts`. Covering it again on the way back adds nothing a relay could not already
+  not do.
+- **A request that fails verification is not counted by the per-computer limiter.** Anything on
+  the LAN can send one (K is public); a cooldown it could trigger would block that computer's real
+  sudo. It is refused unshown and recorded in the history like any other refusal.
+- **Exit 75 also covers "this computer was paired before 2.0"** as the phone sees it: the phone
+  answers FAILURE to the hello without saying why, so the CLI cannot tell it from Away, a cooldown
+  or an older app. Exit 69 is what the computer can tell on its own (no host key, no pinned key,
+  no SudoStamp block, no pyca).
+- **The per-connection rules live in `SecretGate`** (one hello, one request, the nonce spent by the
+  first request) so they run in JVM tests; `AgentService` only supplies the lookups.
+- **Not yet done:** the emulator end to end (no KVM on the build host) and the real-phone run with
+  Autofill and a `screencap` of the black window (§9 "Device").
+

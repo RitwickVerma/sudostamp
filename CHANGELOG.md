@@ -2,6 +2,26 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
+## Unreleased (2.0)
+
+Programs on a paired computer can ask your phone for a secret, which you type or fill and approve
+with your fingerprint. Pair again to use it.
+
+### Secrets
+- **`sudostamp input <name> --why <text>`** asks the phone and writes the secret to the program that
+  needs it, never to the screen, a file or a log: `RESTIC_PASSWORD_COMMAND='sudostamp input restic
+  --why "weekly backup"'`. The phone shows the computer, the name and the reason; you type it or let
+  your password manager fill it, then touch the sensor. The phone keeps nothing.
+- Only a computer paired with 2.0 can ask, and only that computer can read the answer
+  ([SECURITY.md](SECURITY.md), *Secrets typed on the phone*). Computers paired before keep working
+  for sudo; pair one again to use secrets.
+- The history shows secret requests: what was sent and to which computer, and requests that were
+  turned away without their text.
+
+### Computer
+- Setup makes a key for this computer (`~/.config/sudostamp/host-key.pem`) and pairs with it. Secrets
+  need `python3-cryptography`; without it, setup pairs for sudo only and says so.
+
 ## 1.7.0 — 2026-11-17
 
 Pair by scanning a code: nothing to type.

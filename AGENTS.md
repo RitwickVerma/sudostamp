@@ -42,6 +42,8 @@ python3 tools/verify_ssh_sig.py app/build/sshcheck   # AFTER the unit tests
 python3 tools/check-secrets.py --all
 shellcheck -S warning tools/*.sh scripts/*.sh tools/test/*.sh
 python3 -I tools/test/test_pair.py && python3 -I tools/test/test_fuzz_pair.py   # CI hygiene
+python3 -I tools/test/test_secret.py && python3 -I tools/test/test_secret_input.py  # need python3-cryptography
+python3 -I tools/verify_secret_seal.py app/build/secretcheck   # AFTER the unit tests: phone's HPKE opened by pyca
 SUDOSTAMP_ONLINE=1 python3 -I tools/test/test_sbom.py                          # online: pam_rssh Cargo.lock pin
 cd desktop && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings \
   && cargo test --locked && cargo deny check                                   # CI job `desktop`
@@ -77,7 +79,9 @@ cd desktop && cargo fmt --check && cargo clippy --all-targets --locked -- -D war
 | `AgentProtocol.kt` | ssh-agent framing; only REQUEST_IDENTITIES and SIGN_REQUEST (+ pairing extensions); `refusal()` = sign policy (a paired computer's key, exactly 32 bytes) |
 | `AgentService.kt` | Foreground service: serial TCP listener on 7777, peers on the Wi-Fi/Ethernet subnet only, per-connection budget, key lookup per computer, `Limiter`, parks one `Approval`, wake lock while pending, notifications tied to one request |
 | `Context.kt` | What a computer says its next sudo is for (`context-v1@sudostamp`): `ContextBox` (per client, 5 s, single use, conflict if two texts differ), `parseRun` (the host tool's script-run command line). Advisory: never decides anything. Parsing is `AgentProtocol.parseContext` |
-| `Approval.kt` | One pending request (with its computer); resolves exactly once (approve/deny/timeout) |
+| `Approval.kt` | One pending request (with its computer); resolves exactly once (approve/deny/timeout); a secret request is approved only with its sealed answer |
+| `Hpke.kt` | RFC 9180 base-mode seal (DHKEM P-256, HKDF-SHA256, AES-128-GCM) from platform primitives; seal only |
+| `SecretProtocol.kt`, `SecretGate.kt` | `sudostamp input` (docs/design/secrets.md): parsing, transcript T, the sealed answer; `SecretGate` = one connection's rules (one hello, one request, nonce spent, H's signature) |
 | `Hosts.kt` | Paired computers, one Keystore key each; pending until first approved; reconciled with the Keystore |
 | `Keys.kt` | Keystore EC P-256 keys (one per computer), fresh strong biometric per use, secure-hardware check, invalidation detection |
 | `Limiter.kt` | When a paired computer's request is refused unprompted: 3 s after an approval, per-computer cooldown, global cap |
@@ -102,7 +106,7 @@ sshd/sshd-session/mosh-server), `sudostamp-probe.sh` (PAM check before pam_rssh:
 answer with this user's key within 4 s, else skip; also the pause flag and the datagrams for the
 desktop app, and with the word `after` the hook line after pam_rssh, with `check` the bare check
 for `doctor`; docs/DESKTOP.md), device probes, `verify.sh`, `verify_ssh_sig.py`,
-`check-secrets.py`, `ask.py` (`sudostamp ask`: an agent's one way to root, runs as the user; docs/AGENTS-SUDO.md), `sudostamp-run.sh` (root: runs exactly the script whose hash sudo's command line names, from stdin). `attest.py` (verifies the attestation chain pair.py gets from the phone: embedded Google roots pinned by SHA-256, signatures through the system `openssl`; stdlib only). `tools/test/`: `test_attest.py` + `attest/` (REAL hardware chains published by Google, with provenance) + `attest_fixture.py` (throwaway-root chains, tests only), `mock_agent.py` (software-key stand-in for the phone,
+`check-secrets.py`, `secret.py` (`sudostamp input` and the host key `keygen`; needs pyca; docs/design/secrets.md), `ask.py` (`sudostamp ask`: an agent's one way to root, runs as the user; docs/AGENTS-SUDO.md), `sudostamp-run.sh` (root: runs exactly the script whose hash sudo's command line names, from stdin). `attest.py` (verifies the attestation chain pair.py gets from the phone: embedded Google roots pinned by SHA-256, signatures through the system `openssl`; stdlib only). `tools/test/`: `test_attest.py` + `attest/` (REAL hardware chains published by Google, with provenance) + `attest_fixture.py` (throwaway-root chains, tests only), `mock_agent.py` (software-key stand-in for the phone,
 loopback only, tests only), `event_sink.py` (the desktop app's datagram socket, a root socket, a full
 one), `check_event.py` / `check_doctor_json.py` (the schemas of docs/DESKTOP.md), `drive_setup.py`
 (drives `setup --json` like the app does) and `e2e.sh` (the host side end to end in a throwaway container).
@@ -272,3 +276,11 @@ installer built: `uninstall` removes only that, `doctor` reads the patch state f
     never opens a path the agent names. The runner is Python inside single quotes in a shell wrapper: no
     apostrophe anywhere in it (test_ask.py checks). sudo prints PAM messages on stdout, so the
     runner marks where the script's output starts and ask splits there.
+33. `sudostamp input` reads what setup wrote, by the same names: the pinned key is
+    `<keys>/<user>.keys` (pam_rssh's `auth_key_file`), the host key `~/.config/sudostamp/host-key.pem`
+    (setup runs `keygen` under `sudo -u <user> -H`, which resets XDG_CONFIG_HOME). A test fixture
+    that invents its own layout passes while the real one fails: build fixtures from install.sh's
+    names (test_secret_input.py holds them together).
+34. Mutation runs on Python: run with `python3 -B` and no `__pycache__`. Two mutants of the same size
+    written within one second reuse the first one's bytecode (the cache checks mtime and size), and
+    the second "result" is the first mutant's.
