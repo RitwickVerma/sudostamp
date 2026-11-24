@@ -17,6 +17,13 @@ with your fingerprint. Pair again to use it.
   for sudo; pair one again to use secrets.
 - The history shows secret requests: what was sent and to which computer, and requests that were
   turned away without their text.
+- A newly paired computer can ask for secrets only after you have approved one of its sudo
+  requests. The secret screen shows the address the request came from and when that computer was
+  paired, so two machines with the same name can be told apart.
+- Pairing a computer again with the same host key replaces its old entry on the phone.
+- `sudostamp input` writes only to a pipe. It refuses a terminal (unless `--to-tty`), a file, a
+  closed stdout, or stderr in the same pipe (`2>&1`), before it asks the phone.
+- A flood of refused requests can no longer push your own approvals out of the history.
 
 ### Computer
 - Setup makes a key for this computer (`~/.config/sudostamp/host-key.pem`) and pairs with it. Secrets

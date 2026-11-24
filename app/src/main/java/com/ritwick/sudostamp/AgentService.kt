@@ -92,8 +92,11 @@ class AgentService : Service() {
         /** What each computer said its next sudo is for. Advisory; see [ContextBox]. */
         private val contextBox = ContextBox()
 
-        /** Numbers requests, so a notification acts only on the request it announced. */
-        private val requestIds = java.util.concurrent.atomic.AtomicLong()
+        /** Names requests, so a notification acts only on the request it announced. Random, not
+         *  counted: MainActivity is exported, and another app must not be able to name the
+         *  request on screen (and so raise its prompt) by guessing the next number. */
+        private val rng = java.security.SecureRandom()
+        private fun newRequestId(): Long = rng.nextLong() ushr 1
 
         /** True while the server socket is bound and accepting. The setup screen shows
          *  THIS, not "a key exists", so a dead listener can never read as healthy. */
@@ -437,7 +440,7 @@ class AgentService : Service() {
 
                 // Hand off to the Activity for a biometric. THIS is the gate.
                 val p = Approval(
-                    requestIds.incrementAndGet(), Keys.newSigner(Keys.aliasFor(host.id)), data,
+                    newRequestId(), Keys.newSigner(Keys.aliasFor(host.id)), data,
                     host.id, host.label, host.confirmed, client, System.currentTimeMillis(),
                     seen?.text, seen?.conflicted == true,
                 )
@@ -565,7 +568,7 @@ class AgentService : Service() {
             return 0
         }
         val p = Approval(
-            requestIds.incrementAndGet(), Keys.newSigner(Keys.aliasFor(host.id)), ByteArray(0),
+            newRequestId(), Keys.newSigner(Keys.aliasFor(host.id)), ByteArray(0),
             host.id, host.label, host.confirmed, client, System.currentTimeMillis(),
             context = q.why, secret = Approval.SecretAsk(q.name, t, q.pkR),
         )
@@ -609,7 +612,8 @@ class AgentService : Service() {
                 val nh = r.blob()
                 // A v3 reveal that is not exactly (Nh, H) ends the pairing, like a bad H does: refusing
                 // it quietly would let someone in between push the computer back to v2 (no H).
-                val h = if (name == Pairing.EXT_REVEAL_V3) r.blob().takeIf { r.atEnd() } ?: ByteArray(0) else null
+                // runCatching: a missing H must end it too, not throw past pairing.reveal.
+                val h = if (name == Pairing.EXT_REVEAL_V3) runCatching { r.blob() }.getOrNull()?.takeIf { r.atEnd() } ?: ByteArray(0) else null
                 val v = if (h != null || r.atEnd()) pairing.reveal(client, conn.id, nh, h) else null
                 Log.i(TAG, if (v != null) "pairing: code shown for $client" else "pairing: reveal from $client refused")
                 if (v != null) AgentProtocol.success(v.keyBlob, v.phoneNonce, v.dialled, v.stable) else AgentProtocol.failure()

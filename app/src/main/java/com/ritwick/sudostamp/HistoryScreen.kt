@@ -57,6 +57,7 @@ object HistoryScreen {
         Refusal.COOLDOWN -> R.string.refusal_cooldown
         Refusal.NO_HOST_KEY -> R.string.refusal_no_host_key
         Refusal.BAD_REQUEST -> R.string.refusal_bad_request
+        Refusal.PENDING -> R.string.refusal_pending
     }
 
     /** Who the entry names: the computer, or "unknown device" for a peer that is not paired. */

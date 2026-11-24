@@ -135,6 +135,25 @@ object SecretProtocol {
     }
 
     /** The SUCCESS frame body the computer reads: enc, ct, then K's DER signature. */
+    /**
+     * [chars] as UTF-8, or null if they are not valid UTF-16 (a lone surrogate). Encoded into one
+     * buffer sized for the worst case (3 bytes per UTF-16 unit), then zeroed: a growing encoder
+     * would leave copies of the secret in buffers nobody can wipe. The caller wipes the result.
+     */
+    fun utf8(chars: CharArray): ByteArray? {
+        val buf = java.nio.ByteBuffer.allocate(chars.size * 3)
+        try {
+            val enc = Charsets.UTF_8.newEncoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+            val r = enc.encode(java.nio.CharBuffer.wrap(chars), buf, true)
+            if (r.isError || r.isOverflow || enc.flush(buf).isError) return null
+            return buf.array().copyOf(buf.position())
+        } finally {
+            buf.array().fill(0)
+        }
+    }
+
     fun answerFrame(a: Answer, sigDer: ByteArray): ByteArray =
         AgentProtocol.success(a.sealed.enc, a.sealed.ct, sigDer)
 }

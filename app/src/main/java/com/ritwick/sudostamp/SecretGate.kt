@@ -36,6 +36,9 @@ class SecretGate(private val random: (Int) -> ByteArray = ::randomBytes) {
         val h = k?.let(find) ?: return Hello.Refused(Refusal.UNKNOWN_KEY, null)
         // Paired before 2.0: the phone cannot tell this computer from anything on the LAN.
         if (h.hostKeyBytes() == null) return Hello.Refused(Refusal.NO_HOST_KEY, h)
+        // Pairing proves which key the computer pinned, not who paired it (a code race): a
+        // computer asks for secrets only after the person has approved one of its requests.
+        if (!h.confirmed) return Hello.Refused(Refusal.PENDING, h)
         limit(h.id)?.let { return Hello.Refused(it, h) }
         val n = random(SecretProtocol.NONCE_BYTES)
         nonce = n

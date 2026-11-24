@@ -96,7 +96,6 @@
     <string name="approval_received">Received %1$s</string>
     <string name="approval_left">Denied automatically in %1$d s</string>
     <string name="approval_new_host">First request from this computer since it was paired. If you did not just run sudo there, deny it.</string>
-    <string name="secret_new_host">First request from this computer since it was paired. If you did not just ask for a secret there, deny it.</string>
     <string name="approval_legacy">Paired before version 1.4, so any of those computers could be asking. Pair them again to tell them apart.</string>
     <string name="approval_ctx_overline">Asked to run</string>
     <string name="approval_ctx_agent">%1$s wants to run a script</string>
@@ -216,6 +215,7 @@
     <!-- Secret requests (sudostamp input) -->
     <string name="secret_overline">secret request</string>
     <string name="secret_title">%1$s asks for a secret</string>
+    <string name="secret_paired_on">Paired %1$s</string>
     <string name="secret_advisory">Named and described by %1$s. Any program on that computer could ask with other words.</string>
     <string name="secret_field_hint_for">Secret for %1$s</string>
     <string name="secret_show">Show</string>
@@ -232,5 +232,6 @@
     <string name="history_secret_named">Secret · %1$s · %2$s</string>
     <string name="verdict_secret_sent_detail">Sent once, encrypted to this computer. SudoStamp kept no copy.</string>
     <string name="refusal_no_host_key">It asked for a secret, but it was paired before version 2.0, so this phone cannot tell it is that computer. Pair it again to use secrets. You were not asked.</string>
+    <string name="refusal_pending">A secret request from a computer you have not approved anything from yet. Approve one sudo from it first. You were not asked.</string>
     <string name="refusal_bad_request">A secret request that failed its checks: not signed by this computer, malformed, or a replay. You were not asked.</string>
 </resources>

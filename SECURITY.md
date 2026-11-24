@@ -92,6 +92,12 @@ the fingerprint.
 | Malware on the phone without root | Cannot produce an answer: the signature needs the fingerprint, enforced by the TEE. It cannot draw over the screen (as for sudo) or capture it (`FLAG_SECURE`). |
 | A man in the middle at pairing substitutes the host key | **Fails**, one time in a million: the host key is inside what the 6-digit code (or the QR secret) covers. |
 | A computer paired before 2.0 | Cannot ask; nothing shown; pair it again. Sudo keeps working. |
+| Someone wins the race for the 6-digit pairing code and pairs their own machine | **Cannot ask for secrets**: a computer asks only after the person has approved one of its sudo requests, and that first request carries the new-computer warning. |
+| Two machines hold the same host key (a synced `~/.config`, a cloned VM or image) | **One of them**: one host key is one computer, so the second pairing replaces the first. |
+| Two computers with the same name | Told apart on the secret screen by the address the request came from and the pairing date. |
+| Another app on the phone opens SudoStamp at a pending request | **No**: requests are named by random 63-bit ids, not a counter. |
+| Another app takes the typed value out of the field | **No**: only paste and select-all work in it, shown or not (no copy, cut, share, drag, or "process text"); it is marked sensitive for accessibility (Android 14+), and the keyboard's full-screen mode is off. |
+| A flood of refused requests from the LAN | Cannot push an approval or denial out of the history: refusals are dropped first. |
 | Spam for a tired tap | The sudo limiter, shared: per-computer cooldown, global cap. |
 | Someone holding the locked phone | The secret screen is never shown over the lock screen, and the notification says only which computer asks. |
 
@@ -109,8 +115,15 @@ the fingerprint.
   the keyboard; it does not avoid root.
 - **SudoStamp cannot know the value is right**, or that the person meant this computer: read the
   name.
-- **A stolen host key lets the thief ask**, named as that computer, until it is paired again. It
-  does not open past answers: each was encrypted to a key that lived for one request.
+- **A stolen host key lets the thief ask**, named as that computer, until that computer is unpaired.
+  Pairing again with the same key does not help (it is the same computer to the phone). To recover:
+  Unpair it on the phone, delete `~/.config/sudostamp/host-key.pem` there, and run setup again. A
+  stolen key does not open past answers: each was encrypted to a key that lived for one request.
+- **Never sync, copy or bake the host key into an image.** A second machine with the same key is
+  the same computer to the phone.
+- **The phone's own copies.** The value is encoded into one buffer and wiped, and the field is wiped
+  when the screen goes away, but the text field and the keyboard keep internal copies the app cannot
+  reach until the memory is reused.
 
 ## Threat model
 

@@ -26,7 +26,9 @@ and an enrolled virtual finger, real Keystore). **Not yet run on a real phone.**
 | emulator: screenshot | `adb exec-out screencap -p` on the secret screen, the home screen as control | 0 bytes; control 1,374,137 bytes |
 | emulator: cooldown | a request right after two unanswered ones | refused without a prompt (`RATE_LIMITED`), rc 77 |
 | emulator: history | Request history | Approved row names `restic` and the reason; Denied, Timed out, Refused rows keep no text |
-| found and fixed | a new computer's first secret request warned "if you did not just run sudo there" | its own text: "…did not just ask for a secret there…"; seen on the emulator |
+| found and fixed | a new computer's first secret request warned "if you did not just run sudo there" | superseded: a computer never approved cannot ask for a secret at all (red team, below) |
+| red team, host | the CLI as a process against a hostile fake phone and hostile redirections (12 attacks) | 4 holes (closed stdout, file, `2>&1`, reader gone), fixed; 12/12 refused; each guard red once under a mutant |
+| red team, phone | independent read-only review | no critical/high; fixed: pending computers asking, shared/stale host key, same-name computers, field leaks, guessable request ids, history flush, truncated v3 reveal |
 
 Still to do before a release: one release-signed run on a real phone, with Autofill from a password
 manager, non-ASCII typed on its keyboard (`adb input text` cannot type it), and a `screencap` of the

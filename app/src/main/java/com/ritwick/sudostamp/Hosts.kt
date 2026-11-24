@@ -55,8 +55,23 @@ object Hosts {
 
     fun byId(ctx: Context, id: String): Host? = all(ctx).firstOrNull { it.id == id }
 
+    /** Adds [h]; an older entry with the same host key is removed, its Keystore key deleted. */
     @Synchronized
-    fun add(ctx: Context, h: Host) = save(ctx, all(ctx).filter { it.id != h.id } + h)
+    fun add(ctx: Context, h: Host) {
+        val (list, gone) = adding(all(ctx), h)
+        gone.forEach { runCatching { Keys.delete(Keys.aliasFor(it)) } }
+        save(ctx, list)
+    }
+
+    /**
+     * [list] with [h] added, and the ids of the entries it replaces. One host key is one
+     * computer: the same H paired again (setup run twice, or the key file copied to another
+     * machine) replaces the older entry, so that entry's K cannot go on asking in its name.
+     */
+    fun adding(list: List<Host>, h: Host): Pair<List<Host>, List<String>> {
+        val gone = list.filter { it.id != h.id && h.hostKey != null && it.hostKey == h.hostKey }.map { it.id }
+        return Pair(list.filter { it.id != h.id && it.id !in gone } + h, gone)
+    }
 
     /** Marks [id] trusted. True if it was pending. */
     @Synchronized

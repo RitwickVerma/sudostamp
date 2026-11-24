@@ -350,9 +350,10 @@ def ask_phone(agent, keys, host_key, name, why, waiting=lambda: None):
     agent.send(bytes([AGENTC_EXTENSION]) + s(EXT_HELLO) + s(k))
     r = agent.recv()
     if r[:1] != bytes([AGENT_SUCCESS]):
-        raise Stop(EX_TEMPFAIL, "the phone will not be asked for a secret: SudoStamp there is older "
-                   "than 2.0, this computer was paired before 2.0 (run 'sudo sudostamp setup' again), "
-                   "or it is cooling down after a refusal. Nothing was shown.")
+        raise Stop(EX_TEMPFAIL, "the phone will not be asked for a secret: no sudo from this computer "
+                   "has been approved on it yet (approve one first), SudoStamp there is older than 2.0, "
+                   "this computer was paired before 2.0 (run 'sudo sudostamp setup' again), or it is "
+                   "cooling down after a refusal. Nothing was shown.")
     try:
         (np,) = strings(r[1:], 1)
     except ValueError:

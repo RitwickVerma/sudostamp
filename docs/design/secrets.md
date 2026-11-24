@@ -447,6 +447,23 @@ rest, and whether section 12 must be solved before release.
   no SudoStamp block, no pyca).
 - **The per-connection rules live in `SecretGate`** (one hello, one request, the nonce spent by the
   first request) so they run in JVM tests; `AgentService` only supplies the lookups.
-- **Not yet done:** the emulator end to end (no KVM on the build host) and the real-phone run with
-  Autofill and a `screencap` of the black window (§9 "Device").
+- **After a red-team pass** (attacks run against the CLI as a process, plus an independent review of
+  the phone):
+  - A computer asks for secrets only once one of its requests was approved (`Refusal.PENDING`):
+    pairing proves which key was pinned, not who paired, so a won code race must not reach the
+    secret screen. The new-computer warning therefore never shows on the secret screen; sudo
+    keeps it.
+  - One host key is one computer: a pairing whose H another entry already has replaces that entry
+    (`Hosts.adding`). Re-running setup no longer leaves an old K that can still ask with the same H.
+  - The secret screen also shows the request's address and the pairing date (labels are chosen
+    by the computer and need not be unique).
+  - The field allows only paste and select-all, enforced in `onTextContextMenuItem` (menus and
+    hardware shortcuts alike); no long press while shown (drag); no extract UI; sensitive to
+    accessibility on API 34+. UTF-8 is encoded into one worst-case buffer that is then zeroed.
+  - Request ids are random, not counted (the activity is exported). Refusals are trimmed from the
+    history before decisions. A v3 reveal with no H at all ends the pairing like a bad H.
+  - The CLI checks where stdout goes before asking: a terminal (without `--to-tty`), a file, a
+    closed fd 1, or stderr in the same pipe is exit 64; a reader gone before the end is exit 74.
+- **Not yet done:** the real-phone run with Autofill and a `screencap` of the black window
+  (§9 "Device").
 

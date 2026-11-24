@@ -51,6 +51,8 @@ enum class Refusal(val code: String) {
     NO_HOST_KEY("h"),
     /** A secret request that is not one: no hello first, bad signature, malformed, replayed. */
     BAD_REQUEST("b"),
+    /** A secret request from a computer none of whose requests was ever approved. */
+    PENDING("p"),
 }
 
 /**
@@ -204,9 +206,20 @@ class History(private val file: File? = null, private val max: Int = MAX) {
         list = if (top != null && mergeable(top, entry)) {
             listOf(entry.copy(count = top.count + entry.count)) + list.drop(1)
         } else {
-            (listOf(entry) + list).take(max)
+            trim(listOf(entry) + list)
         }
         save()
+    }
+
+    /** Down to [max]: the oldest refusal goes first. Anything on the LAN can be refused at will,
+     *  so refusals alone must never push out a decision the person took part in. */
+    private fun trim(l: List<HistoryEntry>): List<HistoryEntry> {
+        val out = l.toMutableList()
+        while (out.size > max) {
+            val i = out.indexOfLast { it.verdict == Verdict.REFUSED }
+            out.removeAt(if (i >= 0) i else out.lastIndex)
+        }
+        return out
     }
 
     private fun mergeable(top: HistoryEntry, e: HistoryEntry): Boolean =

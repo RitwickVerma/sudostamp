@@ -107,6 +107,15 @@ class SecretGateTest {
     }
 
     @Test
+    fun `a computer not yet approved once cannot ask for a secret`() {
+        // A pairing proves which key was pinned, not who paired (a race on the pairing code).
+        // Such a computer must first get one sudo approved, with the new-computer warning.
+        val pending = gate().hello(k, { host.copy(confirmed = false) }, noLimit) as SecretGate.Hello.Refused
+        assertEquals(Refusal.PENDING, pending.why)
+        assertEquals(host.id, pending.host?.id)
+    }
+
+    @Test
     fun `a refused hello leaves nothing to spend`() {
         val g = gate()
         g.hello(k, find) { Refusal.COOLDOWN }

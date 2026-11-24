@@ -37,6 +37,18 @@ class HistoryTest {
     }
 
     @Test
+    fun `refusals from the LAN cannot push a decision out of the history`() {
+        // Anything on the LAN can be refused at will; alternating reasons defeats the merging.
+        val h = History()
+        h.record(entry(peer = "192.0.2.1"))
+        repeat(300) { h.record(refused(if (it % 2 == 0) Refusal.UNKNOWN_KEY else Refusal.BAD_REQUEST, peer = "198.51.100.$it")) }
+        val list = h.entries()
+        assertEquals(100, list.size)
+        assertEquals("the approval is still there", 1, list.count { it.verdict == Verdict.APPROVED })
+        assertEquals("newest refusal first", "198.51.100.299", list.first().peer)
+    }
+
+    @Test
     fun `round trips through the file with every field`() {
         val f = File(tmp.root, "h.txt")
         val h = History(f)
@@ -204,7 +216,7 @@ class HistoryTest {
         assertEquals(Refusal.entries.size, Refusal.entries.map { it.code }.toSet().size)
         // Renumbering these would reinterpret every phone's existing history.
         assertEquals(listOf("a", "d", "n", "t", "c", "r"), Verdict.entries.map { it.code })
-        assertEquals(listOf("k", "c", "l", "g", "q", "w", "h", "b"), Refusal.entries.map { it.code })
+        assertEquals(listOf("k", "c", "l", "g", "q", "w", "h", "b", "p"), Refusal.entries.map { it.code })
     }
 
     @Test

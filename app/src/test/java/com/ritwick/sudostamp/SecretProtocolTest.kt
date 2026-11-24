@@ -168,4 +168,13 @@ class SecretProtocolTest {
         assertArrayEquals(sig, r.blob())
         assertTrue(r.atEnd())
     }
+
+    @Test
+    fun `utf8 encodes like the platform, refuses lone surrogates`() {
+        for (v in listOf("hunter2", "p\u00e4ssw\u00f6rd \u2713", "\ud83d\udd11 key", "\u4e2d\u6587\u5bc6\u7801", "")) {
+            org.junit.Assert.assertArrayEquals(v, v.toByteArray(Charsets.UTF_8), SecretProtocol.utf8(v.toCharArray()))
+        }
+        org.junit.Assert.assertNull(SecretProtocol.utf8(charArrayOf('a', '\ud83d')))
+        org.junit.Assert.assertNull(SecretProtocol.utf8(charArrayOf('\udd11', 'a')))
+    }
 }

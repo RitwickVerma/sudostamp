@@ -1291,10 +1291,23 @@ class MainActivity : Activity() {
         val left = text("", Type.CODE_SMALL, Ui.MUTED, center = true)
         lateinit var send: android.widget.Button
 
-        val field = android.widget.EditText(this).apply {
+        // Paste in, never anything out (even with Show on). Enforced where the action runs, so a
+        // hardware keyboard's Ctrl+C or another app's "process text" item gets nothing either.
+        val pasteOnly = setOf(android.R.id.paste, android.R.id.pasteAsPlainText, android.R.id.selectAll)
+        val field = object : android.widget.EditText(this) {
+            override fun onTextContextMenuItem(id: Int) = id in pasteOnly && super.onTextContextMenuItem(id)
+        }.apply {
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            // NO_EXTRACT_UI: the landscape full-screen editor is the keyboard's window, which
+            // FLAG_SECURE does not cover.
             imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
+                android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI or
                 android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            // Shown or not, accessibility services that are not tools for the user (they all
+            // could be) are told this is sensitive.
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES)
+            }
             // The phone's password manager may fill it: that keeps the keyboard out of it.
             importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_YES
             setAutofillHints(View.AUTOFILL_HINT_PASSWORD)
@@ -1307,18 +1320,18 @@ class MainActivity : Activity() {
             setPadding(dp(16), 0, dp(16), 0)
             background = Ui.rounded(Ui.SURFACE_HI, dpf(16f), dp(1), Ui.OUTLINE)
             filters = arrayOf(android.text.InputFilter.LengthFilter(SecretProtocol.MAX_SECRET_BYTES))
-            // Paste in, never copy or share out (even with Show on).
-            customSelectionActionModeCallback = object : android.view.ActionMode.Callback {
+            // The menus offer only what onTextContextMenuItem allows (no "process text" items).
+            val menuPasteOnly = object : android.view.ActionMode.Callback {
                 override fun onCreateActionMode(m: android.view.ActionMode, menu: android.view.Menu) = true
                 override fun onPrepareActionMode(m: android.view.ActionMode, menu: android.view.Menu): Boolean {
-                    menu.removeItem(android.R.id.copy)
-                    menu.removeItem(android.R.id.cut)
-                    menu.removeItem(android.R.id.shareText)
+                    (menu.size() - 1 downTo 0).map { menu.getItem(it).itemId }.filter { it !in pasteOnly }.forEach { menu.removeItem(it) }
                     return true
                 }
                 override fun onActionItemClicked(m: android.view.ActionMode, item: android.view.MenuItem) = false
                 override fun onDestroyActionMode(m: android.view.ActionMode) = Unit
             }
+            customSelectionActionModeCallback = menuPasteOnly
+            customInsertionActionModeCallback = menuPasteOnly
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
                 override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
@@ -1335,6 +1348,8 @@ class MainActivity : Activity() {
             setOnClickListener {
                 val shown = field.transformationMethod == null
                 field.transformationMethod = if (shown) android.text.method.PasswordTransformationMethod.getInstance() else null
+                // A long press on shown text starts a drag of it to any window: none while shown.
+                field.isLongClickable = shown
                 field.setSelection(field.text.length)
                 text = getString(if (shown) R.string.secret_show else R.string.secret_hide)
             }
@@ -1353,18 +1368,23 @@ class MainActivity : Activity() {
             // What is asked for and why: the computer's words, read before the field.
             addView(card().apply {
                 addView(text(ask.name, Type.TITLE).apply { clamp(1) })
-                p.context?.let { addView(text("\u201C$it\u201D", Type.BODY).apply { clamp(4) }, matchWrap(top = dp(6))) }
+                // Clamped to 4 lines; a tap shows all of it (the whole signed reason, nothing hidden).
+                p.context?.let { addView(text("\u201C$it\u201D", Type.BODY).apply {
+                    clamp(4)
+                    setOnClickListener { maxLines = Int.MAX_VALUE; ellipsize = null }
+                }, matchWrap(top = dp(6))) }
                 addView(text(getString(R.string.secret_advisory, name), Type.CAPTION, Ui.MUTED), matchWrap(top = dp(10)))
-                if (!p.trusted) addView(row().apply {
-                    gravity = Gravity.TOP
-                    background = Ui.rounded(Ui.WARN_DIM, dpf(12f))
-                    setPadding(dp(12), dp(10), dp(12), dp(10))
-                    addView(icon(R.drawable.ic_warning, Ui.WARN, 18))
-                    addView(text(getString(R.string.secret_new_host), Type.CAPTION, Ui.WARN).apply {
-                        setPadding(dp(10), 0, 0, 0)
-                    }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                }, matchWrap(top = dp(14)))
             }, matchWrap(top = dp(20)))
+            // Which computer, beyond the name it chose: two boxes may both be called "ubuntu".
+            addView(card().apply {
+                addView(field(getString(R.string.approval_from), p.client, mono = true))
+                Hosts.byId(this@MainActivity, p.hostId)?.let { h ->
+                    addView(text(getString(R.string.secret_paired_on,
+                        android.text.format.DateFormat.getMediumDateFormat(context).format(h.pairedAt)),
+                        Type.CAPTION, Ui.MUTED), matchWrap(top = dp(4)))
+                }
+                // No new-computer warning here: a computer never approved cannot ask (SecretGate).
+            }, matchWrap(top = dp(12)))
 
             addView(row().apply {
                 gravity = Gravity.CENTER_VERTICAL
@@ -1400,10 +1420,7 @@ class MainActivity : Activity() {
         val e = field.text
         val chars = CharArray(e.length).also { e.getChars(0, e.length, it, 0) }
         val bytes = try {
-            val bb = Charsets.UTF_8.newEncoder().encode(java.nio.CharBuffer.wrap(chars))
-            ByteArray(bb.remaining()).also { bb.get(it); if (bb.hasArray()) bb.array().fill(0) }
-        } catch (x: java.nio.charset.CharacterCodingException) {
-            null
+            SecretProtocol.utf8(chars)
         } finally {
             chars.fill('\u0000')
         }
