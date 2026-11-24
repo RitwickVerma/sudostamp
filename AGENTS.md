@@ -23,7 +23,9 @@ tools/verify.sh                                           # four gates; needs JA
   into dist/, dry run) and `publish X.Y.Z` (package + upload + GitLab Release). docs/RELEASING.md.
   `ship X.Y.Z` after the release MR is merged: tag, publish, AUR (`scripts/publish-aur.sh`), Play
   (`tools/play_publish.py`), then `scripts/check-channels.sh`. **Merging is the owner's action.**
-  CI never signs and never holds a key; the keys are never decrypted outside tmpfs.
+  CI never signs and never holds a key; the keys are never decrypted outside tmpfs, and never while
+  Gradle runs: `package` builds unsigned first, then `scripts/sign-apk.sh` signs (no signing config
+  in Gradle, on purpose; CI `android` tests sign-apk.sh with a throwaway key).
 - Host side: `tools/install.sh {setup|stage|test|apply|rollback|status|doctor|uninstall}` (`doctor --json`
   and `setup --json` are for the desktop app, docs/DESKTOP.md), configured by
   `--phone <ip>:7777` (or `SUDOSTAMP_PHONE`), run with plain `sudo`, never `sudo -E`. **Never run `apply` or `rollback` unless asked**:

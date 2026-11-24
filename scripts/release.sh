@@ -9,8 +9,10 @@
 #
 #   scripts/release.sh package X.Y.Z
 #       The signed build, on the maintainer's machine only (CI never sees a signing key):
-#       release-check.sh, both keys from the SOPS vault into a private tmpfs directory wiped on
-#       exit, R8 release APK, certificate pinned to RELEASE_CERT below, not debuggable, the
+#       release-check.sh, the UNSIGNED R8 release build first (no key exists while Gradle and its
+#       dependencies run), then both keys from the SOPS vault into a private tmpfs directory
+#       wiped on exit, signed by scripts/sign-apk.sh (apksigner/jarsigner only), certificate
+#       pinned to RELEASE_CERT below, not debuggable, the
 #       single-file host installer, the two CycloneDX SBOMs (scripts/sbom.py), mapping.txt and
 #       SHA256SUMS (APK, installer and SBOMs), and SSH signatures (.sig) over the installer and
 #       SHA256SUMS -> dist/. Publishes nothing.
@@ -211,6 +213,15 @@ if [ "$MODE" = publish ]; then
 fi
 CODE=$(sed -nE 's/^\s*versionCode = ([0-9]+).*/\1/p' "$GRADLE")
 
+step "unsigned release build"
+# Before any key is decrypted: Gradle, its plugins and every build dependency run with no secret
+# anywhere on this machine's tmpfs or in the environment. scripts/sign-apk.sh signs afterwards.
+env -u SUDOSTAMP_KEYSTORE ./gradlew -q --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" \
+  ${SUDOSTAMP_GRADLE_ARGS:-} assembleRelease bundleRelease
+UNSIGNED_APK=app/build/outputs/apk/release/app-release-unsigned.apk
+UNSIGNED_AAB=app/build/outputs/bundle/release/app-release.aab
+[ -f "$UNSIGNED_APK" ] && [ -f "$UNSIGNED_AAB" ] || die "the release build left no APK or bundle"
+
 step "signing material"
 HOMELAB="${SUDOSTAMP_HOMELAB_INFRA:-$PWD/../homelab-infra}"
 export SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/sudostamp-release.txt}"
@@ -251,21 +262,17 @@ rm -f "$SECRETS/signing.env" "$SECRETS"/*.sops.env
 export SUDOSTAMP_KEYSTORE="$SECRETS/release.jks"
 echo "decrypted into $SECRETS (wiped on exit)"
 
-step "signed release build"
-# --project-cache-dir inside the tmpfs directory: Gradle records the signing config (the alias,
-# and unsalted hashes of both passwords) as task inputs in its execution history, which would
-# otherwise stay behind in .gradle/ on disk.
-./gradlew -q --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" --project-cache-dir "$SECRETS/gradle-project" \
-  ${SUDOSTAMP_GRADLE_ARGS:-} assembleRelease bundleRelease
-APK=app/build/outputs/apk/release/app-release.apk
-AAB=app/build/outputs/bundle/release/app-release.aab
-[ -f "$AAB" ] || die "no signed app bundle"
-[ -f "$APK" ] || die "no signed APK (was the keystore read?)"
-rm -rf "$SECRETS/release.jks" "$SECRETS/gradle-project"
+step "sign"
+SIGNED="$SECRETS/signed"
+scripts/sign-apk.sh "$UNSIGNED_APK" "$UNSIGNED_AAB" "$SIGNED" "$RELEASE_CERT" || die "signing failed"
+rm -f "$SECRETS/release.jks"
 unset SUDOSTAMP_KEYSTORE_PASSWORD SUDOSTAMP_KEY_PASSWORD SUDOSTAMP_KEY_ALIAS SUDOSTAMP_KEYSTORE
+mkdir -p dist
+APK="dist/sudostamp-$TAG.apk"; AAB="dist/sudostamp-$TAG.aab"
+mv "$SIGNED/app-release.apk" "$APK"; mv "$SIGNED/app-release.aab" "$AAB"
 
 step "verify"
-"$BT/apksigner" verify "$APK" || die "apksigner rejects $APK"
+# sign-apk.sh has checked both signatures against RELEASE_CERT; check it again here, where it is pinned.
 CERT=$("$BT/apksigner" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1 \
   | tr 'a-f' 'A-F' | sed 's/../&:/g; s/:$//')
 [ "$CERT" = "$RELEASE_CERT" ] || die "signed with $CERT, not the release key $RELEASE_CERT"
@@ -275,13 +282,8 @@ printf '%s\n' "$BADGING" | grep -q "versionCode='$CODE' versionName='$VERSION'" 
 ! printf '%s\n' "$BADGING" | grep -q "application-debuggable" || die "release APK is debuggable"
 
 step "artifacts"
-mkdir -p dist
-cp "$APK" "dist/sudostamp-$TAG.apk"
-# The bundle Google Play takes: signed by the same key (Play's upload key), kept out of the GitLab
-# release, which serves the APK.
-AAB_CERT=$("$JAVA_HOME/bin/keytool" -printcert -jarfile "$AAB" | sed -n 's/^[[:space:]]*SHA256: //p' | head -1)
-[ "$AAB_CERT" = "$RELEASE_CERT" ] || die "the app bundle is signed with $AAB_CERT, not the release key"
-cp "$AAB" "dist/sudostamp-$TAG.aab"
+# dist/sudostamp-$TAG.aab: the bundle Google Play takes, signed by the same key (Play's upload
+# key), kept out of the GitLab release, which serves the APK.
 cp app/build/outputs/mapping/release/mapping.txt "dist/mapping-$TAG.txt"
 scripts/bundle-host.sh "$VERSION" >/dev/null
 # CycloneDX SBOMs, listed in SHA256SUMS below so that the signature over it covers them. sbom.py

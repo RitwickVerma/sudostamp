@@ -78,7 +78,8 @@ again.
 | unit tests + independent signature check, lint, debug build | CI `android` (one Gradle run) |
 | host installer end to end on 7 distributions, including what must fail | CI `host-e2e` |
 | versions, store notes, dated changelog, store listing, signer line in app + README | CI `release-check` (tags and `release/*`) |
-| signed build, certificate == pinned release key, not debuggable, installer signature verifies | `release.sh package` |
+| signing with apksigner/jarsigner only (`scripts/sign-apk.sh`): certificate checked, signature moves onto the unsigned build and reproduces it, wrong certificate and re-signing refused (throwaway key) | CI `android` (`tools/test/sign_roundtrip.sh`) |
+| unsigned build first, then keys decrypted and `sign-apk.sh`; certificate == pinned release key, not debuggable, installer signature verifies | `release.sh package` |
 | both SBOMs written, listed in `SHA256SUMS`, valid, and naming the APK and installer beside them | `release.sh package` (`release-check.sh X.Y.Z --dist`) |
 | upload, Release, anonymous download verified | `release.sh publish` |
 | the published APK is exactly what the tag builds (rebuilt unsigned, signature copied on, bytes compared); `SHA256SUMS` signed and listing it; installer and SBOMs match | CI `reproducible`, played by `ship` after the GitLab publish and **before the AUR and Play** (`scripts/run-ci-job.sh`) |
