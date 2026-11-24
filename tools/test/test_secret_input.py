@@ -127,23 +127,24 @@ class Input(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         d = self.tmp.name
-        self.old_xdg = os.environ.get("XDG_CONFIG_HOME")
-        os.environ["XDG_CONFIG_HOME"] = os.path.join(d, "cfg")
+        self.old_home = os.environ.get("HOME")
+        os.environ["HOME"] = d
         self.host_pub = S.keygen()
         self.phone_key = ec.generate_private_key(ec.SECP256R1())
         self.keydir = os.path.join(d, "keys")
         os.mkdir(self.keydir)
         import pwd
         user = pwd.getpwuid(os.getuid()).pw_name
-        with open(os.path.join(self.keydir, user), "w") as f:
+        # Named as install.sh writes it: auth_key_file=<keys>/${user}.keys
+        with open(os.path.join(self.keydir, user + ".keys"), "w") as f:
             f.write("ecdsa-sha2-nistp256 %s phone\n" % base64.b64encode(blob_of(self.phone_key.public_key())).decode())
         self.pam = os.path.join(d, "sudo")
 
     def tearDown(self):
-        if self.old_xdg is None:
-            os.environ.pop("XDG_CONFIG_HOME", None)
+        if self.old_home is None:
+            os.environ.pop("HOME", None)
         else:
-            os.environ["XDG_CONFIG_HOME"] = self.old_xdg
+            os.environ["HOME"] = self.old_home
         self.tmp.cleanup()
 
     def run_cli(self, fault=None, value=b"hunter2", name="restic", why="weekly backup \u2713", tty=False):
@@ -212,7 +213,7 @@ class Input(unittest.TestCase):
 
     def test_no_pinned_key_or_no_block_is_not_paired(self):
         import pwd
-        os.remove(os.path.join(self.keydir, pwd.getpwuid(os.getuid()).pw_name))
+        os.remove(os.path.join(self.keydir, pwd.getpwuid(os.getuid()).pw_name + ".keys"))
         self.assertEqual(S.EX_UNAVAILABLE, self.run_cli()[0])
 
     def test_unreachable(self):
@@ -224,6 +225,15 @@ class Input(unittest.TestCase):
         finally:
             os.close(r)
             os.close(w)
+
+
+class Convention(unittest.TestCase):
+
+    def test_the_key_file_is_the_one_install_sh_pins(self):
+        with open(os.path.join(here, "..", "install.sh")) as f:
+            self.assertIn("auth_key_file=%s/${user}.keys", f.read())
+        with open(os.path.join(here, "..", "secret.py")) as f:
+            self.assertIn('os.path.join(keydir, user + ".keys")', f.read())
 
 
 class Parsers(unittest.TestCase):

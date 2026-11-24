@@ -153,8 +153,9 @@ def hpke_open(sk_r, enc, ct, inf, aad=b""):
 # running as this user can read it and ask the phone; the phone names the computer, not the program.
 
 def key_path():
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
-    return os.path.join(base, "sudostamp", "host-key.pem")
+    # ~/.config, not $XDG_CONFIG_HOME: setup makes the key under `sudo -u <user> -H`, which resets
+    # the environment, so a session's XDG_CONFIG_HOME would point `input` somewhere setup never wrote.
+    return os.path.join(os.path.expanduser("~"), ".config", "sudostamp", "host-key.pem")
 
 
 def load_host_key(path=None):
@@ -445,7 +446,8 @@ def run_input(name, why, to_tty=False, out=1, pam=None):
         return EX_UNAVAILABLE
     phone, keydir = settings
     try:
-        keys = pinned_keys(os.path.join(keydir, user))
+        # The file pam_rssh reads (auth_key_file=<dir>/${user}.keys) and the probe checks.
+        keys = pinned_keys(os.path.join(keydir, user + ".keys"))
     except OSError:
         keys = []
     if not keys:
