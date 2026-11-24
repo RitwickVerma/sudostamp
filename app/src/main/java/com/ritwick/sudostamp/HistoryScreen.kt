@@ -55,6 +55,8 @@ object HistoryScreen {
         Refusal.RATE_LIMITED -> R.string.refusal_rate_limited
         Refusal.AFTER_APPROVAL -> R.string.refusal_after_approval
         Refusal.COOLDOWN -> R.string.refusal_cooldown
+        Refusal.NO_HOST_KEY -> R.string.refusal_no_host_key
+        Refusal.BAD_REQUEST -> R.string.refusal_bad_request
     }
 
     /** Who the entry names: the computer, or "unknown device" for a peer that is not paired. */
@@ -114,7 +116,13 @@ object HistoryScreen {
         val name = name(ctx, e)
         val at = time.format(e.at)
         val verdict = ctx.getString(l.label)
-        val detail = ctx.getString(l.detail)
+        val detail = ctx.getString(if (e.secret != null && e.verdict == Verdict.APPROVED) R.string.verdict_secret_sent_detail else l.detail)
+        // A secret request says so first; what was asked for only when it was sent.
+        val title = when {
+            e.secret == null -> name
+            e.secret.isEmpty() -> ctx.getString(R.string.history_secret, name)
+            else -> ctx.getString(R.string.history_secret_named, e.secret, name)
+        }
         val refused = e.verdict == Verdict.REFUSED
         val repeats = if (e.count > 1) ctx.resources.getQuantityString(R.plurals.history_times, e.count, e.count, at) else null
 
@@ -128,7 +136,7 @@ object HistoryScreen {
                 addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
                 addView(ctx.text(at, Type.CAPTION, Ui.MUTED))
             }, matchWrap())
-            addView(ctx.text(name, Type.LABEL), matchWrap(top = ctx.dp(8)))
+            addView(ctx.text(title, Type.LABEL), matchWrap(top = ctx.dp(8)))
             addView(ctx.text(ctx.getString(R.string.history_peer, e.peer.ifEmpty { "?" }), Type.CODE_SMALL, Ui.MUTED), matchWrap(top = ctx.dp(2)))
             // What the computer said the request was for: its own words, so muted like the peer.
             if (e.command != null) addView(ctx.text(e.command, Type.CODE_SMALL, Ui.MUTED), matchWrap(top = ctx.dp(4)))
@@ -137,7 +145,7 @@ object HistoryScreen {
         }
         // One stop for a screen reader, in reading order, instead of six.
         box.contentDescription = listOfNotNull(
-            "$verdict, $name, ${e.peer}, $at", e.command?.let { ctx.getString(R.string.history_command_a11y, it) },
+            "$verdict, $title, ${e.peer}, $at", e.command?.let { ctx.getString(R.string.history_command_a11y, it) },
             repeats, detail
         ).joinToString(". ")
         box.isScreenReaderFocusable = true

@@ -62,6 +62,9 @@ object SecretProtocol {
         val sigH: ByteArray,
     )
 
+    /** True for a name a request may carry (and the history may keep). */
+    fun validName(n: String): Boolean = NAME.matches(n)
+
     /** The K a hello names, or null for anything but exactly one plausible key blob. Never throws. */
     fun parseHello(r: AgentProtocol.Reader): ByteArray? = try {
         val k = r.blob()
@@ -117,4 +120,21 @@ object SecretProtocol {
      */
     fun answerMessage(t: ByteArray, enc: ByteArray, ct: ByteArray): ByteArray =
         Pairing.framed(ANSWER_TAG, arrayOf(t, enc, ct))
+
+    /** The sealed value and what K must sign for it. Holds no plaintext. */
+    class Answer(val sealed: Hpke.Sealed, val toSign: ByteArray)
+
+    /**
+     * Seals [value] to the request's pkR, bound to [t]. Null for an empty value or one over
+     * [MAX_SECRET_BYTES]. Does not keep or zero [value]: the caller owns it and wipes it.
+     */
+    fun answer(t: ByteArray, pkR: ByteArray, value: ByteArray): Answer? {
+        if (value.isEmpty() || value.size > MAX_SECRET_BYTES) return null
+        val s = Hpke.seal(pkR, info(t), ByteArray(0), value)
+        return Answer(s, answerMessage(t, s.enc, s.ct))
+    }
+
+    /** The SUCCESS frame body the computer reads: enc, ct, then K's DER signature. */
+    fun answerFrame(a: Answer, sigDer: ByteArray): ByteArray =
+        AgentProtocol.success(a.sealed.enc, a.sealed.ct, sigDer)
 }

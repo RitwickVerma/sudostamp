@@ -147,4 +147,25 @@ class SecretProtocolTest {
         // And the shortest possible answer message is still longer than a challenge.
         assertTrue(SecretProtocol.answerMessage(ByteArray(0), ByteArray(0), ByteArray(0)).size > AgentProtocol.CHALLENGE_BYTES)
     }
+
+    @Test
+    fun `answer seals 1 to 1024 bytes and signs exactly what it sends`() {
+        val t = SecretProtocol.transcript(k, np, parsed())
+        assertNull(SecretProtocol.answer(t, pkR, ByteArray(0)))
+        assertNull(SecretProtocol.answer(t, pkR, ByteArray(SecretProtocol.MAX_SECRET_BYTES + 1)))
+        assertNotNull(SecretProtocol.answer(t, pkR, ByteArray(SecretProtocol.MAX_SECRET_BYTES)))
+        val a = SecretProtocol.answer(t, pkR, "hunter2".toByteArray())!!
+        assertArrayEquals(SecretProtocol.answerMessage(t, a.sealed.enc, a.sealed.ct), a.toSign)
+        // GCM: ciphertext = plaintext + 16-byte tag; nothing else rides along.
+        assertEquals(7 + 16, a.sealed.ct.size)
+
+        val sig = byteArrayOf(0x30, 1, 2)
+        val r = AgentProtocol.Reader(SecretProtocol.answerFrame(a, sig))
+        assertEquals(AgentProtocol.SSH2_AGENT_SUCCESS, r.type())
+        r.skipType()
+        assertArrayEquals(a.sealed.enc, r.blob())
+        assertArrayEquals(a.sealed.ct, r.blob())
+        assertArrayEquals(sig, r.blob())
+        assertTrue(r.atEnd())
+    }
 }

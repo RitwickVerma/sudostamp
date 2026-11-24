@@ -204,7 +204,7 @@ class HistoryTest {
         assertEquals(Refusal.entries.size, Refusal.entries.map { it.code }.toSet().size)
         // Renumbering these would reinterpret every phone's existing history.
         assertEquals(listOf("a", "d", "n", "t", "c", "r"), Verdict.entries.map { it.code })
-        assertEquals(listOf("k", "c", "l", "g", "q", "w"), Refusal.entries.map { it.code })
+        assertEquals(listOf("k", "c", "l", "g", "q", "w", "h", "b"), Refusal.entries.map { it.code })
     }
 
     @Test
@@ -263,8 +263,58 @@ class HistoryTest {
     }
 
     @Test
-    fun `a line with nine fields is skipped`() {
-        val line = listOf("1700000000000", "a", "-", "1", b64(host), b64("e"), b64("p"), b64("x"), b64("y")).joinToString("\t")
+    fun `a line with ten fields is skipped`() {
+        val line = listOf("1700000000000", "a", "-", "1", b64(host), b64("e"), b64("p"), b64("x"), b64("y"), b64("z")).joinToString("\t")
         assertTrue(History.decode("sudostamp-history 1\n$line\n").isEmpty())
+    }
+
+    private fun secret(v: Verdict, name: String, why: String? = null, r: Refusal? = null) =
+        HistoryEntry(t++, v, r, host, "build-box", "192.0.2.7", command = why, secret = name)
+
+    @Test
+    fun `an approved secret keeps its name and reason, through the file`() {
+        val f = File(tmp.root, "h.txt")
+        val h = History(f)
+        h.record(secret(Verdict.APPROVED, "restic", "weekly backup"))
+        h.record(secret(Verdict.APPROVED, "disk"))
+        h.record(entry())
+        val back = History(f).entries()
+        assertEquals(h.entries(), back)
+        assertNull("sudo rows stay sudo rows", back[0].secret)
+        assertEquals("disk", back[1].secret)
+        assertNull(back[1].command)
+        assertEquals("restic", back[2].secret)
+        assertEquals("weekly backup", back[2].command)
+    }
+
+    @Test
+    fun `a secret that was not sent leaves no text`() {
+        val h = History(File(tmp.root, "h.txt"))
+        h.record(secret(Verdict.DENIED, "restic", "weekly backup"))
+        h.record(secret(Verdict.TIMED_OUT, "restic", "weekly backup"))
+        h.record(secret(Verdict.REFUSED, "restic", "weekly backup", Refusal.BAD_REQUEST))
+        h.record(secret(Verdict.APPROVED, "not a name", "x"))
+        for (e in h.entries()) {
+            assertEquals("", e.secret)
+            assertNull(e.command)
+        }
+    }
+
+    @Test
+    fun `a stored secret row that names more than an approval may is skipped`() {
+        fun line(v: String, r: String, why: String, name: String) =
+            listOf("1700000000000", v, r, "1", b64(host), b64("e"), b64("p"), b64(why), b64(name)).joinToString("\t")
+        assertEquals(1, History.decode("sudostamp-history 1\n${line("a", "-", "why", "restic")}\n").size)
+        assertEquals(1, History.decode("sudostamp-history 1\n${line("r", "b", "", "")}\n").size)
+        for (bad in listOf(line("r", "b", "", "restic"), line("d", "-", "why", ""), line("a", "-", "", "a b")))
+            assertTrue(bad, History.decode("sudostamp-history 1\n$bad\n").isEmpty())
+    }
+
+    @Test
+    fun `refused secrets and refused sudo requests are not merged`() {
+        val h = History()
+        h.record(refused(Refusal.COOLDOWN))
+        h.record(HistoryEntry(t++, Verdict.REFUSED, Refusal.COOLDOWN, host, "edith", "192.0.2.7", secret = ""))
+        assertEquals(2, h.entries().size)
     }
 }

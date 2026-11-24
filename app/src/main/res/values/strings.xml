@@ -211,4 +211,25 @@
     <string name="channel_listener_desc">The always-on notice that keeps the listener running. Quiet by design.</string>
     <string name="channel_approval">Approval requests</string>
     <string name="channel_approval_desc">A sudo is waiting for your fingerprint. Add SudoStamp to the apps Do Not Disturb lets through, or requests arrive silently.</string>
+
+    <!-- Secret requests (sudostamp input) -->
+    <string name="secret_overline">secret request</string>
+    <string name="secret_title">%1$s asks for a secret</string>
+    <string name="secret_advisory">Named and described by %1$s. Any program on that computer could ask with other words.</string>
+    <string name="secret_field_hint_for">Secret for %1$s</string>
+    <string name="secret_show">Show</string>
+    <string name="secret_hide">Hide</string>
+    <string name="secret_send">Send with fingerprint</string>
+    <string name="secret_footnote">Sent once, to %1$s only. SudoStamp keeps no copy.</string>
+    <string name="secret_too_long">Too long: a secret is at most 1024 bytes.</string>
+    <string name="notif_secret_title">%1$s asks for a secret</string>
+    <string name="notif_secret_text">Tap to review</string>
+    <string name="prompt_secret_title">Send the secret to %1$s</string>
+    <string name="result_sent">Sent</string>
+    <string name="result_sent_detail">The secret went to %1$s. Nothing was kept here.</string>
+    <string name="history_secret">Secret · %1$s</string>
+    <string name="history_secret_named">Secret · %1$s · %2$s</string>
+    <string name="verdict_secret_sent_detail">Sent once, encrypted to this computer. SudoStamp kept no copy.</string>
+    <string name="refusal_no_host_key">It asked for a secret, but it was paired before version 2.0, so this phone cannot tell it is that computer. Pair it again to use secrets. You were not asked.</string>
+    <string name="refusal_bad_request">A secret request that failed its checks: not signed by this computer, malformed, or a replay. You were not asked.</string>
 </resources>

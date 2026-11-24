@@ -306,7 +306,9 @@ class MainActivity : Activity() {
         // the lock screen, so withdraw that unless this launch is a notification tap for a
         // request that is still waiting. (show() decides again for every screen it draws.)
         val pending = AgentService.currentRequest()?.takeIf { !it.isResolved && it.id == notifiedRequest }
-        setOverKeyguard(LockScreen.overKeyguard(true, pending?.id ?: -1L, notifiedRequest, pending != null))
+        // Never for a secret request: a secret is not typed on a locked phone (show() agrees).
+        val overLock = pending?.takeIf { it.secret == null }
+        setOverKeyguard(LockScreen.overKeyguard(true, overLock?.id ?: -1L, notifiedRequest, overLock != null))
         AgentService.ensureChannels(this)
         // Start the listener as soon as the app opens. A phone-side agent that is not
         // listening is indistinguishable from a broken setup, so never make this a tap.
@@ -390,6 +392,8 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         resumed = false
+        // A secret half typed does not wait in a window the person left.
+        clearSecretField()
         super.onPause()
     }
 
@@ -518,7 +522,8 @@ class MainActivity : Activity() {
                 ui.removeCallbacksAndMessages(null)
                 tappedRequest = -1L
                 renderApproval(p)
-                prompt(p)
+                // A secret is typed first: its prompt opens from Send.
+                if (p.secret == null) prompt(p)
             }
             p != null && promptFor == null && !(screen == Screen.APPROVAL && shownRequest == p.id) -> {
                 // Any other request is shown, and waits for a tap on Approve.
@@ -607,7 +612,14 @@ class MainActivity : Activity() {
      * drawn; a locked phone that is not allowed over the keyguard gets a blank screen even if
      * the flag were somehow still set.
      */
-    private fun show(view: View, request: Approval? = null) {
+    private fun show(view: View, request: Approval? = null, secure: Boolean = false) {
+        // FLAG_SECURE on the secret screen only: no screenshot, no recording, no recents thumbnail.
+        // Any other screen drops the field (its contents wiped) before it is drawn.
+        if (secure) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        else {
+            dropSecretField()
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        }
         val over = LockScreen.overKeyguard(
             request != null, request?.id ?: -1L, notifiedRequest, request?.isResolved == false
         )
@@ -1109,6 +1121,7 @@ class MainActivity : Activity() {
      *  WHEN behind the system's biometric sheet, which is raised immediately so a
      *  notification tap goes straight to the fingerprint. Deny is always one tap away. */
     private fun renderApproval(p: Approval) {
+        if (p.secret != null) return renderSecret(p, p.secret)
         screen = Screen.APPROVAL
         shownRequest = p.id
         interceptBack(false)
@@ -1246,9 +1259,171 @@ class MainActivity : Activity() {
         textDirection = View.TEXT_DIRECTION_LTR
     }
 
+    // ------------------------------------------------------------------ secret
+
+    /** The secret screen's field while it is up; wiped on pause, on send and when it goes. */
+    private var secretField: android.widget.EditText? = null
+
+    /** Overwrites then empties the field. The Editable's own buffer is what holds the text. */
+    private fun clearSecretField() {
+        val e = secretField?.text ?: return
+        if (e.isNotEmpty()) e.replace(0, e.length, "\u0000".repeat(e.length))
+        e.clear()
+    }
+
+    private fun dropSecretField() {
+        clearSecretField()
+        secretField = null
+    }
+
+    /**
+     * A computer asks for a secret (docs/design/secrets.md §8). The person types or fills it,
+     * then Send seals it to that request and asks for the fingerprint, which K's signature over
+     * the sealed answer needs. Never over the lock screen; FLAG_SECURE; no copy out of the field.
+     */
+    private fun renderSecret(p: Approval, ask: Approval.SecretAsk) {
+        screen = Screen.APPROVAL
+        shownRequest = p.id
+        interceptBack(false)
+        tick.removeCallbacksAndMessages(null)
+        dropSecretField()
+        val name = Ui.hostName(this, p.hostId, p.label)
+        val left = text("", Type.CODE_SMALL, Ui.MUTED, center = true)
+        lateinit var send: android.widget.Button
+
+        val field = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
+                android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+            // The phone's password manager may fill it: that keeps the keyboard out of it.
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_YES
+            setAutofillHints(View.AUTOFILL_HINT_PASSWORD)
+            hint = getString(R.string.secret_field_hint_for, ask.name)
+            setHintTextColor(Ui.FAINT)
+            setTextColor(Ui.FG)
+            textSize = 17f
+            typeface = android.graphics.Typeface.MONOSPACE
+            minHeight = dp(56)
+            setPadding(dp(16), 0, dp(16), 0)
+            background = Ui.rounded(Ui.SURFACE_HI, dpf(16f), dp(1), Ui.OUTLINE)
+            filters = arrayOf(android.text.InputFilter.LengthFilter(SecretProtocol.MAX_SECRET_BYTES))
+            // Paste in, never copy or share out (even with Show on).
+            customSelectionActionModeCallback = object : android.view.ActionMode.Callback {
+                override fun onCreateActionMode(m: android.view.ActionMode, menu: android.view.Menu) = true
+                override fun onPrepareActionMode(m: android.view.ActionMode, menu: android.view.Menu): Boolean {
+                    menu.removeItem(android.R.id.copy)
+                    menu.removeItem(android.R.id.cut)
+                    menu.removeItem(android.R.id.shareText)
+                    return true
+                }
+                override fun onActionItemClicked(m: android.view.ActionMode, item: android.view.MenuItem) = false
+                override fun onDestroyActionMode(m: android.view.ActionMode) = Unit
+            }
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    val ready = !s.isNullOrEmpty()
+                    send.isEnabled = ready
+                    send.alpha = if (ready) 1f else 0.38f
+                }
+            })
+        }
+        secretField = field
+        val reveal = button(getString(R.string.secret_show), Kind.GHOST) {}.apply {
+            minWidth = dp(72)
+            setOnClickListener {
+                val shown = field.transformationMethod == null
+                field.transformationMethod = if (shown) android.text.method.PasswordTransformationMethod.getInstance() else null
+                field.setSelection(field.text.length)
+                text = getString(if (shown) R.string.secret_show else R.string.secret_hide)
+            }
+        }
+        send = button(getString(R.string.secret_send), Kind.PRIMARY, R.drawable.ic_lock) {
+            if (promptFor == null && !p.isResolved && resumed) sendSecret(p, ask, field)
+        }.apply { isEnabled = false; alpha = 0.38f }
+
+        show(frame(centered = true) {
+            addView(text(getString(R.string.secret_overline), Type.OVERLINE, Ui.ACCENT, center = true), matchWrap())
+            addView(text(getString(R.string.secret_title, name), Type.DISPLAY, center = true).apply {
+                accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            }, matchWrap(top = dp(12)))
+            addView(left, matchWrap(top = dp(6)))
+
+            // What is asked for and why: the computer's words, read before the field.
+            addView(card().apply {
+                addView(text(ask.name, Type.TITLE).apply { clamp(1) })
+                p.context?.let { addView(text("\u201C$it\u201D", Type.BODY).apply { clamp(4) }, matchWrap(top = dp(6))) }
+                addView(text(getString(R.string.secret_advisory, name), Type.CAPTION, Ui.MUTED), matchWrap(top = dp(10)))
+                if (!p.trusted) addView(row().apply {
+                    gravity = Gravity.TOP
+                    background = Ui.rounded(Ui.WARN_DIM, dpf(12f))
+                    setPadding(dp(12), dp(10), dp(12), dp(10))
+                    addView(icon(R.drawable.ic_warning, Ui.WARN, 18))
+                    addView(text(getString(R.string.approval_new_host), Type.CAPTION, Ui.WARN).apply {
+                        setPadding(dp(10), 0, 0, 0)
+                    }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                }, matchWrap(top = dp(14)))
+            }, matchWrap(top = dp(20)))
+
+            addView(row().apply {
+                gravity = Gravity.CENTER_VERTICAL
+                addView(field, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(reveal, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    leftMargin = dp(8)
+                })
+            }, matchWrap(top = dp(20)))
+
+            addView(send, matchWrap(top = dp(20)))
+            addView(button(getString(R.string.deny), Kind.DANGER) { deny(p) }, matchWrap(top = dp(12)))
+            addView(text(getString(R.string.secret_footnote, name), Type.CAPTION, Ui.MUTED, center = true), matchWrap(top = dp(16)))
+            entrance()
+        }, secure = true)
+
+        val update = object : Runnable {
+            override fun run() {
+                if (screen != Screen.APPROVAL || p.isResolved) return
+                val ms = p.arrivedAt + AgentService.APPROVAL_TIMEOUT_MS - System.currentTimeMillis()
+                left.text = getString(R.string.approval_left, (ms / 1000).coerceAtLeast(0))
+                left.setTextColor(if (ms < AgentService.APPROVAL_TIMEOUT_MS / 4) Ui.WARN else Ui.MUTED)
+                tick.postDelayed(this, ms.mod(1000L) + 10)
+            }
+        }
+        update.run()
+    }
+
+    /**
+     * Seals the field's value to the request and wipes it (the field, the chars, the bytes)
+     * before the fingerprint is asked for: from here only the ciphertext exists. Never a String.
+     */
+    private fun sendSecret(p: Approval, ask: Approval.SecretAsk, field: android.widget.EditText) {
+        val e = field.text
+        val chars = CharArray(e.length).also { e.getChars(0, e.length, it, 0) }
+        val bytes = try {
+            val bb = Charsets.UTF_8.newEncoder().encode(java.nio.CharBuffer.wrap(chars))
+            ByteArray(bb.remaining()).also { bb.get(it); if (bb.hasArray()) bb.array().fill(0) }
+        } catch (x: java.nio.charset.CharacterCodingException) {
+            null
+        } finally {
+            chars.fill('\u0000')
+        }
+        if (bytes == null || bytes.size > SecretProtocol.MAX_SECRET_BYTES) {
+            bytes?.fill(0)
+            toast(getString(R.string.secret_too_long))
+            return
+        }
+        val a = try {
+            SecretProtocol.answer(ask.transcript, ask.pkR, bytes)
+        } finally {
+            bytes.fill(0)
+            clearSecretField()
+        }
+        if (a != null) prompt(p, a)
+    }
+
     // ------------------------------------------------------------------ result
 
-    private enum class Outcome { APPROVED, DENIED, EXPIRED }
+    private enum class Outcome { APPROVED, SENT, DENIED, EXPIRED }
 
     /**
      * A brief full-screen result. APPROVED then closes the app; a refusal goes back to setup.
@@ -1269,13 +1444,15 @@ class MainActivity : Activity() {
         val (color, title, detail) = when (outcome) {
             Outcome.APPROVED -> Triple(Ui.ACCENT, getString(R.string.result_approved),
                 getString(R.string.result_approved_detail, name))
+            Outcome.SENT -> Triple(Ui.ACCENT, getString(R.string.result_sent),
+                getString(R.string.result_sent_detail, name))
             Outcome.DENIED -> Triple(Ui.DANGER, getString(R.string.result_denied),
                 getString(R.string.result_denied_detail))
             Outcome.EXPIRED -> Triple(Ui.WARN, getString(R.string.result_expired),
                 getString(R.string.result_expired_detail))
         }
         show(frame(centered = true) {
-            addView(ResultMark(context, color, outcome == Outcome.APPROVED, title).apply {
+            addView(ResultMark(context, color, outcome == Outcome.APPROVED || outcome == Outcome.SENT, title).apply {
                 layoutParams = LinearLayout.LayoutParams(dp(132), dp(132)).apply {
                     gravity = Gravity.CENTER_HORIZONTAL
                 }
@@ -1287,7 +1464,7 @@ class MainActivity : Activity() {
             addView(text(detail, Type.BODY, Ui.MUTED, center = true), matchWrap(top = dp(8)))
         })
         window.decorView.performHapticFeedback(
-            if (outcome == Outcome.APPROVED) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.REJECT
+            if (outcome == Outcome.APPROVED || outcome == Outcome.SENT) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.REJECT
         )
         // Said aloud, because a result that only flashes by is gone before a screen reader
         // has focused anything. (Deprecated in API 36, but still the call that works on every
@@ -1295,7 +1472,7 @@ class MainActivity : Activity() {
         @Suppress("DEPRECATION")
         window.decorView.announceForAccessibility("$title. $detail")
         // On a locked phone nothing of ours may stay up (show() drew a blank): leave.
-        if (outcome == Outcome.APPROVED || deviceLocked()) {
+        if (outcome == Outcome.APPROVED || outcome == Outcome.SENT || deviceLocked()) {
             ui.postDelayed({
                 // Nothing pending => this approval is genuinely over, so close. (The check is
                 // belt-and-braces: a new request also cancels this callback outright.)
@@ -1415,7 +1592,9 @@ class MainActivity : Activity() {
         return c
     }
 
-    private fun prompt(p: Approval) {
+    /** [answer]: the sealed value for a secret request (what K signs); null for sudo. */
+    private fun prompt(p: Approval, answer: SecretProtocol.Answer? = null) {
+        if ((answer != null) != (p.secret != null)) return
         val cancel = CancellationSignal()
         promptFor = p
         promptCancel = cancel
@@ -1423,16 +1602,17 @@ class MainActivity : Activity() {
         fun current() = promptCancel === cancel
 
         try {
+            val host = Ui.hostName(this, p.hostId, p.label)
             BiometricPrompt.Builder(this)
                 // The computer's name in the title, where it cannot be missed: the system sheet
                 // covers the app's own screen.
-                .setTitle(getString(R.string.prompt_title, Ui.hostName(this, p.hostId, p.label)))
-                .setSubtitle(getString(R.string.prompt_subtitle, p.client))
-                .setDescription(getString(R.string.prompt_description))
+                .setTitle(if (p.secret != null) getString(R.string.prompt_secret_title, host) else getString(R.string.prompt_title, host))
+                .setSubtitle(p.secret?.name ?: getString(R.string.prompt_subtitle, p.client))
+                .apply { if (p.secret == null) setDescription(getString(R.string.prompt_description)) }
                 // Stated, not left to the default: with a passive biometric (Class 3 face
                 // unlock) a mere glance at the screen must never approve a sudo.
                 .setConfirmationRequired(true)
-                .setNegativeButton(getString(R.string.deny), mainExecutor) { _, _ ->
+                .setNegativeButton(getString(if (p.secret != null) R.string.cancel else R.string.deny), mainExecutor) { _, _ ->
                     val first = p.deny()               // => SSH_AGENT_FAILURE
                     if (current()) {
                         closePrompt()
@@ -1451,8 +1631,8 @@ class MainActivity : Activity() {
                             val delivered = try {
                                 // The TEE authorised THIS Signature object. Calling sign()
                                 // before this point throws -- that is the hard gate.
-                                p.signer.update(p.data)
-                                p.approve(p.signer.sign())
+                                p.signer.update(answer?.toSign ?: p.data)
+                                p.approve(p.signer.sign(), answer)
                             } catch (e: Exception) {
                                 Log.w(TAG, "signing failed: ${e.message}")
                                 p.deny()
@@ -1462,7 +1642,7 @@ class MainActivity : Activity() {
                             closePrompt()
                             // Signed too late, the agent had already answered FAILURE:
                             // claiming success here would be a lie about sudo.
-                            renderResult(if (delivered) Outcome.APPROVED else Outcome.EXPIRED,
+                            renderResult(if (!delivered) Outcome.EXPIRED else if (answer != null) Outcome.SENT else Outcome.APPROVED,
                                 Ui.hostName(this@MainActivity, p.hostId, p.label))
                         }
 

@@ -34,17 +34,30 @@ class Approval(
     val context: String? = null,
     /** The computer sent two different descriptions for this request: shown as a warning. */
     val contextConflicted: Boolean = false,
+    /** Set for a secret request (`sudostamp input`): what is asked for and what the answer is
+     *  bound to. Null for sudo. [context] then holds the request's reason. */
+    val secret: SecretAsk? = null,
 ) {
+    /** A verified secret request: [name] and the transcript T it was signed over. */
+    class SecretAsk(val name: String, val transcript: ByteArray, val pkR: ByteArray)
+
     /** How a request ended, for the history. Resolving is still once: only the first counts. */
     enum class How { APPROVED, DENIED_IN_APP, DENIED_FROM_NOTIFICATION, TIMED_OUT, CANCELLED }
 
-    private class Result(val signature: ByteArray?, val how: How)
+    private class Result(val signature: ByteArray?, val how: How, val answer: SecretProtocol.Answer? = null)
 
     private val outcome = CompletableFuture<Result>()
 
     /** Delivers [signatureDer]. False if the request was already resolved: the signature
      *  then goes nowhere, and the caller must not claim success. */
-    fun approve(signatureDer: ByteArray): Boolean = outcome.complete(Result(signatureDer, How.APPROVED))
+    fun approve(signatureDer: ByteArray, answer: SecretProtocol.Answer? = null): Boolean {
+        // A secret request is answered with its sealed value or not at all; sudo never carries one.
+        require((answer != null) == (secret != null))
+        return outcome.complete(Result(signatureDer, How.APPROVED, answer))
+    }
+
+    /** The sealed answer [approve] delivered for a secret request, else null. */
+    val answer: SecretProtocol.Answer? get() = outcome.getNow(null)?.answer
 
     /** Denies. False if the request was already resolved. [how] says who, for the history. */
     fun deny(how: How = How.DENIED_IN_APP): Boolean {
