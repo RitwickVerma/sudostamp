@@ -2,6 +2,49 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
+## Unreleased (2.0)
+
+Programs on a paired computer can ask your phone for a secret, which you type or fill and approve
+with your fingerprint. Pair again to use it. Pairing by code now ends with one confirming tap on
+the phone.
+
+### Secrets
+- **`sudostamp input <name> --why <text>`** asks the phone and writes the secret to the program that
+  needs it, never to the screen, a file or a log: `RESTIC_PASSWORD_COMMAND='sudostamp input restic
+  --why "weekly backup"'`. The phone shows the computer, the name and the reason; you type it or let
+  your password manager fill it, then touch the sensor. The phone keeps nothing.
+- Only a computer paired with 2.0 can ask, and only that computer can read the answer
+  ([SECURITY.md](SECURITY.md), *Secrets typed on the phone*). Computers paired before keep working
+  for sudo; pair one again to use secrets.
+- The history shows secret requests: what was sent and to which computer, and requests that were
+  turned away without their text. A denied or timed-out one says that nothing was sent.
+- A newly paired computer can ask for secrets only after you have approved one of its sudo
+  requests. The secret screen shows the address the request came from and when that computer was
+  paired, so two machines with the same name can be told apart.
+- Pairing a computer again with the same host key replaces its old entry on the phone.
+- Pairing by code ends with one question on the phone: *did the computer say the codes match?*
+  The computer is recorded only after your Yes, so a pairing altered on the network can no longer
+  leave an entry behind; setup waits for that tap. Tapping No there shows *Not paired*, and the
+  computer stops waiting at once.
+- `sudostamp input` refuses a named pipe (`mkfifo`) as stdout: others could open it.
+- The reachability check no longer skips the phone when the key file has a comment line.
+
+### Desktop
+- A sudo notification is shown only for a real sudo (running as root on your behalf): a program
+  that just calls itself `sudo` can no longer put a harmless-looking command on screen, and a flood
+  of forged events can no longer push the real one out. Under `hidepid` no sudo events are shown.
+- The app runs only the installed `sudostamp` and a root-owned `pair.py` with `/usr/bin/python3`;
+  the `SUDOSTAMP_*` overrides need a build with `--features test-hooks`.
+- The AUR package `sudostamp-desktop` needs `sudostamp>=1.7.0`. The AUR package `sudostamp` no
+  longer pulls in the AUR's `pam_rssh`: setup builds its own pinned, patched module.
+- `sudostamp input` writes only to a pipe. It refuses a terminal (unless `--to-tty`), a file, a
+  closed stdout, or stderr in the same pipe (`2>&1`), before it asks the phone.
+- A flood of refused requests can no longer push your own approvals out of the history.
+
+### Computer
+- Setup makes a key for this computer (`~/.config/sudostamp/host-key.pem`) and pairs with it. Secrets
+  need `python3-cryptography`; without it, setup pairs for sudo only and says so.
+
 ## 1.7.0 — 2026-11-17
 
 Pair by scanning a code: nothing to type.

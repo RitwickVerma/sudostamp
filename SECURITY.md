@@ -35,8 +35,9 @@ design, so nobody is locked out by a dead phone.
 | The phone app | showing *which computer* is asking, relaying the challenge, encoding the signature | this repo |
 | The LAN | nothing | — |
 
-The app never verifies anything and holds no secret it could leak: the private keys never leave
-the secure hardware.
+For sudo the app verifies nothing and holds no secret it could leak: the private keys never leave
+the secure hardware. Secret requests (2.0, below) are the exception: the app checks the computer's
+signature, and a secret the person types is in its memory for the seconds before it is encrypted.
 
 ## Key attestation (1.5)
 
@@ -67,6 +68,63 @@ show that computer's name. Consequences:
 Phones updated from 1.3 keep their single old key as one entry, "Computers paired before 1.4",
 flagged on every request; pair those computers again and remove it.
 
+## Secrets typed on the phone (`sudostamp input`, 2.0)
+
+A program on a paired computer can ask for a secret (`sudostamp input restic --why "weekly
+backup"`); the person types or autofills it on the phone and approves with a fingerprint. The phone
+stores nothing. Design and wire format: [docs/design/secrets.md](docs/design/secrets.md).
+
+Since a released secret is useful to whoever receives it, the phone must know which computer asks.
+Pairing v3 gives each computer a host key H (P-256, `~/.config/sudostamp/host-key.pem`, 0600, made
+as the user), covered by the pairing code or the QR secret. A request is signed by H over a nonce
+the phone chose for this connection; the answer is HPKE-sealed (RFC 9180, DHKEM P-256, HKDF-SHA256,
+AES-128-GCM, composed from platform primitives and checked against the RFC vectors and pyca) to a
+key the computer made for this one request, and signed by that computer's Keystore key, which needs
+the fingerprint.
+
+| Threat | Outcome |
+|---|---|
+| A LAN device asks for a secret in a paired computer's name | **Refused without a prompt**: the request must be signed by that computer's host key over this connection's nonce. |
+| A captured request is replayed | **Refused without a prompt**: its nonce belonged to another connection, and each nonce is spent by the first request. |
+| A man in the middle swaps the computer's encryption key | **Refused**: the key is inside the signed request. |
+| A LAN device answers in the phone's place with a value it chose | **Detected**: the computer requires the phone key's signature over the request and the ciphertext, and writes nothing otherwise (exit 65). |
+| An eavesdropper on the LAN | Sees the name and the reason (chosen by the asker, made to be shown) and a ciphertext under a key that lives for one request. |
+| Malware on the phone without root | Cannot produce an answer: the signature needs the fingerprint, enforced by the TEE. It cannot draw over the screen (as for sudo) or capture it (`FLAG_SECURE`). |
+| A man in the middle at pairing substitutes the host key | **Fails**, one time in a million: the host key is inside what the 6-digit code (or the QR secret) covers. |
+| A computer paired before 2.0 | Cannot ask; nothing shown; pair it again. Sudo keeps working. |
+| Someone wins the race for the 6-digit pairing code and pairs their own machine | **Cannot ask for secrets**: a computer asks only after the person has approved one of its sudo requests, and that first request carries the new-computer warning. |
+| Two machines hold the same host key (a synced `~/.config`, a cloned VM or image) | **One of them**: one host key is one computer, so the second pairing replaces the first. |
+| Two computers with the same name | Told apart on the secret screen by the address the request came from and the pairing date. |
+| Another app on the phone opens SudoStamp at a pending request | **No**: requests are named by random 63-bit ids, not a counter. |
+| Another app takes the typed value out of the field | **No**: only paste and select-all work in it, shown or not (no copy, cut, share, drag, or "process text"); it is marked sensitive for accessibility (Android 14+), and the keyboard's full-screen mode is off. |
+| A flood of refused requests from the LAN | Cannot push an approval or denial out of the history: refusals are dropped first. |
+| Spam for a tired tap | The sudo limiter, shared: per-computer cooldown, global cap. |
+| Someone holding the locked phone | The secret screen is never shown over the lock screen, and the notification says only which computer asks. |
+
+**What it does NOT protect:**
+
+- **The requesting computer gets the secret.** That is the feature. Anything running as that user
+  can read the host key and ask; the phone names the computer, not the program. Root on that
+  computer, or any process that can read the CLI's memory or its consumer's, gets every value
+  released there.
+- **The reason is the asker's word.** Signed by the computer's host key, so it is that computer's
+  word, but any program of that user can write any reason.
+- **The phone sees the value in clear** for the seconds between the field and the encryption, in
+  app memory. Root malware on the phone, an accessibility service, or a third-party keyboard (it
+  receives every typed character) can take it. Autofill from the phone's password manager avoids
+  the keyboard; it does not avoid root.
+- **SudoStamp cannot know the value is right**, or that the person meant this computer: read the
+  name.
+- **A stolen host key lets the thief ask**, named as that computer, until that computer is unpaired.
+  Pairing again with the same key does not help (it is the same computer to the phone). To recover:
+  Unpair it on the phone, delete `~/.config/sudostamp/host-key.pem` there, and run setup again. A
+  stolen key does not open past answers: each was encrypted to a key that lived for one request.
+- **Never sync, copy or bake the host key into an image.** A second machine with the same key is
+  the same computer to the phone.
+- **The phone's own copies.** The value is encoded into one buffer and wiped, and the field is wiped
+  when the screen goes away, but the text field and the keyboard keep internal copies the app cannot
+  reach until the memory is reused.
+
 ## Threat model
 
 | Threat | Outcome |
@@ -81,9 +139,9 @@ flagged on every request; pair those computers again and remove it.
 | A request queued behind a real one, to read as "sudo asked twice" | Refused **without asking** for 3 s after any approval. And the fingerprint prompt opens by itself only for the request whose notification you tapped; any other request waits for a tap on *Approve*. |
 | Eavesdropper on the LAN | Sees public keys, a random challenge and its signature. None of it is reusable. There is deliberately no TLS: the signature is the security, not the channel. From 1.6 it also sees the description of an agent's run (`sudostamp ask`: the script's hash, the agent's name and its reason), which is made to be shown. An ordinary sudo's command line is never sent (it can hold a password): the probe describes only the installed runner. |
 | Man in the middle between computer and phone | Can drop or delay. Cannot forge, and (above) cannot make a relayed request carry another computer's name. A connection that is accepted and never answered is cut off by the host's reachability check within seconds, and the password prompt follows (see residual risks for the limit). |
-| Impostor or man in the middle while you run setup | **Pairing**: the phone makes a key for this computer and commits to it, its nonce, the address it was dialled on and the address to keep, before seeing the computer's nonce; both then show a 6-digit code that you type into the computer. One-in-a-million per attempt, one attempt per *Pair a computer* tap. Tested in CI with a key-substituting man in the middle. |
+| Impostor or man in the middle while you run setup | **Pairing**: the phone makes a key for this computer and commits to it, its nonce, the address it was dialled on and the address to keep, before seeing the computer's nonce; both then show a 6-digit code that you type into the computer. One-in-a-million per attempt, one attempt per *Pair a computer* tap. Tested in CI with a key-substituting man in the middle. **The phone's side** (2.0): the computer's "codes match" crosses the network too, so a party in the middle could send it for a pairing it altered (its own host key) while your computer says nothing was pinned. The phone therefore asks you whether the computer said the codes match, and records the computer only on your *Yes*; *No*, leaving the screen or two minutes without an answer throw its key away. The computer waits until the phone lists its key before pinning anything. |
 | Something answers discovery first and relays pairing unchanged | **Refused** (new in 1.4.0): the phone states the address it was dialled on, and it is not the relay's. Version 1.3 pinned the real key but the relay's address. Tested in CI. |
-| An attacker races the person's computer and finishes pairing first | Any second pairing attempt while the pairing screen is open cancels the pairing — **even one that already finished** — and deletes its key; the person's own computer arriving is such an attempt. A pairing that did slip through is still *new* until a request is approved, and flagged on screen until then. |
+| An attacker races the person's computer and finishes pairing first | Any second pairing attempt while the pairing screen is open cancels the pairing — **even one that already finished** — and deletes its key; the person's own computer arriving is such an attempt. A code pairing is also recorded only after the person's *Yes* (above). A pairing that did slip through is still *new* until a request is approved, and flagged on screen until then. |
 | Someone sees the computer's pairing QR code (shoulder, screen share) and is on the LAN with SudoStamp | **Can win** that one pairing if their phone answers first: whoever holds the code's secret is, to the protocol, the person. Limited by a two-minute code that is never reused, refusal when two phones answer, the window naming the phone it found, and the person's own phone not saying Paired (pairing again replaces the key). The typed code is not open to this. |
 | Someone sends a pairing link (chat, web page) to get a phone to pair | **Needs the person.** The link opens a "Pair with …?" screen; nothing happens without the tap, and the computer must still be on the LAN and hold the secret. |
 | Someone spams approval requests, hoping for a tired tap | Only paired computers can ask at all. After a denial or timeout that computer is refused without asking (5 s if trusted, 60 s if new); after 4 unapproved requests within 10 minutes, all requests are refused without asking until the window clears. Never keyed by IP address, so changing addresses does not help. |
@@ -97,7 +155,7 @@ flagged on every request; pair those computers again and remove it.
 | Unprivileged user edits the pinned key | Root-owned directory and file; the installer creates both. |
 | The event socket (1.6): the user replaces `/run/user/<uid>/sudostamp/events.sock` with a symlink to a root daemon's socket (journald's native one), hoping the probe's datagram, which carries a command line the user chose, is delivered as root and forges that daemon's input | **Nothing reaches it.** The probe and its hook touch that directory only as the user: under sudo `pam_exec` runs them with the caller's real uid, so they already are the user with no privilege, and a root caller (`su`, `pam_check`, `pam_exec seteuid`) first drops to the user with `setpriv` (real, effective and saved ids, and the groups). A symlink then reaches only what the user could already write. Tested in CI against a root-owned `0600` socket, with the probe run both ways, and with a control showing that a root sender would have reached it. Without `setpriv` there are no events: never "as root instead". |
 | A missing, wrong or stuck event socket (no app running, a regular file, a stream socket, a datagram socket whose queue is full) | **sudo behaves exactly as before**: same exit status, the 4 s phone check untouched, every failure ignored, and each helper killed at 250 ms (tested: the probe stays under its 500 ms cap over the bare phone check, with a full socket; about 20 ms on a desktop). Nothing in the event path can make anything authenticate. |
-| A process of the user forges datagrams to the desktop app, or reads the socket | The app treats every field as untrusted text and only displays it; an event approves nothing and the phone never hears of it. What a datagram holds is sudo's own command line, which that same user can read from `/proc` anyway. |
+| A process of the user forges datagrams to the desktop app, or reads the socket | Dropped unless the sender is a real sudo (real uid the user's, effective uid 0; unreadable means dropped), and only checked events count against the rate limit, so a flood of forgeries cannot hide a real sudo. The app treats every field as untrusted text and only displays it; an event approves nothing and the phone never hears of it. What a datagram holds is sudo's own command line, which that same user can read from `/proc` anyway. |
 | The pause flag (1.6): `/run/user/<uid>/sudostamp/paused`, set by anything running as the user | The only effect is that the probe skips the phone, so sudo asks for the password and the phone sees nothing: a flag can never make a sudo succeed. It is read as the user, never by root, so a symlink to a root-only file is unreadable and counts as not paused (tested: the target is `0600` root, empty, and would pause everything if root opened it). Only a regular file of at most 32 bytes counts (a FIFO would hold sudo), empty or a future unix time; on tmpfs, so a reboot or logout resumes. |
 | The hook after pam_rssh (1.6) | Its control is `[success=ignore ignore=ignore default=ignore]` and it exits 0: whatever it returns, the result of the stack is the one it had. It runs only when the phone path did not authenticate and only sends `not-approved`. Tested: after a failing module it cannot grant, after a granting one it cannot take back, and the same line with a granting control would grant (so the test can fail). |
 | An agent's script is changed between what was approved and what runs (`sudostamp ask`, 1.6) | **Refused before it runs.** The script reaches root only on stdin, checked against the SHA-256 in sudo's own command line (what sudo logs, the desktop shows and the phone is told); `sudostamp-run` exits 65 and runs nothing if they differ. Root never opens a path the agent names. See [docs/AGENTS-SUDO.md](docs/AGENTS-SUDO.md). |
@@ -106,6 +164,14 @@ flagged on every request; pair those computers again and remove it.
 | A replaced installer in the release downloads | The package registry accepts re-uploads, so files there can change after publishing. The installer and `SHA256SUMS` are signed (`ssh-keygen -Y`, key in `keys/allowed_signers`, also carried in the app); the documented command verifies before running anything. |
 
 ## Residual risks — accept these knowingly
+
+- **Setup trusts your account while it runs.** Where pam_rssh is built from source, it is built as
+  you, with your toolchain, and the result is installed as root as the module that answers for
+  sudo; from a checkout, `sudo tools/install.sh` runs files you can write. Malware already running
+  as you at that moment could put its own module there, which would let every sudo through without
+  the phone (and `doctor` would see the file it recorded). It is the same malware that could take
+  the sudo password you type into that setup, so run setup from a session you trust. (A root-owned
+  toolchain under a separate build account would close this; not built yet.)
 
 - **Do not reuse the PAM line outside `sudo`.** pam_rssh substitutes `${user}` (the raw PAM user
   name) into the key file path. In `sudo` that name is the already-logged-in caller. In `sshd`,
@@ -272,7 +338,9 @@ documented command does), read `tools/install.sh` first, as with any installer.
 ## CI runner
 
 This public project's pipelines run on the owner's self-hosted runner, which also serves other
-projects. No signing key and no secret is given to CI. Merge requests from forks run in the fork's
+projects. No signing key is given to CI, and no secret reaches the test jobs; the one exception is
+the `site` job, which runs only on master, in the protected environment `site`, and holds a
+Cloudflare Pages token that can deploy the `sudostamp` Pages project and nothing else. Merge requests from forks run in the fork's
 own project by default, so outside contributors cannot reach the runner unless a maintainer starts a
 fork's pipeline here; keep it that way, and on the runner keep `privileged = false` and no Docker
 socket in job containers. Job logs are public; they contain no addresses or credentials.

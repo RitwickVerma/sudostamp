@@ -154,6 +154,12 @@ object AgentProtocol {
         } catch (e: IOException) {
             return null
         }
+        return displayText(raw)
+    }
+
+    /** [raw] as text to show (the rules of [parseContext], minus the framing): null for
+     *  malformed UTF-8 or nothing left after scrubbing. Never throws. */
+    fun displayText(raw: ByteArray): String? {
         val text = try {
             Charsets.UTF_8.newDecoder()
                 .onMalformedInput(CodingErrorAction.REPORT)

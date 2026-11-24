@@ -67,10 +67,16 @@
     <string name="pair_code_title">Type this code on %1$s</string>
     <string name="pair_code_from">Requested from %1$s</string>
     <string name="pair_code_hint">Only on the computer you are setting up. If you did not start this, tap Cancel.</string>
+    <string name="pair_confirm_title">Did %1$s say “Codes match”?</string>
+    <string name="pair_confirm_body">Look at the computer you are setting up (it reached this phone from %1$s). Tap Yes only if it said the codes match. If it said nothing was pinned, tap No: something on the network changed the pairing.</string>
+    <string name="pair_confirm_yes">Yes, it said paired</string>
+    <string name="pair_confirm_no">No</string>
     <string name="pair_done">Paired</string>
     <string name="pair_done_detail">%1$s now has its own key on this phone. Approve its test request next: until one of its requests is approved, it is marked as new.</string>
     <string name="pair_finish">Done</string>
     <string name="pair_interrupted">Pairing stopped</string>
+    <string name="pair_rejected">Not paired</string>
+    <string name="pair_rejected_detail">You said the computer did not report a match, so nothing was kept. Start again on the computer if you still want to pair it.</string>
     <string name="pair_interrupted_detail">A second device tried to pair while this pairing was open, so nothing was kept. If that was not you, someone on this network may be trying their luck.</string>
     <string name="pair_outdated">Update the computer first</string>
     <string name="pair_outdated_detail">The computer at %1$s runs a SudoStamp installer from version 1.3 or older, which this app no longer pairs with. Update it (Arch: sudo pacman -Syu sudostamp, or yay -Syu; anywhere else: copy the command again), then tap Try again.</string>
@@ -167,6 +173,9 @@
     <string name="verdict_approved_detail">Your fingerprint signed this one request.</string>
     <string name="verdict_denied_detail">You tapped Deny. No signature was sent.</string>
     <string name="verdict_denied_notification_detail">You denied it from the notification. No signature was sent.</string>
+    <string name="verdict_secret_denied_detail">You tapped Deny. Nothing was sent.</string>
+    <string name="verdict_secret_denied_notification_detail">You denied it from the notification. Nothing was sent.</string>
+    <string name="verdict_secret_timed_out_detail">Nobody answered in time, so nothing was sent.</string>
     <string name="verdict_timed_out_detail">Nobody touched the sensor in time, so it was denied.</string>
     <string name="verdict_cancelled_detail">Dropped while waiting: Away began or the listener stopped.</string>
     <string name="refusal_unknown_key">Not one of your computers: it asked with a key this phone never made for any computer. You were not asked.</string>
@@ -211,4 +220,27 @@
     <string name="channel_listener_desc">The always-on notice that keeps the listener running. Quiet by design.</string>
     <string name="channel_approval">Approval requests</string>
     <string name="channel_approval_desc">A sudo is waiting for your fingerprint. Add SudoStamp to the apps Do Not Disturb lets through, or requests arrive silently.</string>
+
+    <!-- Secret requests (sudostamp input) -->
+    <string name="secret_overline">secret request</string>
+    <string name="secret_title">%1$s asks for a secret</string>
+    <string name="secret_paired_on">Paired %1$s</string>
+    <string name="secret_advisory">Named and described by %1$s. Any program on that computer could ask with other words.</string>
+    <string name="secret_field_hint_for">Secret for %1$s</string>
+    <string name="secret_show">Show</string>
+    <string name="secret_hide">Hide</string>
+    <string name="secret_send">Send with fingerprint</string>
+    <string name="secret_footnote">Sent once, to %1$s only. SudoStamp keeps no copy.</string>
+    <string name="secret_too_long">Too long: a secret is at most 1024 bytes.</string>
+    <string name="notif_secret_title">%1$s asks for a secret</string>
+    <string name="notif_secret_text">Tap to review</string>
+    <string name="prompt_secret_title">Send the secret to %1$s</string>
+    <string name="result_sent">Sent</string>
+    <string name="result_sent_detail">The secret went to %1$s. Nothing was kept here.</string>
+    <string name="history_secret">Secret · %1$s</string>
+    <string name="history_secret_named">Secret · %1$s · %2$s</string>
+    <string name="verdict_secret_sent_detail">Sent once, encrypted to this computer. SudoStamp kept no copy.</string>
+    <string name="refusal_no_host_key">It asked for a secret, but it was paired before version 2.0, so this phone cannot tell it is that computer. Pair it again to use secrets. You were not asked.</string>
+    <string name="refusal_pending">A secret request from a computer you have not approved anything from yet. Approve one sudo from it first. You were not asked.</string>
+    <string name="refusal_bad_request">A secret request that failed its checks: not signed by this computer, malformed, or a replay. You were not asked.</string>
 </resources>

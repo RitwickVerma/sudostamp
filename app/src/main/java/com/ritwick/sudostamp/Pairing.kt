@@ -85,6 +85,17 @@ object Pairing {
     const val EXT_REVEAL = "pair-reveal-v2@sudostamp"
     const val EXT_DONE = "pair-done-v2@sudostamp"
 
+    /**
+     * Version 3 changes ONE message per mode: the computer adds its host key H (a P-256 point, see
+     * SecretProtocol), so the phone can later tell a secret request from that computer from one
+     * made in its name. In code mode H rides the reveal, after the phone's commitment, and the code
+     * covers it: a substituted H changes the code exactly like a substituted nonce. In QR mode it
+     * rides the commit, under the computer's MAC with the secret. Everything else is v2 / qr-v1;
+     * a computer that pairs without H still gets sudo, and secret requests from it are refused.
+     */
+    const val EXT_REVEAL_V3 = "pair-reveal-v3@sudostamp"
+    const val EXT_QR_COMMIT_V2 = "pair-qr-v2@sudostamp"
+
     /** After DONE, while the pairing is still open: the attestation chain of the key just made
      *  (leaf first), for the computer to check against Google's roots. Not in the sudo path. */
     const val EXT_ATTEST = "attest-v1@sudostamp"
@@ -110,10 +121,12 @@ object Pairing {
 
     private val COMMIT_TAG = "sudostamp-pair-commit-v2\u0000".toByteArray(Charsets.US_ASCII)
     private val CODE_TAG = "sudostamp-pair-code-v2\u0000".toByteArray(Charsets.US_ASCII)
+    private val CODE_TAG_V3 = "sudostamp-pair-code-v3\u0000".toByteArray(Charsets.US_ASCII)
     private val ATTEST_TAG = "sudostamp-attest-challenge-v1\u0000".toByteArray(Charsets.US_ASCII)
     private val QR_HELLO_TAG = "sudostamp-qr-hello-v1\u0000".toByteArray(Charsets.US_ASCII)
     private val QR_HR_TAG = "sudostamp-qr-hello-reply-v1\u0000".toByteArray(Charsets.US_ASCII)
     private val QR_C_TAG = "sudostamp-qr-commit-v1\u0000".toByteArray(Charsets.US_ASCII)
+    private val QR_C_TAG_V2 = "sudostamp-qr-commit-v2\u0000".toByteArray(Charsets.US_ASCII)
     private val QR_P_TAG = "sudostamp-qr-phone-v1\u0000".toByteArray(Charsets.US_ASCII)
     private val QR_D_TAG = "sudostamp-qr-done-v1\u0000".toByteArray(Charsets.US_ASCII)
 
@@ -124,6 +137,10 @@ object Pairing {
 
     fun qrCommitMac(secret: ByteArray, hostNonce: ByteArray, connNonce: ByteArray, reached: ByteArray): ByteArray =
         hmac(secret, QR_C_TAG, hostNonce, connNonce, reached)
+
+    /** pair-qr-v2: [qrCommitMac] that also covers the computer's host key. */
+    fun qrCommitMacV3(secret: ByteArray, hostNonce: ByteArray, connNonce: ByteArray, reached: ByteArray, hostKey: ByteArray): ByteArray =
+        hmac(secret, QR_C_TAG_V2, hostNonce, connNonce, reached, hostKey)
 
     fun qrPhoneMac(
         secret: ByteArray, hostNonce: ByteArray, connNonce: ByteArray, keyBlob: ByteArray, phoneNonce: ByteArray,
@@ -153,8 +170,12 @@ object Pairing {
 
     /** The 6-digit code, zero-padded. The first 8 hash bytes as an unsigned number mod 10^6:
      *  the bias from 2^64 not being a multiple of 10^6 is below 10^-13. */
-    fun code(keyBlob: ByteArray, phoneNonce: ByteArray, hostNonce: ByteArray, dialled: ByteArray, stable: ByteArray): String {
-        val h = sha256(CODE_TAG, keyBlob, phoneNonce, hostNonce, dialled, stable)
+    fun code(
+        keyBlob: ByteArray, phoneNonce: ByteArray, hostNonce: ByteArray, dialled: ByteArray, stable: ByteArray,
+        hostKey: ByteArray? = null,
+    ): String {
+        val h = if (hostKey == null) sha256(CODE_TAG, keyBlob, phoneNonce, hostNonce, dialled, stable)
+        else sha256(CODE_TAG_V3, keyBlob, phoneNonce, hostNonce, dialled, stable, hostKey)
         var v = 0L
         for (i in 0 until 8) v = (v shl 8) or (h[i].toLong() and 0xFF)
         return java.lang.Long.remainderUnsigned(v, 1_000_000L).toString().padStart(CODE_DIGITS, '0')
@@ -170,8 +191,8 @@ object Pairing {
     fun cleanLabel(raw: ByteArray): String =
         String(raw, Charsets.US_ASCII).filter { it in ' '..'~' }.trim().take(64).ifEmpty { "a computer" }
 
-    /** Tag, then each part as an SSH string. */
-    private fun framed(tag: ByteArray, parts: Array<out ByteArray>): ByteArray {
+    /** [tag] then each part as an SSH string: the one transcript encoding (SecretProtocol uses it too). */
+    internal fun framed(tag: ByteArray, parts: Array<out ByteArray>): ByteArray {
         val o = ByteArrayOutputStream()
         o.write(tag)
         for (p in parts) {

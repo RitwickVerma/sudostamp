@@ -215,10 +215,13 @@ def describe(s, rx, pid):
 try:
     pinned = set()
     with open(sys.argv[2]) as f:
-        for line in f:
-            parts = line.split()
-            if len(parts) >= 2:
-                pinned.add(base64.b64decode(parts[1]))
+        for line in f:                           # pam_rssh's reading: a comment or a damaged
+            parts = line.split()                 # line is skipped, never the end of the check
+            if len(parts) >= 2 and not parts[0].startswith("#"):
+                try:
+                    pinned.add(base64.b64decode(parts[1], validate=True))
+                except ValueError:
+                    pass
     host, port = sys.argv[1].rsplit(":", 1)
     s = socket.create_connection((host.strip("[]"), int(port)), timeout=BUDGET)
     s.sendall(struct.pack(">IB", 1, 11))         # REQUEST_IDENTITIES

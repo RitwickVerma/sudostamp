@@ -58,6 +58,8 @@ PY
 gate "2/4  external verifier (ssh-keygen + independent crypto)"
 python3 tools/verify_ssh_sig.py app/build/sshcheck 2>&1 | tail -12 | sed 's/^/  /'
 python3 tools/verify_ssh_sig.py app/build/sshcheck >/dev/null 2>&1 || { echo "  EXTERNAL CHECK FAILED"; FAIL=1; }
+python3 tools/verify_secret_seal.py app/build/secretcheck 2>&1 | sed 's/^/  /'
+python3 tools/verify_secret_seal.py app/build/secretcheck >/dev/null 2>&1 || { echo "  SECRET SEAL CHECK FAILED"; FAIL=1; }
 
 gate "3/4  debug APK build"
 ./gradlew -Dorg.gradle.java.home="$JAVA_HOME" assembleDebug --no-daemon > "$LOG/apk.log" 2>&1

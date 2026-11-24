@@ -92,8 +92,11 @@ class AgentService : Service() {
         /** What each computer said its next sudo is for. Advisory; see [ContextBox]. */
         private val contextBox = ContextBox()
 
-        /** Numbers requests, so a notification acts only on the request it announced. */
-        private val requestIds = java.util.concurrent.atomic.AtomicLong()
+        /** Names requests, so a notification acts only on the request it announced. Random, not
+         *  counted: MainActivity is exported, and another app must not be able to name the
+         *  request on screen (and so raise its prompt) by guessing the next number. */
+        private val rng = java.security.SecureRandom()
+        private fun newRequestId(): Long = rng.nextLong() ushr 1
 
         /** True while the server socket is bound and accepting. The setup screen shows
          *  THIS, not "a key exists", so a dead listener can never read as healthy. */
@@ -139,6 +142,16 @@ class AgentService : Service() {
                 Hosts.remove(ctx, id)
                 limiter.forget(id)
             }
+        }
+
+        /** The person said the computer reported the pairing: record it, as PENDING (trusted only
+         *  once one of its requests is approved). False if there was nothing to confirm. */
+        fun confirmPairing(ctx: Context): Boolean {
+            val c = pairing.confirm() ?: return false
+            val h = c.hostKey?.let { java.util.Base64.getEncoder().encodeToString(it) }
+            Hosts.add(ctx, Host(c.id, c.label ?: "a computer", System.currentTimeMillis(), false, c.client, h))
+            Log.i(TAG, "pairing: ${c.client} paired as ${c.id} (pending its first approval)")
+            return true
         }
 
         /** Unpairs [id] (from the app's list of computers). */
@@ -345,7 +358,10 @@ class AgentService : Service() {
     }
 
     /** Who is on the other end of one connection, and where they reached us. */
-    private class Conn(val id: Long, val client: String, val local: java.net.InetAddress, val localPort: Int)
+    private class Conn(val id: Long, val client: String, val local: java.net.InetAddress, val localPort: Int) {
+        /** This connection's secret exchange: one hello, at most one request. */
+        val secret = SecretGate()
+    }
 
     private fun handle(s: Socket, l: Listener) {
         val client = Net.hostPort(s.inetAddress, s.port).substringBeforeLast(':')
@@ -434,37 +450,12 @@ class AgentService : Service() {
 
                 // Hand off to the Activity for a biometric. THIS is the gate.
                 val p = Approval(
-                    requestIds.incrementAndGet(), Keys.newSigner(Keys.aliasFor(host.id)), data,
+                    newRequestId(), Keys.newSigner(Keys.aliasFor(host.id)), data,
                     host.id, host.label, host.confirmed, client, System.currentTimeMillis(),
                     seen?.text, seen?.conflicted == true,
                 )
-                current = p
-                notifyApprovalNeeded(p)
-                // Tell a foreground Activity right now. The notification alone is not
-                // enough: it only reaches us if the user taps it, and an Activity that is
-                // already visible will not get another onResume.
-                changed()
-
                 val waitStart = SystemClock.elapsedRealtimeNanos()
-                // Keep the CPU awake for the approval window, and only for it. A dozing
-                // phone suspends between packets, and suspended time does not count
-                // towards a Java timeout -- so with the screen off "60 s" stretched until
-                // something woke the phone, and pam_rssh, which sets no timeout of its
-                // own, held sudo hanging the whole time.
-                val wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
-                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sudostamp:approval")
-                wake.acquire(APPROVAL_TIMEOUT_MS + 5_000)
-                val der = try {
-                    p.await(APPROVAL_TIMEOUT_MS)
-                } finally {
-                    if (wake.isHeld) wake.release()
-                    // Resolved whichever way await ended, so a prompt still on screen is
-                    // told to come down rather than collect a fingerprint for nothing.
-                    p.deny(Approval.How.CANCELLED)
-                    current = null
-                    resetNotification()
-                    changed()
-                }
+                val der = askUser(p)
                 remember(p.resolution.toVerdict(), null, host.id, host.label, client, p.context)
                 val waited = SystemClock.elapsedRealtimeNanos() - waitStart
                 if (der == null) {
@@ -484,6 +475,11 @@ class AgentService : Service() {
             AgentProtocol.SSH2_AGENTC_EXTENSION -> {
                 r.skipType()
                 val name = String(r.blob(), Charsets.US_ASCII)
+                if (name == SecretProtocol.EXT_HELLO) {
+                    AgentProtocol.writeFrame(out, secretHello(r, conn))
+                    return 0
+                }
+                if (name == SecretProtocol.EXT_REQUEST) return secretRequest(r, out, conn)
                 if (name == AgentProtocol.EXT_CONTEXT) {
                     // Not pairing: no pair(), no discardAbandoned. Stored for this client's next
                     // sign request; FAILURE (which an old phone also answers) when malformed.
@@ -508,6 +504,106 @@ class AgentService : Service() {
     }
 
     /**
+     * Parks [p] for the user and waits up to [APPROVAL_TIMEOUT_MS]: the DER signature, or null
+     * for anything but an approval. The notification, the wake lock and the clean-up are the
+     * same for sudo and for secrets.
+     */
+    private fun askUser(p: Approval): ByteArray? {
+        current = p
+        notifyApprovalNeeded(p)
+        // Tell a foreground Activity right now. The notification alone is not
+        // enough: it only reaches us if the user taps it, and an Activity that is
+        // already visible will not get another onResume.
+        changed()
+        // Keep the CPU awake for the approval window, and only for it. A dozing
+        // phone suspends between packets, and suspended time does not count
+        // towards a Java timeout -- so with the screen off "60 s" stretched until
+        // something woke the phone, and pam_rssh, which sets no timeout of its
+        // own, held sudo hanging the whole time.
+        val wake = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sudostamp:approval")
+        wake.acquire(APPROVAL_TIMEOUT_MS + 5_000)
+        return try {
+            p.await(APPROVAL_TIMEOUT_MS)
+        } finally {
+            if (wake.isHeld) wake.release()
+            // Resolved whichever way await ended, so a prompt still on screen is
+            // told to come down rather than collect a fingerprint for nothing.
+            p.deny(Approval.How.CANCELLED)
+            current = null
+            resetNotification()
+            changed()
+        }
+    }
+
+    // ------------------------------------------------------------------ secrets
+    //
+    // docs/design/secrets.md. Every refusal before the screen is a plain FAILURE, shown to
+    // nobody, recorded in the history without the name or the reason.
+
+    /** secret-hello: names a paired computer by its key K; answered with a fresh nonce Np. */
+    private fun secretHello(r: AgentProtocol.Reader, conn: Conn): ByteArray {
+        val hosts = Hosts.all(this)
+        val v = conn.secret.hello(
+            SecretProtocol.parseHello(r),
+            { kb -> hosts.firstOrNull { Keys.blob(Keys.aliasFor(it.id))?.contentEquals(kb) == true } },
+            limiter::check,
+        )
+        return when (v) {
+            is SecretGate.Hello.Ok -> AgentProtocol.success(v.nonce)
+            is SecretGate.Hello.Refused -> {
+                Log.w(TAG, "secret: hello from ${conn.client} refused (${v.why})")
+                remember(Verdict.REFUSED, v.why, v.host?.id, v.host?.label ?: "", conn.client, secret = "")
+                AgentProtocol.failure()
+            }
+        }
+    }
+
+    /** secret-request: verified against H and this connection's Np, then put to the user. */
+    private fun secretRequest(r: AgentProtocol.Reader, out: java.io.OutputStream, conn: Conn): Long {
+        val client = conn.client
+        val v = conn.secret.request(SecretProtocol.parseRequest(r)) { Keys.blob(Keys.aliasFor(it.id)) }
+        if (v is SecretGate.Ask.Refused) {
+            // Not counted against the computer: anything on the LAN can send this, and a
+            // cooldown it could trigger would block that computer's real sudo.
+            Log.w(TAG, "secret: request from $client refused (no hello, malformed or bad signature)")
+            remember(Verdict.REFUSED, v.why, v.host?.id, v.host?.label ?: "", client, secret = "")
+            AgentProtocol.writeFrame(out, AgentProtocol.failure())
+            return 0
+        }
+        val (host, q, t) = (v as SecretGate.Ask.Ok).let { Triple(it.host, it.request, it.t) }
+        limiter.check(host.id)?.let { why ->
+            remember(Verdict.REFUSED, why, host.id, host.label, client, secret = "")
+            AgentProtocol.writeFrame(out, AgentProtocol.failure())
+            return 0
+        }
+        val p = Approval(
+            newRequestId(), Keys.newSigner(Keys.aliasFor(host.id)), ByteArray(0),
+            host.id, host.label, host.confirmed, client, System.currentTimeMillis(),
+            context = q.why, secret = Approval.SecretAsk(q.name, t, q.pkR),
+        )
+        val waitStart = SystemClock.elapsedRealtimeNanos()
+        val der = askUser(p)
+        val a = p.answer
+        val sent = der != null && a != null
+        // The name and the reason only for a secret that was sent: the history is no place for
+        // text a request that was turned away chose.
+        remember(p.resolution.toVerdict(), null, host.id, host.label, client,
+            if (sent) p.context else null, secret = if (sent) q.name else "")
+        val waited = SystemClock.elapsedRealtimeNanos() - waitStart
+        if (!sent) {
+            limiter.unapproved(host.id, host.confirmed)
+            AgentProtocol.writeFrame(out, AgentProtocol.failure())
+            return waited
+        }
+        limiter.approved()
+        AgentProtocol.writeFrame(out, SecretProtocol.answerFrame(a!!, der!!))
+        Log.i(TAG, "secret sent to ${host.id}")
+        if (Hosts.confirm(this, host.id)) Log.i(TAG, "${host.id} approved for the first time: trusted")
+        return waited
+    }
+
+    /**
      * The pairing extensions (protocol in Pairing.kt). Every refusal is a plain FAILURE: the
      * computer learns nothing about why. No signing happens here -- the key is public.
      */
@@ -522,20 +618,21 @@ class AgentService : Service() {
                 Log.i(TAG, if (c != null) "pairing: commit from $client" else "pairing: commit from $client refused")
                 if (c != null) AgentProtocol.success(c) else AgentProtocol.failure()
             }
-            Pairing.EXT_REVEAL -> {
-                val v = pairing.reveal(client, conn.id, r.blob())
+            Pairing.EXT_REVEAL, Pairing.EXT_REVEAL_V3 -> {
+                val nh = r.blob()
+                // A v3 reveal that is not exactly (Nh, H) ends the pairing, like a bad H does: refusing
+                // it quietly would let someone in between push the computer back to v2 (no H).
+                // runCatching: a missing H must end it too, not throw past pairing.reveal.
+                val h = if (name == Pairing.EXT_REVEAL_V3) runCatching { r.blob() }.getOrNull()?.takeIf { r.atEnd() } ?: ByteArray(0) else null
+                val v = if (h != null || r.atEnd()) pairing.reveal(client, conn.id, nh, h) else null
                 Log.i(TAG, if (v != null) "pairing: code shown for $client" else "pairing: reveal from $client refused")
                 if (v != null) AgentProtocol.success(v.keyBlob, v.phoneNonce, v.dialled, v.stable) else AgentProtocol.failure()
             }
             Pairing.EXT_DONE -> {
                 val nh = r.blob()
-                val label = pairing.view().label ?: "a computer"
+                // Nothing is recorded yet: the person confirms on the phone (PairingSession.confirm).
                 val id = pairing.done(client, nh)
-                // Recorded as PENDING: trusted only once one of its requests is approved.
-                if (id != null) {
-                    Hosts.add(this, Host(id, label, System.currentTimeMillis(), false, client))
-                    Log.i(TAG, "pairing: $client paired as $id (pending its first approval)")
-                }
+                if (id != null) Log.i(TAG, "pairing: $client says the codes match; asking the person")
                 if (id != null) AgentProtocol.success() else AgentProtocol.failure()
             }
             Pairing.EXT_QR_HELLO -> {
@@ -545,12 +642,15 @@ class AgentService : Service() {
                 val h = pairing.qrHello(conn.id, tag, nq)
                 if (h != null) AgentProtocol.success(h.connNonce, h.mac) else AgentProtocol.failure()
             }
-            Pairing.EXT_QR_COMMIT -> {
+            Pairing.EXT_QR_COMMIT, Pairing.EXT_QR_COMMIT_V2 -> {
                 val nh = r.blob()
-                val mac = r.blob()
+                val h = if (name == Pairing.EXT_QR_COMMIT_V2) r.blob() else null
+                // Trailing bytes make the MAC fail INSIDE qrCommit, which spends this connection's hello
+                // nonce: no second commit (e.g. a v1 one, without H) can follow on it.
+                val mac = r.blob().takeIf { r.atEnd() } ?: ByteArray(0)
                 val dialled = Net.endpoint(conn.local, conn.localPort)
                 val stable = Net.endpoint(Net.stable() ?: conn.local, PORT)
-                val v = pairing.qrCommit(client, conn.id, nh, mac, dialled, stable, ::newPairingKey)
+                val v = pairing.qrCommit(client, conn.id, nh, mac, dialled, stable, ::newPairingKey, h)
                 Log.i(TAG, if (v != null) "pairing: QR commit from $client" else "pairing: QR commit from $client refused")
                 if (v != null) AgentProtocol.success(v.keyBlob, v.phoneNonce, v.dialled, v.stable, v.mac) else AgentProtocol.failure()
             }
@@ -560,7 +660,7 @@ class AgentService : Service() {
                 val label = pairing.view().label ?: "a computer"
                 val id = pairing.qrDone(client, conn.id, nh, mac)
                 if (id != null) {
-                    Hosts.add(this, Host(id, label, System.currentTimeMillis(), false, client))
+                    Hosts.add(this, Host(id, label, System.currentTimeMillis(), false, client, hostKeyText()))
                     Log.i(TAG, "pairing: $client paired by QR code as $id (pending its first approval)")
                 }
                 if (id != null) AgentProtocol.success() else AgentProtocol.failure()
@@ -579,6 +679,10 @@ class AgentService : Service() {
             else -> AgentProtocol.failure()
         }
     }
+
+    /** The finished pairing's host key as [Host] stores it, or null (a v2 computer). */
+    private fun hostKeyText(): String? =
+        pairing.doneHostKey()?.let { java.util.Base64.getEncoder().encodeToString(it) }
 
     /** A new key for one computer, made while answering its commit (the commitment or MAC
      *  covers it), with its attestation for [challenge]; null if the Keystore cannot. */
@@ -648,14 +752,17 @@ class AgentService : Service() {
         // Separate ID and channel from the persistent notice: the foreground
         // notification must stay put, and the approval must be allowed to be loud.
         // No time in the text: the shade already shows when it arrived (setWhen below).
-        val title = getString(R.string.notif_approval_title, Ui.hostName(this, p.hostId, p.label))
+        // A secret request says only who asks: never the name or the reason (see below).
+        val title = getString(if (p.secret != null) R.string.notif_secret_title else R.string.notif_approval_title,
+            Ui.hostName(this, p.hostId, p.label))
         // An unexpected request should be one tap to reject, without opening anything.
         val denyAction = Notification.Action.Builder(
             Icon.createWithResource(this, R.drawable.ic_error), getString(R.string.deny), deny
         ).build()
         val generic = notificationBuilder(
             title,
-            getString(if (p.trusted) R.string.notif_approval_text else R.string.notif_approval_text_new, p.client),
+            if (p.secret != null) getString(R.string.notif_secret_text)
+            else getString(if (p.trusted) R.string.notif_approval_text else R.string.notif_approval_text_new, p.client),
             CHANNEL_APPROVAL, pi, denyAction
         )
         // Never the description: a notification can show on a locked screen (whether it does is
@@ -693,11 +800,14 @@ class AgentService : Service() {
     /** Records one decision in the history (best-effort: never on the request's critical path). */
     private fun remember(
         verdict: Verdict, refusal: Refusal?, hostId: String?, label: String, peer: String, command: String? = null,
+        secret: String? = null,
     ) {
         runCatching {
             HistoryStore.get(this).record(HistoryEntry(
                 System.currentTimeMillis(), verdict, refusal, hostId, label, peer,
-                command = command?.let(::describeContext),
+                // A secret's reason is kept as sent (scrubbed); describeContext reads sudo's form.
+                command = if (secret != null) command else command?.let(::describeContext),
+                secret = secret,
             ))
         }.onFailure { Log.w(TAG, "history: ${it.message}") }
         changed()

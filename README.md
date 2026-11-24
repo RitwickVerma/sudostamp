@@ -263,7 +263,9 @@ one-in-a-million guess, and the phone allows **one** attempt per tap of *Pair a 
 attempt while the pairing screen is open cancels the pairing, even one that already finished.
 Something that answers in the phone's place and passes everything through unchanged is caught too:
 the phone states the address it was reached at, and it is not the relay's. You *type* the code, so
-it really gets compared. The protocol is documented in
+it really gets compared. Only the computer learns whether it matched, so the phone then asks you
+one thing: did the computer say the codes match? It keeps the computer only after your *Yes*.
+The protocol is documented in
 [`Pairing.kt`](app/src/main/java/com/ritwick/sudostamp/Pairing.kt) and tested in CI, with a
 simulated man in the middle and a relay, on every supported distribution.
 
@@ -379,6 +381,21 @@ runs exactly the script whose SHA-256 the approval named. The agent, the reason 
 sudo's log, the desktop notification and, from 1.6, on the phone's approval screen.
 [docs/AGENTS-SUDO.md](docs/AGENTS-SUDO.md) has the details and what the description does and does
 not guarantee.
+
+## Secrets: `sudostamp input`
+
+A program that needs a password you do not want stored on the computer can ask the phone for it:
+
+```sh
+RESTIC_PASSWORD_COMMAND='sudostamp input restic --why "weekly backup"' restic backup ~
+sudostamp input disk --why "open the backup disk" | sudo cryptsetup open --key-file=- /dev/sdX backup
+```
+
+The phone shows which computer asks, the name and the reason. You type the secret or let your
+password manager fill it, then touch the sensor; it goes, encrypted, to that one request and is
+written to the program's pipe. The phone keeps nothing, and the command writes only to a pipe: it
+refuses a terminal, a file, or `2>&1` before it asks. Needs `python3-cryptography` on the computer and a pairing made with 2.0
+([docs/design/secrets.md](docs/design/secrets.md); what it does not protect: [SECURITY.md](SECURITY.md)).
 
 ## Development
 

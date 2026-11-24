@@ -47,6 +47,12 @@ enum class Refusal(val code: String) {
     AFTER_APPROVAL("q"),
     /** That computer was just denied or timed out ([Limiter]). */
     COOLDOWN("w"),
+    /** A secret request from a computer paired before 2.0 (no host key): it cannot ask. */
+    NO_HOST_KEY("h"),
+    /** A secret request that is not one: no hello first, bad signature, malformed, replayed. */
+    BAD_REQUEST("b"),
+    /** A secret request from a computer none of whose requests was ever approved. */
+    PENDING("p"),
 }
 
 /**
@@ -68,6 +74,9 @@ data class HistoryEntry(
     /** What the computer said the sudo was for, as the approval showed it (agent: why, or the
      *  command), or null. Advisory text from the computer, never verified. */
     val command: String? = null,
+    /** Null for sudo. For a secret request: what was asked for, or "" when the history must not
+     *  say (anything but an approval: an unverified or unsent request leaves no text). */
+    val secret: String? = null,
 )
 
 /**
@@ -117,7 +126,9 @@ class History(private val file: File? = null, private val max: Int = MAX) {
                     b64e.encodeToString((e.hostId ?: "").toByteArray()),
                     b64e.encodeToString(e.label.toByteArray()),
                     b64e.encodeToString(e.peer.toByteArray()),
-                    e.command?.let { b64e.encodeToString(it.toByteArray()) },
+                    // A secret row always has both fields, the description "" when there is none.
+                    if (e.secret != null) b64e.encodeToString((e.command ?: "").toByteArray()) else e.command?.let { b64e.encodeToString(it.toByteArray()) },
+                    e.secret?.let { b64e.encodeToString(it.toByteArray()) },
                 ).joinToString("\t")
             }).joinToString("\n") + "\n"
 
@@ -134,7 +145,7 @@ class History(private val file: File? = null, private val max: Int = MAX) {
 
         private fun parse(line: String): HistoryEntry? = runCatching {
             val f = line.split('\t')
-            if (f.size != 7 && f.size != 8) return null
+            if (f.size !in 7..9) return null
             val at = f[0].toLong()
             val verdict = Verdict.entries.firstOrNull { it.code == f[1] } ?: return null
             val refusal = if (f[2] == "-") null else Refusal.entries.firstOrNull { it.code == f[2] } ?: return null
@@ -144,9 +155,13 @@ class History(private val file: File? = null, private val max: Int = MAX) {
             if (at <= 0 || count < 1) return null
             val host = String(b64d.decode(f[4])).ifEmpty { null }
             if (host != null && !Hosts.validId(host)) return null
-            val command = if (f.size == 8) cleanCommand(String(b64d.decode(f[7]))) else null
+            val command = if (f.size >= 8) cleanCommand(String(b64d.decode(f[7])).ifEmpty { null }) else null
+            val secret = if (f.size == 9) String(b64d.decode(f[8])) else null
+            if (secret != null && secret.isNotEmpty() && !SecretProtocol.validName(secret)) return null
+            // Only an approved secret request names what was asked for, or says why.
+            if (secret != null && verdict != Verdict.APPROVED && (secret.isNotEmpty() || command != null)) return null
             HistoryEntry(at, verdict, refusal, host, clean(String(b64d.decode(f[5])), MAX_LABEL),
-                clean(String(b64d.decode(f[6])), MAX_PEER), count, command)
+                clean(String(b64d.decode(f[6])), MAX_PEER), count, command, secret)
         }.getOrNull()
 
         /** Control characters become spaces and the length is bounded: both come off the
@@ -183,19 +198,33 @@ class History(private val file: File? = null, private val max: Int = MAX) {
     @Synchronized
     fun record(e: HistoryEntry) {
         val entry = e.copy(label = clean(e.label, MAX_LABEL), peer = clean(e.peer, MAX_PEER),
-            command = cleanCommand(e.command))
+            command = cleanCommand(e.command),
+            secret = e.secret?.takeIf { e.verdict == Verdict.APPROVED && SecretProtocol.validName(it) }
+                ?: e.secret?.let { "" })
+            .let { if (it.secret == "") it.copy(command = null) else it }
         val top = list.firstOrNull()
         list = if (top != null && mergeable(top, entry)) {
             listOf(entry.copy(count = top.count + entry.count)) + list.drop(1)
         } else {
-            (listOf(entry) + list).take(max)
+            trim(listOf(entry) + list)
         }
         save()
     }
 
+    /** Down to [max]: the oldest refusal goes first. Anything on the LAN can be refused at will,
+     *  so refusals alone must never push out a decision the person took part in. */
+    private fun trim(l: List<HistoryEntry>): List<HistoryEntry> {
+        val out = l.toMutableList()
+        while (out.size > max) {
+            val i = out.indexOfLast { it.verdict == Verdict.REFUSED }
+            out.removeAt(if (i >= 0) i else out.lastIndex)
+        }
+        return out
+    }
+
     private fun mergeable(top: HistoryEntry, e: HistoryEntry): Boolean =
         top.verdict == Verdict.REFUSED && e.verdict == Verdict.REFUSED &&
-            top.refusal == e.refusal && top.hostId == e.hostId && top.command == e.command &&
+            top.refusal == e.refusal && top.hostId == e.hostId && top.command == e.command && top.secret == e.secret &&
             (e.refusal == Refusal.OUTSIDE_LAN || top.peer == e.peer) &&
             e.at - top.at in 0 until COALESCE_WINDOW_MS &&
             top.count < 9_999

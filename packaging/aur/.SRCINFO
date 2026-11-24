@@ -8,8 +8,8 @@ pkgbase = sudostamp
 	depends = bash
 	depends = python
 	depends = openssh
-	depends = pam_rssh
 	optdepends = fprintd: try this computer's own fingerprint reader first when at the desk
+	optdepends = python-cryptography: sudostamp input (secrets typed on the phone)
 	source = sudostamp-v1.4.0.tar.gz::https://gitlab.com/ritwick7/sudostamp/-/archive/v1.4.0/sudostamp-v1.4.0.tar.gz
 	sha256sums = cc81c01389a29c0f7a5e1e9dabaa15e7484b74995657a8903e7dbabe4edda1d8
 

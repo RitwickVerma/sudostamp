@@ -43,12 +43,18 @@ JAVA_HOME=~/opt/jdk ANDROID_HOME=~/opt/android-sdk scripts/release.sh ship X.Y.Z
 1. tags the release merge commit and waits for the tag pipeline;
 2. `publish` in a temporary worktree (one question, before uploading): signed APK, signed
    installer, GitLab Release, anonymous downloads verified;
-3. `scripts/publish-aur.sh`: builds the AUR package, pushes it (the AUR key must be in ssh-agent:
+3. `scripts/run-ci-job.sh`: CI's `reproducible` job rebuilds the APK from the tag and compares bytes
+   with the published one. **This gates the next two steps**: on a mismatch `ship` stops with exit 3
+   and neither the AUR nor Google Play is touched (only the GitLab Release is out; the rebuild needs
+   it to exist). Delete the Release and its packages, find the cause, run `ship` again;
+4. `scripts/publish-aur.sh`: builds the AUR package, pushes it (the AUR key must be in ssh-agent:
    `ssh-add ~/.ssh/aur`), reads the AUR back, and opens the `packaging/aur/` merge request;
-4. `tools/play_publish.py`: the signed bundle to the production track, and the en-US listing
+5. `tools/play_publish.py`: the signed bundle to the production track, and the en-US listing
    (texts, icon, feature graphic, screenshots) replaced from `fastlane/metadata/` -- with the
    service account in `sops/sudostamp/play-service-account.sops.json`;
-5. `scripts/check-channels.sh`: GitLab, AUR and Play all serve X.Y.Z. Exit 3 names what is behind.
+6. `scripts/check-channels.sh`: GitLab, AUR and Play all serve X.Y.Z, and the GitLab APK is the one the
+   signed `SHA256SUMS` lists, with the pinned release certificate (needs `apksigner`; the CI job installs
+   it). Exit 3 names what is behind.
 
 It is safe to run again after a failure: once the GitLab Release exists it rebuilds instead (the
 build is reproducible, so the bundle is the same) and redoes only what is missing.
@@ -75,10 +81,10 @@ again.
 | signed build, certificate == pinned release key, not debuggable, installer signature verifies | `release.sh package` |
 | both SBOMs written, listed in `SHA256SUMS`, valid, and naming the APK and installer beside them | `release.sh package` (`release-check.sh X.Y.Z --dist`) |
 | upload, Release, anonymous download verified | `release.sh publish` |
-| the published APK is exactly what the tag builds (rebuilt unsigned, signature copied on, bytes compared); `SHA256SUMS` signed and listing it; installer and SBOMs match | CI `reproducible`, played by `ship` after publish (`scripts/run-ci-job.sh`) |
+| the published APK is exactly what the tag builds (rebuilt unsigned, signature copied on, bytes compared); `SHA256SUMS` signed and listing it; installer and SBOMs match | CI `reproducible`, played by `ship` after the GitLab publish and **before the AUR and Play** (`scripts/run-ci-job.sh`) |
 | AUR package builds, pushed, served | `scripts/publish-aur.sh` (from `ship`) |
 | Play bundle + listing | `tools/play_publish.py` (from `ship`) |
-| every channel serves the newest tag | `scripts/check-channels.sh`: end of `ship`, and CI `channels` daily |
+| every channel serves the newest tag | `scripts/check-channels.sh`: end of `ship`, and CI `channels` daily (also the APK's hash against the signed `SHA256SUMS` and its certificate) |
 
 ### Supply-chain proof: SBOMs and the reproducible build
 
@@ -182,3 +188,14 @@ podman run --rm -v "$PWD":/src:ro -v "$PWD/gradle":/out eclipse-temurin:17-jdk b
 ```
 
 Then review the diff: every changed checksum should belong to something you meant to upgrade.
+
+## 9. CI images are pinned by digest
+
+Every `image:` in `.gitlab-ci.yml` (and every `host-e2e` matrix entry) is `name:tag@sha256:<index digest>`:
+the tag is for people, the digest is what runs. A moved upstream tag therefore cannot change what a job
+executes, and the daily `reproducible` re-proof only moves when someone moves it. To bump one, read the
+manifest-list digest from the registry (`curl -sI -H 'Accept: application/vnd.oci.image.index.v1+json'
+https://registry-1.docker.io/v2/library/<name>/manifests/<tag>` with an anonymous token, header
+`Docker-Content-Digest`), edit the line, and let the pipeline prove it. `debian:stable-slim`,
+`opensuse/tumbleweed:latest` and `alpine:3.20` are rolling names: their digest ages, so refresh them
+now and then. GitLab's SAST template brings its own analyzer image, which is not pinned here.

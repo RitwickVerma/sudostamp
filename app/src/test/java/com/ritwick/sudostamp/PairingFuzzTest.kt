@@ -89,7 +89,7 @@ class PairingFuzzTest {
 
     // ------------------------------------------------------------------ the state machine
 
-    private enum class Stage { NONE, COMMITTED, REVEALED, DONE }
+    private enum class Stage { NONE, COMMITTED, REVEALED, CONFIRM, DONE }
 
     private class Key(val id: String, val blob: ByteArray)
 
@@ -120,7 +120,7 @@ class PairingFuzzTest {
             fun expireModel() {
                 if (clock >= deadline) {
                     if (waiting) waiting = false
-                    if (stage == Stage.COMMITTED || stage == Stage.REVEALED) stage = Stage.NONE
+                    if (stage == Stage.COMMITTED || stage == Stage.REVEALED || stage == Stage.CONFIRM) stage = Stage.NONE
                 }
             }
             fun drain() { drained += s.drainDiscarded() }
@@ -140,7 +140,7 @@ class PairingFuzzTest {
                         var called = 0
                         expireModel()
                         val may = waiting && clock < deadline && dialled.size == 18 && stable.size == 18 && !keyFails
-                        val mayInterrupt = !waiting && (stage == Stage.COMMITTED || stage == Stage.REVEALED || (stage == Stage.DONE && clock < deadline))
+                        val mayInterrupt = !waiting && (stage == Stage.COMMITTED || stage == Stage.REVEALED || stage == Stage.CONFIRM || (stage == Stage.DONE && clock < deadline))
                         val out = s.commit(from, c, Fuzz.bytes(rng, r.nextInt(100)), dialled, stable) {
                             called++
                             if (keyFails) null
@@ -187,7 +187,7 @@ class PairingFuzzTest {
                             assertEquals(State.INTERRUPTED, s.view().state)
                         }
                     }
-                    6, 7 -> {
+                    6 -> {
                         val own = stage != Stage.NONE && r.nextInt(5) != 0
                         val from = if (own) client else clients[r.nextInt(2)]
                         val n = if (own && nh != null && r.nextInt(5) != 0) nh!!.copyOf() else Fuzz.bytes(rng, 32)
@@ -195,7 +195,20 @@ class PairingFuzzTest {
                         val may = stage == Stage.REVEALED && clock < deadline && from == client && n.contentEquals(nh)
                         val id = s.done(from, n)
                         assertEquals("done succeeds exactly for the committer with the revealed nonce, once", may, id != null)
-                        if (id != null) { assertEquals(key!!.id, id); finished += id; stage = Stage.DONE }
+                        if (id != null) { assertEquals(key!!.id, id); stage = Stage.CONFIRM; deadline = clock + Pairing.CODE_TTL_MS }
+                    }
+                    7 -> {
+                        // The person answers the phone's question: yes or no.
+                        expireModel()
+                        val asked = stage == Stage.CONFIRM
+                        if (r.nextInt(3) == 0) {
+                            s.reject()
+                            if (asked) { stage = Stage.NONE; assertEquals(State.REJECTED, s.view().state) }
+                        } else {
+                            val c = s.confirm()
+                            assertEquals("confirm succeeds exactly while the phone asks", asked, c != null)
+                            if (c != null) { assertEquals(key!!.id, c.id); finished += c.id; stage = Stage.DONE }
+                        }
                     }
                     8 -> {
                         val from = clients[r.nextInt(2)]
@@ -212,7 +225,7 @@ class PairingFuzzTest {
                 expireModel()
                 val v = s.view()
                 // DONE keeps showing it (the person has just typed it); no other state may.
-                if (v.state != State.CODE && v.state != State.DONE) assertNull("the code is shown only in CODE or DONE", v.code)
+                if (v.state != State.CODE && v.state != State.CONFIRM && v.state != State.DONE) assertNull("the code is shown only in CODE, CONFIRM or DONE", v.code)
                 else assertTrue(v.code!!.matches(Regex("[0-9]{6}")))
                 v.label?.let { assertTrue(it.length <= 64 && it.all { c -> c in ' '..'~' }) }
                 assertEquals("discoverable only while nobody has committed", s.discoverable(), v.state == State.WAITING)
@@ -243,6 +256,7 @@ class PairingFuzzTest {
         val rev = s.reveal("a", 1, ByteArray(32))
         assertNotNull(rev)
         assertEquals("k0", s.done("a", ByteArray(32)))
+        assertNotNull(s.confirm())
         assertNull(s.commit("b", 2, "evil".toByteArray(), ep, ep) { PairingSession.NewKey("k1", ByteArray(104)) })
         assertEquals(State.INTERRUPTED, s.view().state)
         assertEquals(listOf("k0"), s.drainDiscarded())

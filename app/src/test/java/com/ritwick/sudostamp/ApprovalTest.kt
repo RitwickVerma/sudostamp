@@ -114,4 +114,15 @@ class ApprovalTest {
         Thread.interrupted()
         assertEquals(Approval.How.CANCELLED, a.resolution)
     }
+
+    @Test
+    fun `a secret request is approved only with its sealed answer, and sudo never with one`() {
+        val ask = Approval.SecretAsk("restic", ByteArray(1), ByteArray(65))
+        val secret = Approval(2L, Signature.getInstance("SHA256withECDSA"), ByteArray(0), "0123456789abcdef", "build-box", true, "192.0.2.1", 0L, secret = ask)
+        assertThrows(IllegalArgumentException::class.java) { secret.approve(sig) }
+        val answer = SecretProtocol.Answer(Hpke.Sealed(ByteArray(65), ByteArray(16)), ByteArray(1))
+        assertThrows(IllegalArgumentException::class.java) { approval().approve(sig, answer) }
+        assertTrue(secret.approve(sig, answer))
+        assertTrue(secret.answer === answer)
+    }
 }

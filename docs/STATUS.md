@@ -5,6 +5,37 @@ hardware.** In daily use on one Arch Linux host with a Samsung Galaxy foldable (
 2026-09. This file is the verification log: what was checked, how, and what it showed. Release
 notes are in [CHANGELOG.md](../CHANGELOG.md).
 
+## 2026-11-23 — 2.0 secrets (`sudostamp input`), emulator done, real phone to do
+
+Branch `feat/secret-input`. Checked on the JVM, against a fake phone, and on an emulator (API 34, PIN
+and an enrolled virtual finger, real Keystore). **Not yet run on a real phone.**
+
+| What | How | Result |
+|---|---|---|
+| HPKE (`Hpke.kt`) | RFC 9180 A.3.1 vectors; the phone's seal opened by pyca (`verify_secret_seal.py`), with a flipped bit refused | vectors match; opened (1024 bytes); flipped bit refused |
+| shared vectors | T, info, answer message, pairing v3 code and QR MAC: Kotlin and Python hold the same numbers | equal |
+| JVM suite | `./gradlew testDebugUnitTest` | 242 tests, 0 failures |
+| host | `test_secret.py` 12, `test_secret_input.py` 12 (CLI against a fake phone on a socket), `test_pair.py`, `test_fuzz_pair.py`, `test_ask.py` | all OK; pyca 50.0.2, and `test_secret` + the seal check also under pyca 43.0.0 |
+| mutants, phone | each guard removed once, the named test seen red: `SecretGate` second hello, nonce not spent, no-H allowed, limiter ignored, sigH unchecked; History keeps an unsent name, parses one, merges secret and sudo rows; `Approval` without its answer; answer size; pairing v3 code without H, QR v2 MAC without H, an invalid H refused quietly instead of ending the pairing, H recorded before done, H not validated on load; HPKE point check; pkR outside T; trailing bytes | all red, all compiled |
+| mutants, host | `isatty` check, sigK check, exact answer framing, name and reason checks; `verify`, `phone_point` trailing bytes, `info` without the hash | all red |
+| found and fixed | `input` read the pinned key from `<user>` instead of `<user>.keys`, and the test fixture shared the mistake | fixed in `38af1f4`; a test now ties the name to install.sh's PAM line |
+| emulator: pairing v3 | `pair.py pair --host-key-pub` over adb forward, the code read off the screen | codes match, paired; again after Unpair with a new host key |
+| emulator: approve | `sudostamp input restic --why "weekly backup"` (stdout a pipe), value typed on the phone, finger | rc 0; stdout is exactly the typed bytes (sha256 equal) |
+| emulator: deny, ignore | tap Deny; or leave it | rc 77, stdout empty; timed out after 60 s, rc 77 |
+| emulator: locked | request with the phone locked | the keyguard shows only "e2e asks for a secret · Tap to review", never the field; after the PIN, approved, rc 0 |
+| emulator: screenshot | `adb exec-out screencap -p` on the secret screen, the home screen as control | 0 bytes; control 1,374,137 bytes |
+| emulator: cooldown | a request right after two unanswered ones | refused without a prompt (`RATE_LIMITED`), rc 77 |
+| emulator: history | Request history | Approved row names `restic` and the reason; Denied, Timed out, Refused rows keep no text |
+| found and fixed | a new computer's first secret request warned "if you did not just run sudo there" | superseded: a computer never approved cannot ask for a secret at all (red team, below) |
+| red team, host | the CLI as a process against a hostile fake phone and hostile redirections (12 attacks) | 4 holes (closed stdout, file, `2>&1`, reader gone), fixed; 12/12 refused; each guard red once under a mutant |
+| red team, phone | independent read-only review | no critical/high; fixed: pending computers asking, shared/stale host key, same-name computers, field leaks, guessable request ids, history flush, truncated v3 reveal |
+| found and fixed | No on the pairing confirm showed "A second device tried to pair"; a denied or timed-out secret row used sudo words ("No signature was sent") | own REJECTED state and "Not paired" screen; secret rows say nothing was sent (`6d84a26`); `HistoryScreenTest`, `PairingTest` red under 3 mutants; 251 JVM tests, 0 failures |
+| found and fixed | after No, `pair.py` waited out its 120 s for a yes that could not come | it stops as soon as the phone refuses the open pairing's attestation; `test_no_on_the_phone_stops_the_wait` red under the mutant, green after |
+
+Still to do before a release: one release-signed run on a real phone, with Autofill from a password
+manager, non-ASCII typed on its keyboard (`adb input text` cannot type it), and a `screencap` of the
+secret screen.
+
 ## 2026-11-12 — 1.5.0: ten upgrades
 
 Built in four parallel branches and integrated by hand; each feature was checked where it runs.

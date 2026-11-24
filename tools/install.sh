@@ -107,6 +107,10 @@ AFTER_CONTROL='[success=ignore ignore=ignore default=ignore]'
 # pam_fprintd on remote (SSH/mosh) sessions.
 FPRINT_TIMEOUT=15
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Every file root creates here starts out writable by root alone, whatever umask the caller had
+# (pkexec and `sudo -i` can hand on 000): each one is chmod-ed after it is written, and another user
+# must not be able to open it for writing in between and keep that handle past the rename.
+umask 022
 # How to tell the user to run us again: `sudostamp` when installed as a package, the bundle's
 # file name when run from the single-file download, else the path they used.
 PROG="${SUDOSTAMP_PROG:-$0}"
@@ -924,6 +928,7 @@ acquire_key() {
     # line captured here) and leaves the reason it failed in a file for the final event.
     [ "$JSON" = 0 ] || extra+=(--json-fd 3 --fail-out "$(root_tmp)/pair-fail")
     [ "$QR" = 0 ] || extra+=(--qr-secret-file "$ROOT_TMP/qr-secret")
+    local hk; hk="$(host_key)" && extra+=(--host-key-pub "$hk")
     key="$(python3 -I "$HERE/pair.py" pair --phone "$PHONE_ADDR" --label "$(hostname 2>/dev/null || uname -n)" \
              --addr-out "$addr_file" --attest-out "$(root_tmp)/attest" ${extra[@]+"${extra[@]}"})" || return 1
   fi
@@ -932,6 +937,20 @@ acquire_key() {
   printf '%s\n' "$key" | grep -qxE "$KEY_RE" && \
     [ "$(printf '%s\n' "$key" | wc -l | tr -d ' ')" = 1 ] || { bad "not a single SudoStamp key" >&2; return 1; }
   printf '%s\n' "$key"
+}
+
+# Pairing v3: the target user's host key (tools/secret.py keygen), made AS that user in their
+# own ~/.config, never by root in a directory the user controls. `sudostamp input` signs with it
+# so the phone knows which computer asks. It needs python3-cryptography, which sudo and pairing
+# do not: without it this computer pairs for sudo only, and says so.
+host_key() {
+  local out
+  out="$(sudo -u "$TARGET_USER" -H python3 -I "$HERE/secret.py" keygen 2>/dev/null)" || {
+    warn "no host key (python3-cryptography missing?): paired for sudo only. Install it and pair again to use \`sudostamp input\`." >&2
+    return 1
+  }
+  [[ "$out" =~ ^04[0-9a-f]{128}$ ]] || { warn "secret.py keygen printed no host key" >&2; return 1; }
+  printf '%s\n' "$out"
 }
 
 # After pairing: the address the phone vouched for (its stable one, if this computer reaches
@@ -1665,6 +1684,11 @@ cmd_doctor() {
 if [ "${1:-}" = ask ]; then
   shift
   exec python3 -I "$HERE/ask.py" "$@"
+fi
+# `input` too (docs/design/secrets.md): as the user, its own program, the secret on stdout only.
+if [ "${1:-}" = input ]; then
+  shift
+  exec python3 -I "$HERE/secret.py" input "$@"
 fi
 CMD="${1:-status}"
 [ $# -gt 0 ] && shift

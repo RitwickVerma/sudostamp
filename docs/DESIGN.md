@@ -183,6 +183,15 @@ FAILURE from its pairing branch, and the host ignores that and reads at most a s
   description, and the screen says so under it. Nothing about whether a request is refused,
   rate-limited or approved depends on it.
 
+## Secrets (`sudostamp input`, 2.0)
+
+A program on a paired computer asks; the person types or fills the secret on the phone and approves
+with a fingerprint; it goes, encrypted, to that one request. The phone stores nothing. This needs
+the phone to know which computer asks, which sudo never did: pairing v3 gives each computer a host
+key H that the pairing code covers. Storing secrets on the phone (`unseal`) was rejected for now:
+it needs a vault, a backup story and an unlock policy, for a consumer that does not exist yet.
+Everything else, with the alternatives rejected: [design/secrets.md](design/secrets.md).
+
 ## Pairing, version 2
 
 Written up in `app/src/main/java/com/ritwick/sudostamp/Pairing.kt`; the computer's side is

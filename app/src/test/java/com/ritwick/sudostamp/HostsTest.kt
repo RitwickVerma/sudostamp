@@ -27,6 +27,23 @@ class HostsTest {
     }
 
     @Test
+    fun `one host key is one computer - pairing again replaces the older entry`() {
+        // The same H paired again (setup run twice, or a key file copied to a second machine):
+        // the older entry goes, so a stolen or shared H cannot keep asking under the old pairing.
+        val h1 = a.copy(hostKey = "BAAA")
+        val other = b.copy(hostKey = "BBBB")
+        val legacy = Host("1111111111111111", "old", 2L, true, "x")
+        val again = Host("2222222222222222", "edith", 3L, false, "192.0.2.9", "BAAA")
+        val (list, gone) = Hosts.adding(listOf(h1, other, legacy), again)
+        assertEquals(listOf(other, legacy, again), list)
+        assertEquals(listOf(h1.id), gone)
+        // No host key: nothing to compare, nothing replaced but the same id.
+        val (list2, gone2) = Hosts.adding(listOf(legacy, other), legacy.copy(label = "renamed"))
+        assertEquals(listOf(other, legacy.copy(label = "renamed")), list2)
+        assertEquals(emptyList<String>(), gone2)
+    }
+
+    @Test
     fun `ids are only ever ours`() {
         assertTrue(Hosts.validId("0123456789abcdef"))
         assertTrue(Hosts.validId(Hosts.LEGACY_ID))

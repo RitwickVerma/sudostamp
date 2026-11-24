@@ -14,7 +14,9 @@ url="https://gitlab.com/ritwick7/sudostamp"
 # Ubuntu-font-1.0 (see NOTICE).
 license=('MIT' 'Apache-2.0' 'OFL-1.1' 'LicenseRef-Ubuntu-Font-1.0')
 # The window opens Wayland/X11, EGL and xkbcommon at run time (not linked), hence named here.
-depends=('sudostamp' 'polkit' 'gcc-libs' 'glibc' 'hicolor-icon-theme' 'libglvnd' 'libxkbcommon' 'wayland')
+# sudostamp>=1.7.0: the installer's `doctor --json`/`setup --json` and the probe's events (1.6.0),
+# and QR pairing (`discover --qr-stdin`, `setup --json --qr`, 1.7.0). An older one breaks the window.
+depends=('sudostamp>=1.7.0' 'polkit' 'gcc-libs' 'glibc' 'hicolor-icon-theme' 'libglvnd' 'libxkbcommon' 'wayland')
 makedepends=('cargo')
 optdepends=('libx11: the window on an X11 session'
             'libxcursor: the window on an X11 session'
