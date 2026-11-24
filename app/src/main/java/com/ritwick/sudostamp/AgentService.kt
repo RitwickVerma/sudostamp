@@ -453,6 +453,7 @@ class AgentService : Service() {
                     newRequestId(), Keys.newSigner(Keys.aliasFor(host.id)), data,
                     host.id, host.label, host.confirmed, client, System.currentTimeMillis(),
                     seen?.text, seen?.conflicted == true,
+                    expectedFrom = Hosts.expectedFrom(host, client),
                 )
                 val waitStart = SystemClock.elapsedRealtimeNanos()
                 val der = askUser(p)
@@ -468,7 +469,7 @@ class AgentService : Service() {
                 limiter.approved()
                 AgentProtocol.writeFrame(out, AgentProtocol.signResponse(SshSig.signatureBlob(der)))
                 Log.i(TAG, "signed via biometric for ${host.id}")
-                if (Hosts.confirm(this, host.id)) Log.i(TAG, "${host.id} approved for the first time: trusted")
+                if (Hosts.approvedFrom(this, host.id, client)) Log.i(TAG, "${host.id} approved for the first time: trusted")
                 return waited
             }
 
@@ -599,7 +600,7 @@ class AgentService : Service() {
         limiter.approved()
         AgentProtocol.writeFrame(out, SecretProtocol.answerFrame(a!!, der!!))
         Log.i(TAG, "secret sent to ${host.id}")
-        if (Hosts.confirm(this, host.id)) Log.i(TAG, "${host.id} approved for the first time: trusted")
+        if (Hosts.approvedFrom(this, host.id, client)) Log.i(TAG, "${host.id} approved for the first time: trusted")
         return waited
     }
 
@@ -762,7 +763,11 @@ class AgentService : Service() {
         val generic = notificationBuilder(
             title,
             if (p.secret != null) getString(R.string.notif_secret_text)
-            else getString(if (p.trusted) R.string.notif_approval_text else R.string.notif_approval_text_new, p.client),
+            else getString(when (p.warning) {
+                Approval.Warning.OTHER_ADDRESS -> R.string.notif_approval_text_other
+                Approval.Warning.NEW_COMPUTER -> R.string.notif_approval_text_new
+                else -> R.string.notif_approval_text
+            }, p.client),
             CHANNEL_APPROVAL, pi, denyAction
         )
         // Never the description: a notification can show on a locked screen (whether it does is

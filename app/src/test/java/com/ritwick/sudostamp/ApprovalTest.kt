@@ -125,4 +125,17 @@ class ApprovalTest {
         assertTrue(secret.approve(sig, answer))
         assertTrue(secret.answer === answer)
     }
+
+    @Test
+    fun `warning order - the old shared key, then another address, then a new computer`() {
+        fun w(id: String = "0123456789abcdef", trusted: Boolean = true, expected: String? = null) =
+            Approval(1L, Signature.getInstance("SHA256withECDSA"), ByteArray(32), id, "edith", trusted,
+                "192.0.2.1", 0L, expectedFrom = expected).warning
+        assertNull(w())
+        assertEquals(Approval.Warning.NEW_COMPUTER, w(trusted = false))
+        // A trusted computer's name from an address it never used: the case the old code hid.
+        assertEquals(Approval.Warning.OTHER_ADDRESS, w(expected = "192.0.2.7"))
+        assertEquals(Approval.Warning.OTHER_ADDRESS, w(trusted = false, expected = "192.0.2.7"))
+        assertEquals(Approval.Warning.LEGACY, w(id = Hosts.LEGACY_ID, expected = "192.0.2.7"))
+    }
 }

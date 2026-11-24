@@ -29,6 +29,15 @@ the phone.
 - `sudostamp input` refuses a named pipe (`mkfifo`) as stdout: others could open it.
 - The reachability check no longer skips the phone when the key file has a comment line.
 
+### Approvals
+- **A sudo request from an address the computer has not used before now carries a warning**, even
+  for a trusted computer. Any device on your network could already ask in a paired computer's
+  name (the phone lists its keys to anyone who asks); approving such a request gave it nothing
+  usable, but the screen looked like an ordinary request. It now names the address the computer
+  is known by. The usual address is the one it paired from or its last approved request's, so an
+  approval from a new address clears the warning next time. Found by the 2.0 security review;
+  SECURITY.md said such a device could not prompt at all, and is corrected.
+
 ### Desktop
 - A sudo notification is shown only for a real sudo (running as root on your behalf): a program
   that just calls itself `sudo` can no longer put a harmless-looking command on screen, and a flood

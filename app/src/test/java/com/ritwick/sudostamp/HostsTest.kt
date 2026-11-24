@@ -51,4 +51,40 @@ class HostsTest {
         assertFalse(Hosts.validId("0123"))
         assertFalse(Hosts.validId("sudostamp-v1"))
     }
+
+    @Test
+    fun `round-trips the last approved address and still reads entries written before it`() {
+        val seen = a.copy(hostKey = "BAAA", seenFrom = "192.0.2.44")
+        val noKey = b.copy(seenFrom = "[fd00::10]")
+        assertEquals(listOf(seen, noKey), Hosts.decode(Hosts.encode(listOf(seen, noKey))))
+        // Lines from 1.x (five fields) and 2.0 (six) carry no last address.
+        val five = "0123456789abcdef\t1\t1\tZQ==\tMTkyLjAuMi43"
+        assertEquals("", Hosts.decode(five).single().seenFrom)
+        assertEquals("", Hosts.decode("$five\tBAAA").single().seenFrom)
+        // Nothing seen yet: written exactly as before, so the format only grows when it must.
+        assertEquals(5, Hosts.encode(listOf(a)).split('\t').size)
+    }
+
+    @Test
+    fun `a request from neither the pairing address nor the last approved one names the expected one`() {
+        assertEquals(null, Hosts.expectedFrom(a, "192.168.1.7"))
+        assertEquals("192.168.1.7", Hosts.expectedFrom(a, "192.0.2.66"))
+        val moved = a.copy(seenFrom = "192.168.1.9")
+        assertEquals(null, Hosts.expectedFrom(moved, "192.168.1.9"))
+        assertEquals(null, Hosts.expectedFrom(moved, "192.168.1.7"))
+        assertEquals("192.168.1.9", Hosts.expectedFrom(moved, "192.0.2.66"))
+        // The pre-1.4 entry has no address to compare: it carries its own warning instead.
+        assertEquals(null, Hosts.expectedFrom(Host(Hosts.LEGACY_ID, "", 0L, true, ""), "192.0.2.66"))
+    }
+
+    @Test
+    fun `approving records the address and trusts the computer, nothing else`() {
+        val (list, wasPending) = Hosts.approved(listOf(a, b), b.id, "192.0.2.5")
+        assertTrue(wasPending)
+        assertEquals(listOf(a, b.copy(confirmed = true, seenFrom = "192.0.2.5")), list)
+        val (list2, again) = Hosts.approved(list, b.id, "192.0.2.6")
+        assertFalse(again)
+        assertEquals("192.0.2.6", list2[1].seenFrom)
+        assertEquals(Pair(listOf(a), false), Hosts.approved(listOf(a), "ffffffffffffffff", "x"))
+    }
 }
