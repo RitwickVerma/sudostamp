@@ -1186,10 +1186,13 @@ class MainActivity : Activity() {
                 ), matchWrap(top = dp(4)))
                 // Approving a request you did not start is the one way this goes wrong. A computer
                 // never approved before, or the old shared key, is worth a second look.
-                val warning = when {
-                    p.hostId == Hosts.LEGACY_ID -> R.string.approval_legacy
-                    !p.trusted -> R.string.approval_new_host
-                    else -> null
+                // A computer's name from an address it never used is next: anything on the
+                // network can ask in a paired computer's name, and the address is the tell.
+                val warning = when (p.warning) {
+                    Approval.Warning.LEGACY -> getString(R.string.approval_legacy)
+                    Approval.Warning.OTHER_ADDRESS -> getString(R.string.approval_other_address, p.expectedFrom)
+                    Approval.Warning.NEW_COMPUTER -> getString(R.string.approval_new_host)
+                    null -> null
                 }
                 if (warning != null) {
                     addView(row().apply {
@@ -1197,7 +1200,7 @@ class MainActivity : Activity() {
                         background = Ui.rounded(Ui.WARN_DIM, dpf(12f))
                         setPadding(dp(12), dp(10), dp(12), dp(10))
                         addView(icon(R.drawable.ic_warning, Ui.WARN, 18))
-                        addView(text(getString(warning), Type.CAPTION, Ui.WARN).apply {
+                        addView(text(warning, Type.CAPTION, Ui.WARN).apply {
                             setPadding(dp(10), 0, 0, 0)
                         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                     }, matchWrap(top = dp(14)))

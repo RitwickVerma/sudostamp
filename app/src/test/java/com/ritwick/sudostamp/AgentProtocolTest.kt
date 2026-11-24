@@ -143,7 +143,8 @@ class AgentProtocolTest {
 
     @Test
     fun aSignRequestForAnyOtherKeyIsRefusedBeforeTheUserSeesIt() {
-        // A device that never paired cannot make the phone ask anything.
+        // A key the phone did not make is refused unshown. (Naming a paired computer's key is
+        // shown, with the sender's address and a warning when it is unusual: HostsTest.)
         assertNotNull(AgentProtocol.refusal(false, ByteArray(32)))
     }
 

@@ -119,8 +119,10 @@ object AgentProtocol {
     /**
      * Why a sign request must be refused without asking the user, or null if it may be put to
      * them. [knownKey]: the key it names belongs to a paired computer. An unknown key is
-     * refused before anything is shown -- so a device that never paired cannot put a prompt on
-     * the screen at all.
+     * refused before anything is shown. A known key is NOT proof of the computer: the phone
+     * lists its keys to anyone who asks, so any device on the LAN can name one. The prompt then
+     * shows that computer's name, the requester's address and, when the address is not one
+     * that computer is known by, a warning ([Hosts.expectedFrom]).
      */
     fun refusal(knownKey: Boolean, data: ByteArray): String? = when {
         !knownKey -> "sign request for a key this phone did not make for any paired computer"

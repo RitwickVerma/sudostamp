@@ -37,7 +37,20 @@ class Approval(
     /** Set for a secret request (`sudostamp input`): what is asked for and what the answer is
      *  bound to. Null for sudo. [context] then holds the request's reason. */
     val secret: SecretAsk? = null,
+    /** Set when [client] is not an address this computer is known by ([Hosts.expectedFrom]):
+     *  the address it is known by, shown in the warning. */
+    val expectedFrom: String? = null,
 ) {
+    /** What the approval screen warns about, most serious first; null for none. */
+    enum class Warning { LEGACY, OTHER_ADDRESS, NEW_COMPUTER }
+
+    val warning: Warning? get() = when {
+        hostId == Hosts.LEGACY_ID -> Warning.LEGACY
+        expectedFrom != null -> Warning.OTHER_ADDRESS
+        !trusted -> Warning.NEW_COMPUTER
+        else -> null
+    }
+
     /** A verified secret request: [name] and the transcript T it was signed over. */
     class SecretAsk(val name: String, val transcript: ByteArray, val pkR: ByteArray)
 

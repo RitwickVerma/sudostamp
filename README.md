@@ -68,8 +68,8 @@ sudo on the host
   attestation roots (kept in this repository) and prints `Key attested: StrongBox` or `TEE`. It
   does not take the phone's word for it.
 - **One key per computer.** The phone makes a separate key for every computer it pairs with, and
-  the approval names the computer that key belongs to. A device that never paired cannot even make
-  the phone ask.
+  the approval names the computer that key belongs to, shows the address the request came from,
+  and warns when that is not an address the computer is known by.
 - **It signs nothing but sudo challenges.** The agent refuses any payload that is not exactly
   pam_rssh's 32-byte challenge, so the keys are useless as SSH-login or git-signing oracles.
 - **Zero third-party runtime dependencies** in the app: platform APIs only.

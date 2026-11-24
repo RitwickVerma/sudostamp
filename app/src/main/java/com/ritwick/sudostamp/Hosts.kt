@@ -33,6 +33,9 @@ data class Host(
      *  paired without one: it gets sudo, and every secret request from it is refused unshown.
      *  A String, not a ByteArray, so Host stays a value (data-class equality). */
     val hostKey: String? = null,
+    /** The address its last approved request came from; empty until one is approved. With
+     *  [pairedFrom], the addresses a request in its name is expected from ([Hosts.expectedFrom]). */
+    val seenFrom: String = "",
 ) {
     /** [hostKey] as bytes, or null when there is none or it is not a P-256 point. */
     fun hostKeyBytes(): ByteArray? = hostKey?.let { k ->
@@ -73,14 +76,33 @@ object Hosts {
         return Pair(list.filter { it.id != h.id && it.id !in gone } + h, gone)
     }
 
-    /** Marks [id] trusted. True if it was pending. */
+    /** A request from [id], sent from [client], was approved: trusts it and records [client].
+     *  True if it was pending. */
     @Synchronized
-    fun confirm(ctx: Context, id: String): Boolean {
-        val list = all(ctx)
-        val h = list.firstOrNull { it.id == id } ?: return false
-        if (h.confirmed) return false
-        save(ctx, list.map { if (it.id == id) it.copy(confirmed = true) else it })
-        return true
+    fun approvedFrom(ctx: Context, id: String, client: String): Boolean {
+        val (list, wasPending) = approved(all(ctx), id, client)
+        save(ctx, list)
+        return wasPending
+    }
+
+    /** [list] after an approval for [id] from [client], and whether [id] was pending. */
+    fun approved(list: List<Host>, id: String, client: String): Pair<List<Host>, Boolean> {
+        val h = list.firstOrNull { it.id == id } ?: return Pair(list, false)
+        return Pair(list.map { if (it.id == id) it.copy(confirmed = true, seenFrom = client) else it }, !h.confirmed)
+    }
+
+    /**
+     * Null when a request in [h]'s name from [client] comes from an address that computer is
+     * known by (the one it paired from, or its last approved request's); otherwise that
+     * address, to show beside [client]. Anything on the LAN can learn a paired computer's key
+     * (the phone lists them) and ask in its name, so the address is the one hint the person
+     * has. Advisory, never a refusal: a computer that changed address must still get sudo.
+     * The pre-1.4 entry has no address and carries its own warning.
+     */
+    fun expectedFrom(h: Host, client: String): String? = when {
+        h.pairedFrom.isEmpty() && h.seenFrom.isEmpty() -> null
+        client == h.pairedFrom || client == h.seenFrom -> null
+        else -> h.seenFrom.ifEmpty { h.pairedFrom }
     }
 
     /** Forgets [id] and deletes its key: that computer's sudo falls back to the password. */
@@ -123,17 +145,21 @@ object Hosts {
         listOf(
             h.id, h.pairedAt.toString(), if (h.confirmed) "1" else "0",
             b64e.encodeToString(h.label.toByteArray()), b64e.encodeToString(h.pairedFrom.toByteArray()),
-        ).plus(listOfNotNull(h.hostKey)).joinToString("\t")
+        ).plus(
+            if (h.seenFrom.isEmpty()) listOfNotNull(h.hostKey)
+            else listOf(h.hostKey ?: "", b64e.encodeToString(h.seenFrom.toByteArray()))
+        ).joinToString("\t")
     }
 
     /** Lines that do not parse are skipped: a damaged entry must not take the others with it.
-     *  Five fields (paired before 2.0, or without a host key) or six (the host key, Base64). */
+     *  Five fields (paired before 2.0, or without a host key), six (the host key, Base64) or
+     *  seven (the host key or empty, then the last approved address, Base64). */
     fun decode(s: String): List<Host> = s.lineSequence().mapNotNull { line ->
         val f = line.split('\t')
-        if ((f.size != 5 && f.size != 6) || !validId(f[0])) return@mapNotNull null
+        if (f.size !in 5..7 || !validId(f[0])) return@mapNotNull null
         runCatching {
             Host(f[0], String(b64d.decode(f[3])), f[1].toLong(), f[2] == "1", String(b64d.decode(f[4])),
-                f.getOrNull(5)?.takeIf { it.isNotEmpty() })
+                f.getOrNull(5)?.takeIf { it.isNotEmpty() }, f.getOrNull(6)?.let { String(b64d.decode(it)) } ?: "")
         }.getOrNull()
     }.toList()
 
