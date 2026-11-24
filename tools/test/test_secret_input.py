@@ -147,11 +147,33 @@ class Input(unittest.TestCase):
             os.environ["HOME"] = self.old_home
         self.tmp.cleanup()
 
-    def run_cli(self, fault=None, value=b"hunter2", name="restic", why="weekly backup \u2713", tty=False):
+    def phone(self, fault=None, value=b"hunter2"):
         phone = FakePhone(self.phone_key, self.host_pub, value, fault)
         with open(self.pam, "w") as f:
             f.write("%s\nauth x pam_exec.so quiet probe phone=127.0.0.1:%d keys=%s\n%s\n" % (BEGIN, phone.port, self.keydir, END))
         phone.start()
+        return phone
+
+    def ask(self, out, to_tty=False, stderr=None):
+        """run_input with [out] as stdout (and [stderr] as fd 2) against a phone that answers."""
+        phone = self.phone()
+        saved = os.dup(2)
+        try:
+            if stderr is not None:
+                os.dup2(stderr, 2)
+            code = S.run_input("restic", "weekly backup", to_tty=to_tty, out=out, pam=self.pam)
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+        connected = phone.connected
+        if not connected:
+            socket.create_connection(("127.0.0.1", phone.port)).close()
+        phone.join(5)
+        phone.srv.close()
+        return code, connected
+
+    def run_cli(self, fault=None, value=b"hunter2", name="restic", why="weekly backup \u2713", tty=False):
+        phone = self.phone(fault, value)
         if tty:
             m, out = pty.openpty()
         else:
@@ -197,6 +219,53 @@ class Input(unittest.TestCase):
         code, _, phone = self.run_cli(tty=True)
         self.assertEqual(S.EX_USAGE, code)
         self.assertFalse(phone.connected)
+
+    # Where stdout goes is checked before the phone is asked: a fingerprint is never spent on a
+    # value that would land somewhere it should not.
+
+    def test_a_file_as_stdout_is_refused_before_anything_is_asked(self):
+        # A file keeps the secret on disk, readable by others under the usual umask.
+        path = os.path.join(self.tmp.name, "out")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o644)
+        try:
+            self.assertEqual((S.EX_USAGE, False), self.ask(fd))
+        finally:
+            os.close(fd)
+        self.assertEqual(0, os.path.getsize(path))
+
+    def test_a_closed_stdout_is_refused_before_anything_is_asked(self):
+        # With fd 1 closed, the next socket the CLI opens becomes fd 1.
+        fd = 900
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+        self.assertEqual((S.EX_USAGE, False), self.ask(fd))
+
+    def test_stderr_into_the_same_pipe_is_refused_before_anything_is_asked(self):
+        # `2>&1 |` would mix "waiting for your phone" into the value the program reads.
+        r, w = os.pipe()
+        try:
+            self.assertEqual((S.EX_USAGE, False), self.ask(w, stderr=w))
+        finally:
+            os.close(w)
+        with os.fdopen(r, "rb") as f:
+            self.assertIn(b"stderr", f.read())
+
+    def test_to_tty_with_stderr_on_the_same_terminal_writes_the_value(self):
+        m, t = pty.openpty()
+        try:
+            self.assertEqual((S.EX_OK, True), self.ask(t, to_tty=True, stderr=t))
+            self.assertIn(b"hunter2", os.read(m, 4096))
+        finally:
+            os.close(t)
+            os.close(m)
+
+    def test_a_reader_that_went_away_is_an_io_error(self):
+        r, w = os.pipe()
+        os.close(r)
+        try:
+            self.assertEqual((S.EX_IOERR, True), self.ask(w))
+        finally:
+            os.close(w)
 
     def test_usage(self):
         for name, why in (("a b", "x"), ("", "x"), ("x" * 65, "x"), ("ok", ""), ("ok", "two\nlines"),

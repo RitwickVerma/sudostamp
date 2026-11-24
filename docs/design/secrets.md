@@ -240,8 +240,13 @@ Why each field is there:
 sudostamp input <name> --why <text> [--to-tty]
 ```
 
-- Prints the secret to **stdout, raw, no newline**. Refuses (exit 64) when stdout is a terminal,
-  unless `--to-tty` (scrollback is disk, in the end).
+- Prints the secret to **stdout, raw, no newline**. Checks where stdout goes before asking, so no
+  fingerprint is spent on a value that would land in the wrong place. Refuses (exit 64) when stdout
+  is a terminal, unless `--to-tty` (scrollback is disk, in the end); when it is anything but a pipe
+  or a socket (a file keeps the secret on disk, readable under the usual umask); when it is closed
+  (the next socket this process opens would become fd 1); and when stderr is the same pipe
+  (`2>&1 |` would mix "waiting for your phone" into the value). A reader that goes away before it
+  has the value is exit 74.
 - Never takes a secret on argv, never reads it from the environment, never writes it to a file,
   log, history or the desktop app's event socket (the event says only "secret asked/answered").
 - Sets `RLIMIT_CORE` to 0 and `PR_SET_DUMPABLE` 0 before asking.
@@ -259,9 +264,10 @@ Exit codes (sysexits, consistent with `ask`):
 | Code | Meaning |
 |---|---|
 | 0 | secret written to stdout |
-| 64 | usage, or stdout is a terminal |
+| 64 | usage, or stdout is a terminal, a file, closed, or shared with stderr |
 | 65 | the phone's answer failed verification (sigK, decryption): nothing written |
 | 69 | this computer is not paired for secrets (no H, v2 pairing), or pyca missing |
+| 74 | the program reading stdout went away before it got the secret |
 | 75 | phone unreachable, Away, paused, or too old (`secret-hello` refused) |
 | 77 | refused, timed out or the sensor locked out |
 
@@ -369,6 +375,8 @@ the documented errors, no allocation past the frame cap.
 | 32-byte message to the secret path / tagged message to the sudo path | refused both ways | `refusal()` and the tag check |
 | timeout, deny, locked phone, Away, limiter | FAILURE; history has no name/reason | each in turn |
 | stdout is a TTY | exit 64, nothing asked | the isatty check |
+| stdout is a file, closed, or the pipe stderr also writes to | exit 64, nothing asked | the fstat checks |
+| the reader of stdout is gone | exit 74, no traceback | the write's error path |
 | host key file mode 0644 | exit 69 | the mode check |
 
 **End to end:** emulator with an enrolled fingerprint (`adb emu finger touch 1`), `tools/secret.py`

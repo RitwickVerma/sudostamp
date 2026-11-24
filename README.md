@@ -391,8 +391,8 @@ sudostamp input disk --why "open the backup disk" | sudo cryptsetup open --key-f
 
 The phone shows which computer asks, the name and the reason. You type the secret or let your
 password manager fill it, then touch the sensor; it goes, encrypted, to that one request and is
-written to the program's pipe. The phone keeps nothing, and the command refuses to print to a
-terminal. Needs `python3-cryptography` on the computer and a pairing made with 2.0
+written to the program's pipe. The phone keeps nothing, and the command writes only to a pipe: it
+refuses a terminal, a file, or `2>&1` before it asks. Needs `python3-cryptography` on the computer and a pairing made with 2.0
 ([docs/design/secrets.md](docs/design/secrets.md); what it does not protect: [SECURITY.md](SECURITY.md)).
 
 ## Development

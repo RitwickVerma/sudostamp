@@ -200,7 +200,7 @@ def keygen(path=None):
 # secret-hello (K -> Np), secret-request (signed by H over T), then the sealed answer. The value
 # goes to stdout only: never argv, the environment, a file or a log.
 
-EX_OK, EX_USAGE, EX_DATAERR, EX_UNAVAILABLE, EX_TEMPFAIL, EX_NOPERM = 0, 64, 65, 69, 75, 77
+EX_OK, EX_USAGE, EX_DATAERR, EX_UNAVAILABLE, EX_IOERR, EX_TEMPFAIL, EX_NOPERM = 0, 64, 65, 69, 74, 75, 77
 NAME_RE = re.compile(r"[A-Za-z0-9._@+-]{1,64}\Z")
 MAX_WHY_BYTES = 2048
 MAX_FRAME = 64 * 1024
@@ -411,10 +411,30 @@ def run_input(name, why, to_tty=False, out=1, pam=None):
     if not why_ok(why):
         say("--why must be one line of text, 1 to %d bytes" % MAX_WHY_BYTES)
         return EX_USAGE
-    if os.isatty(out) and not to_tty:
-        say("stdout is a terminal: pipe it to the program that needs it (or --to-tty, which "
-            "leaves the secret in your scrollback)")
+    # Where the value will go, checked before the phone is asked. A pipe or a socket hands it to one
+    # program; a file would keep it on disk; a closed fd 1 would be taken by the next file or socket
+    # this process opens; stderr in the same place would mix our messages into the value.
+    try:
+        st = os.fstat(out)
+    except OSError:
+        say("stdout is closed: pipe it to the program that needs it")
         return EX_USAGE
+    if os.isatty(out):
+        if not to_tty:
+            say("stdout is a terminal: pipe it to the program that needs it (or --to-tty, which "
+                "leaves the secret in your scrollback)")
+            return EX_USAGE
+    elif not (stat.S_ISFIFO(st.st_mode) or stat.S_ISSOCK(st.st_mode)):
+        say("stdout is not a pipe: the secret would stay in a file; pipe it to the program that needs it")
+        return EX_USAGE
+    else:
+        try:
+            se = os.fstat(2)
+        except OSError:
+            se = None
+        if se is not None and (se.st_dev, se.st_ino) == (st.st_dev, st.st_ino):
+            say("stderr goes where stdout goes (2>&1?): these messages would be mixed into the secret")
+            return EX_USAGE
     try:
         harden()
         import cryptography  # noqa: F401
@@ -473,8 +493,12 @@ def run_input(name, why, to_tty=False, out=1, pam=None):
         say("the connection to the phone failed: %s" % e)
         return EX_TEMPFAIL
     view = memoryview(value)
-    while view:
-        view = view[os.write(out, view):]
+    try:
+        while view:
+            view = view[os.write(out, view):]
+    except OSError as e:
+        say("the program reading stdout went away before it got the secret: %s" % e.strerror)
+        return EX_IOERR
     say("sent")
     return EX_OK
 
