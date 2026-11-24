@@ -175,7 +175,7 @@ phone    -> computer SUCCESS  string Np    32 random bytes, valid for this conne
 
 computer -> phone   secret-request-v1@sudostamp     (same connection, next frame)
                       string  kind        "input"  (phase 2: "unseal")
-                      string  name        what is asked for: 1..64 printable ASCII
+                      string  name        what is asked for: 1..64 of [A-Za-z0-9._@+-]
                       string  why         the context line: strict UTF-8, ≤ 2048 bytes, scrubbed as context-v1
                       string  pkR         HPKE recipient key, 65-byte uncompressed P-256, fresh per request
                       string  sigH        ECDSA(H, T), T = tag-req || K || Np || kind || name || why || pkR

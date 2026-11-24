@@ -170,8 +170,8 @@ object Pairing {
     fun cleanLabel(raw: ByteArray): String =
         String(raw, Charsets.US_ASCII).filter { it in ' '..'~' }.trim().take(64).ifEmpty { "a computer" }
 
-    /** Tag, then each part as an SSH string. */
-    private fun framed(tag: ByteArray, parts: Array<out ByteArray>): ByteArray {
+    /** [tag] then each part as an SSH string: the one transcript encoding (SecretProtocol uses it too). */
+    internal fun framed(tag: ByteArray, parts: Array<out ByteArray>): ByteArray {
         val o = ByteArrayOutputStream()
         o.write(tag)
         for (p in parts) {
