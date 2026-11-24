@@ -17,14 +17,15 @@ the phone.
   ([SECURITY.md](SECURITY.md), *Secrets typed on the phone*). Computers paired before keep working
   for sudo; pair one again to use secrets.
 - The history shows secret requests: what was sent and to which computer, and requests that were
-  turned away without their text.
+  turned away without their text. A denied or timed-out one says that nothing was sent.
 - A newly paired computer can ask for secrets only after you have approved one of its sudo
   requests. The secret screen shows the address the request came from and when that computer was
   paired, so two machines with the same name can be told apart.
 - Pairing a computer again with the same host key replaces its old entry on the phone.
 - Pairing by code ends with one question on the phone: *did the computer say the codes match?*
   The computer is recorded only after your Yes, so a pairing altered on the network can no longer
-  leave an entry behind; setup waits for that tap.
+  leave an entry behind; setup waits for that tap. Tapping No there shows *Not paired*, and the
+  computer stops waiting at once.
 - `sudostamp input` refuses a named pipe (`mkfifo`) as stdout: others could open it.
 - The reachability check no longer skips the phone when the key file has a comment line.
 

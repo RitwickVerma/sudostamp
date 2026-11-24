@@ -489,6 +489,9 @@ class Fuzz(unittest.TestCase):
             self.nh = None
             self.stage = 0
             self.done = False       # pair-done arrived; the person's yes lists the key
+            self.attests = fault in ("taps-no", "slow-yes")   # answers attest-v1 (an app since 1.5)
+            self.attest_asks = 0
+            self.lists = 0          # identities answers so far ("slow-yes": the yes comes on the third)
 
         def commitment(self):
             return P.commitment(P_KEY, self.np, self.dialled, self.stable)
@@ -504,7 +507,14 @@ class Fuzz(unittest.TestCase):
         def ext(self, name, payload, limit=4096):
             f = self.fault
             if name == getattr(P, "EXT_ATTEST", None):
-                return None   # a phone without attest-v1: pairing must still go through, unattested
+                if not self.attests:
+                    return None   # a phone without attest-v1: pairing must still go through, unattested
+                self.attest_asks += 1
+                # The phone serves the attestation while its pairing is open; after the person's
+                # No it refuses (PairingSession.attestation). "taps-no": open for the first ask only.
+                if f == "taps-no" and self.attest_asks > 1:
+                    return None
+                return P.s(P.attest_challenge(self.np, self.dialled, self.stable)) + P.s(b"not a real certificate")
             if name == P.EXT_COMMIT:
                 if f == "refuse-commit":
                     return None
@@ -547,7 +557,10 @@ class Fuzz(unittest.TestCase):
 
         def identities(self):
             # The phone lists a newly paired key only after the person taps Yes.
-            return [P_KEY] if self.done and self.fault != "no-yes" else []
+            self.lists += 1
+            if self.fault == "slow-yes" and self.lists < 3:
+                return []
+            return [P_KEY] if self.done and self.fault not in ("no-yes", "taps-no") else []
 
         def typed_code(self):
             return P.code(P_KEY, self.np, self.nh, self.dialled, self.stable, self.host)
@@ -612,6 +625,22 @@ class Fuzz(unittest.TestCase):
         self.assertEqual(out, "", err)
         self.assertIsNotNone(code)
         self.assertIn("NOT pinned", str(code) + err)
+
+    def test_no_on_the_phone_stops_the_wait(self):
+        # The person taps No: the phone stops serving this pairing's attestation, and pair.py stops
+        # waiting at once instead of after CONFIRM_S. Nothing is pinned.
+        assert P.CONFIRM_S >= 60
+        t = time.monotonic()
+        code, out, err = self.pair_once(Fuzz.Phone("taps-no"))
+        self.assertLess(time.monotonic() - t, 4, "pair.py waited for the yes after the phone's No")
+        self.assertEqual(out, "", err)
+        self.assertIn("NOT pinned", str(code) + err)
+        # While the pairing is open the attestation keeps coming: the wait goes on until the yes.
+        ph = Fuzz.Phone("slow-yes")
+        code, out, err = self.pair_once(ph)
+        self.assertIsNone(code, err)
+        self.assertTrue(out.startswith("ecdsa-sha2-nistp256 "), out)
+        self.assertGreaterEqual(ph.attest_asks, 2)
 
     def test_pairing_v3_carries_the_host_key_and_the_code_covers_it(self):
         code, out, err = self.pair_once(Fuzz.Phone(), host_key_pub=HOST_PUB.hex())

@@ -461,7 +461,7 @@ def pair_code(a):
     # whether this computer said the codes matched, and lists the key only after their yes.
     say("")
     say("  Codes match. On the phone, tap 'Yes, it said paired' to finish.")
-    if not wait_listed(a.phone, key, CONFIRM_S):
+    if not wait_listed(a.phone, key, CONFIRM_S, attested=not isinstance(chain, str)):
         sys.exit("the phone did not list this computer's key: it was not confirmed there -- NOT pinned.")
     return key, np_, dialled, stable, chain
 
@@ -469,8 +469,12 @@ def pair_code(a):
 CONFIRM_S = 120      # the phone's own window for the yes (Pairing.CODE_TTL_MS)
 
 
-def wait_listed(phone, key, seconds):
-    """True once the phone lists [key] (REQUEST_IDENTITIES), polled about once a second."""
+def wait_listed(phone, key, seconds, attested=False):
+    """True once the phone lists [key] (REQUEST_IDENTITIES), polled about once a second. False when
+    the time is up, or as soon as a phone that served this pairing's attestation refuses it: the
+    pairing is over there (the person tapped No, or left the screen). That refusal crosses the LAN
+    in clear and a party in the middle can fake it, but it only stops the wait: nothing is pinned
+    either way. A connection error is not a refusal and the wait goes on."""
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         try:
@@ -478,6 +482,8 @@ def wait_listed(phone, key, seconds):
             try:
                 if key in ag.identities():
                     return True
+                if attested and ag.ext(EXT_ATTEST, b"", limit=32768) is None:
+                    return False
             finally:
                 ag.close()
         except (OSError, ValueError, ConnectionError):

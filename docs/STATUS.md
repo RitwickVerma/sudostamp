@@ -29,6 +29,8 @@ and an enrolled virtual finger, real Keystore). **Not yet run on a real phone.**
 | found and fixed | a new computer's first secret request warned "if you did not just run sudo there" | superseded: a computer never approved cannot ask for a secret at all (red team, below) |
 | red team, host | the CLI as a process against a hostile fake phone and hostile redirections (12 attacks) | 4 holes (closed stdout, file, `2>&1`, reader gone), fixed; 12/12 refused; each guard red once under a mutant |
 | red team, phone | independent read-only review | no critical/high; fixed: pending computers asking, shared/stale host key, same-name computers, field leaks, guessable request ids, history flush, truncated v3 reveal |
+| found and fixed | No on the pairing confirm showed "A second device tried to pair"; a denied or timed-out secret row used sudo words ("No signature was sent") | own REJECTED state and "Not paired" screen; secret rows say nothing was sent (`6d84a26`); `HistoryScreenTest`, `PairingTest` red under 3 mutants; 251 JVM tests, 0 failures |
+| found and fixed | after No, `pair.py` waited out its 120 s for a yes that could not come | it stops as soon as the phone refuses the open pairing's attestation; `test_no_on_the_phone_stops_the_wait` red under the mutant, green after |
 
 Still to do before a release: one release-signed run on a real phone, with Autofill from a password
 manager, non-ASCII typed on its keyboard (`adb input text` cannot type it), and a `screencap` of the
