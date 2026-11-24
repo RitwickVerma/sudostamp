@@ -107,6 +107,10 @@ AFTER_CONTROL='[success=ignore ignore=ignore default=ignore]'
 # pam_fprintd on remote (SSH/mosh) sessions.
 FPRINT_TIMEOUT=15
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Every file root creates here starts out writable by root alone, whatever umask the caller had
+# (pkexec and `sudo -i` can hand on 000): each one is chmod-ed after it is written, and another user
+# must not be able to open it for writing in between and keep that handle past the rename.
+umask 022
 # How to tell the user to run us again: `sudostamp` when installed as a package, the bundle's
 # file name when run from the single-file download, else the path they used.
 PROG="${SUDOSTAMP_PROG:-$0}"

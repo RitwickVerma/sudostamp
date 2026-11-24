@@ -144,6 +144,16 @@ class AgentService : Service() {
             }
         }
 
+        /** The person said the computer reported the pairing: record it, as PENDING (trusted only
+         *  once one of its requests is approved). False if there was nothing to confirm. */
+        fun confirmPairing(ctx: Context): Boolean {
+            val c = pairing.confirm() ?: return false
+            val h = c.hostKey?.let { java.util.Base64.getEncoder().encodeToString(it) }
+            Hosts.add(ctx, Host(c.id, c.label ?: "a computer", System.currentTimeMillis(), false, c.client, h))
+            Log.i(TAG, "pairing: ${c.client} paired as ${c.id} (pending its first approval)")
+            return true
+        }
+
         /** Unpairs [id] (from the app's list of computers). */
         fun forget(ctx: Context, id: String) {
             Hosts.remove(ctx, id)
@@ -620,13 +630,9 @@ class AgentService : Service() {
             }
             Pairing.EXT_DONE -> {
                 val nh = r.blob()
-                val label = pairing.view().label ?: "a computer"
+                // Nothing is recorded yet: the person confirms on the phone (PairingSession.confirm).
                 val id = pairing.done(client, nh)
-                // Recorded as PENDING: trusted only once one of its requests is approved.
-                if (id != null) {
-                    Hosts.add(this, Host(id, label, System.currentTimeMillis(), false, client, hostKeyText()))
-                    Log.i(TAG, "pairing: $client paired as $id (pending its first approval)")
-                }
+                if (id != null) Log.i(TAG, "pairing: $client says the codes match; asking the person")
                 if (id != null) AgentProtocol.success() else AgentProtocol.failure()
             }
             Pairing.EXT_QR_HELLO -> {

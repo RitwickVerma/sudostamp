@@ -84,7 +84,13 @@ class PairingTest {
         assertEquals(PairingSession.State.CODE, p.view().state)
         assertEquals(Pairing.code(v.keyBlob, v.phoneNonce, nh, dialled, stable), p.view().code)
         assertEquals("0000000000000001", p.done("10.0.0.2", nh))
+        assertEquals("the person is asked first", PairingSession.State.CONFIRM, p.view().state)
+        val yes = p.confirm()!!
+        assertEquals("0000000000000001", yes.id)
+        assertEquals("edith", yes.label)
+        assertEquals("10.0.0.2", yes.client)
         assertEquals(PairingSession.State.DONE, p.view().state)
+        assertNull("confirmed once", p.confirm())
         assertEquals("a finished pairing's key is kept", emptyList<String>(), p.drainDiscarded())
         p.disarm()
         assertEquals("and kept when the screen closes", emptyList<String>(), p.drainDiscarded())
@@ -147,12 +153,70 @@ class PairingTest {
     }
 
     @Test
+    fun `a pairing the computer calls done is recorded only when the person confirms`() {
+        // A party in the middle can send pair-done itself for a pairing it altered (its own host
+        // key in the reveal): the person's computer pins nothing, and the person sees that there.
+        val p = session()
+        p.arm()
+        p.commit("10.0.0.66", 1)!!
+        p.reveal("10.0.0.66", 1, nh)!!
+        assertNotNull(p.done("10.0.0.66", nh))
+        assertNull("nothing to confirm twice over a second done", p.done("10.0.0.66", nh))
+        p.reject()
+        assertEquals(PairingSession.State.INTERRUPTED, p.view().state)
+        assertNull("no is final", p.confirm())
+        assertEquals(listOf("0000000000000001"), p.drainDiscarded())
+    }
+
+    @Test
+    fun `leaving the screen or the time running out before the yes throws the key away`() {
+        val left = session()
+        left.arm()
+        left.commit("10.0.0.2", 1)!!
+        left.reveal("10.0.0.2", 1, nh)!!
+        left.done("10.0.0.2", nh)!!
+        left.disarm()
+        assertNull(left.confirm())
+        assertEquals(1, left.drainDiscarded().size)
+
+        val late = session()
+        late.arm()
+        late.commit("10.0.0.2", 1)!!
+        late.reveal("10.0.0.2", 1, nh)!!
+        t += Pairing.CODE_TTL_MS - 1
+        late.done("10.0.0.2", nh)!!
+        t += Pairing.CODE_TTL_MS - 1
+        assertEquals("a fresh window for the yes", PairingSession.State.CONFIRM, late.view().state)
+        t += 1
+        assertEquals(PairingSession.State.EXPIRED, late.view().state)
+        assertNull(late.confirm())
+        assertEquals(1, late.drainDiscarded().size)
+    }
+
+    @Test
+    fun `nothing to confirm or reject before done, and reject after a yes changes nothing`() {
+        val p = session()
+        p.arm()
+        p.commit("10.0.0.2", 1)!!
+        p.reveal("10.0.0.2", 1, nh)!!
+        assertNull(p.confirm())
+        p.reject()
+        assertEquals(PairingSession.State.CODE, p.view().state)
+        p.done("10.0.0.2", nh)!!
+        p.confirm()!!
+        p.reject()
+        assertEquals(PairingSession.State.DONE, p.view().state)
+        assertEquals(emptyList<String>(), p.drainDiscarded())
+    }
+
+    @Test
     fun `after the arming window a late commit is only refused`() {
         val p = session()
         p.arm()
         p.commit("10.0.0.2", 1)!!
         p.reveal("10.0.0.2", 1, nh)!!
         p.done("10.0.0.2", nh)!!
+        p.confirm()!!
         t += Pairing.CODE_TTL_MS
         assertNull(p.commit("10.0.0.66", 2))
         assertEquals(PairingSession.State.DONE, p.view().state)

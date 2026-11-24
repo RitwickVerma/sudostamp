@@ -54,8 +54,10 @@ variables:
   SDK_BUILD_TOOLS: "36.0.0"
   CMDLINE_TOOLS_VERSION: "11076708"
 
-image: eclipse-temurin:17-jdk
+image: eclipse-temurin:17-jdk@sha256:7a0b2bc7e1372bb05ee361fb79e8a9e822df47343b8716253b3bbaa75060653e
 
+# Every image below is pinned by @sha256 (the tag stays for readability; Dependabot-style bumps are
+# a deliberate edit, see docs/RELEASING.md). A moved upstream tag can no longer change what runs here.
 # Every job runs on the self-hosted runner tagged `local` (docker executor): the shared
 # runners' free minutes ran out on the first pipelines (ci_quota_exceeded). The runner must
 # be enabled for this project (Settings > CI/CD > Runners) or jobs wait forever.
@@ -117,7 +119,7 @@ android:
 hygiene:
   stage: test
   extends: .not_scheduled
-  image: debian:stable-slim
+  image: debian:stable-slim@sha256:a64d9dbf633e2a2503afac76be521dc25d9b5765150b30d31a3914d4ae969cab
   cache: []
   script:
     - export DEBIAN_FRONTEND=noninteractive
@@ -134,6 +136,7 @@ hygiene:
     - python3 -I tools/test/test_pair.py && rm -rf tools/test/__pycache__ tools/__pycache__
     - python3 -I tools/test/test_secret.py && rm -rf tools/test/__pycache__ tools/__pycache__
     - python3 -I tools/test/test_secret_input.py && rm -rf tools/test/__pycache__ tools/__pycache__
+    - python3 -I tools/test/test_probe_keys.py && rm -rf tools/test/__pycache__ tools/__pycache__
     # The site (site/build.py): the app-link proof names the release certificate and the host the
     # app verifies, the privacy page carries every word of docs/PRIVACY_POLICY.md, nothing external.
     - python3 -I site/build.py --check && rm -rf site/out
@@ -162,13 +165,13 @@ host-e2e:
   parallel:
     matrix:
       - IMAGE:
-          - debian:trixie
-          - debian:bookworm
-          - ubuntu:24.04
-          - registry.fedoraproject.org/fedora:latest
-          - rockylinux/rockylinux:9
-          - registry.opensuse.org/opensuse/tumbleweed:latest
-          - archlinux:latest
+          - debian:trixie@sha256:3cda3ca472ce45507a5109c6a3907093e24d9ae67d55954c9a07a45665dafba2
+          - debian:bookworm@sha256:1d04200c2ece1d4d75a2a6f8e11ebce7d86a2ae28b34bb2c9cbb3ee9f4953e75
+          - ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b
+          - registry.fedoraproject.org/fedora:45@sha256:db14be5698ea04f1f9a4f4fb31945205a696a01f1466cf4a7e5f5a77ca3c7a82
+          - rockylinux/rockylinux:9@sha256:bb5755f96bec05ff26165e779ec843d7167544be9e50770508f307019a6d05c4
+          - registry.opensuse.org/opensuse/tumbleweed:latest@sha256:8d75d2997058df2cd0821d07e17a285b4548e77781a88c0dae8d1b17dbca3c1b
+          - archlinux:base-20261122.0.629543@sha256:375a401bb3c6376b37f40b6dfa25067db37ec78d0b7af67ae6315f43a0184a9d
   script:
     - SUDOSTAMP_SRC="$CI_PROJECT_DIR" bash tools/test/e2e.sh
 
@@ -273,7 +276,7 @@ site:
 # before anything slow starts. Also on release/* branches, so the merge request shows it.
 release-check:
   stage: test
-  image: alpine:3.20
+  image: alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
   cache: []
   before_script: []
   variables:
@@ -329,7 +332,7 @@ reproducible:
 sast-gate:
   stage: test
   extends: .not_scheduled
-  image: python:3.12-slim
+  image: python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
   cache: []
   before_script: []
   needs:
@@ -361,11 +364,12 @@ semgrep-sast:
       when: never
     - when: on_success
 
-# Every channel serves the newest tagged release (scripts/check-channels.sh). Runs from a daily
+# Every channel serves the newest tagged release (scripts/check-channels.sh), and the GitLab APK is the
+# one the signed SHA256SUMS lists, signed by the pinned release certificate (apksigner). Runs from a daily
 # pipeline schedule on master; silent when everything is in step, a failed pipeline when not.
 channels:
   stage: test
-  image: debian:stable-slim
+  image: debian:stable-slim@sha256:a64d9dbf633e2a2503afac76be521dc25d9b5765150b30d31a3914d4ae969cab
   cache: []
   before_script: []
   variables:
@@ -374,7 +378,7 @@ channels:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
   script:
     - export DEBIAN_FRONTEND=noninteractive
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends bash ca-certificates curl git openssh-client >/dev/null
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends apksigner bash ca-certificates curl git openssh-client python3 >/dev/null
     - git config --global --add safe.directory "$CI_PROJECT_DIR"
     - V=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1)
     - echo "newest tag $V"

@@ -25,8 +25,9 @@
 #       before uploading), pushes the host package to the AUR (scripts/publish-aur.sh), uploads
 #       the bundle and listing to Google Play (tools/play_publish.py), has CI rebuild the APK from
 #       the tag and compare bytes with the published one (scripts/run-ci-job.sh: the `reproducible`
-#       job), and ends with scripts/check-channels.sh. Exit 0 only when every channel has X.Y.Z
-#       and the rebuild matched.
+#       job), and ends with scripts/check-channels.sh. Order: GitLab Release, then the CI rebuild,
+#       and only if it matches the AUR and Google Play. Exit 0 only when every channel has X.Y.Z
+#       and the rebuild matched; a mismatch stops with exit 3 before AUR and Play.
 #
 # Signing material, read from the maintainer's infrastructure checkout (SUDOSTAMP_HOMELAB_INFRA,
 # default ../homelab-infra) at origin/master, so the checkout's own branch does not matter:
@@ -141,6 +142,22 @@ except Exception: print("unknown")')
   trap cleanup_ship EXIT
   cp "$WT/dist/sudostamp-$TAG.aab" "$AAB_KEEP/" || die "$MODE_AT left no app bundle (tags before 1.4.1 build none)"
 
+  # The supply-chain proof, BEFORE the channels that cannot be taken back: CI (no secret) rebuilds the
+  # APK from the tag, copies the published signature onto it and compares bytes. The GitLab Release has
+  # to exist for that (it compares the APK anyone downloads), so it is the one channel already out; AUR
+  # and Google Play wait for the result. A mismatch stops here with exit 3: delete the Release, find
+  # out why, and re-run (the Release is gone, so ship publishes again). It is a manual job that this
+  # plays, not an automatic one, because the tag pipeline must be green BEFORE publish (above) and a
+  # job waiting for the Release would hold that pipeline open for ever.
+  step "reproducible build (CI rebuilds $TAG and compares it with the published APK)"
+  ok_repro=0
+  scripts/run-ci-job.sh "$TAG" reproducible 90 && ok_repro=1
+  if [ "$ok_repro" != 1 ]; then
+    echo "Reproducible build: NOT proven -- AUR and Google Play were NOT updated. See the CI job above, or run scripts/verify-reproducible.sh $VERSION." >&2
+    echo "If the rebuild differs, the published APK is not this source: delete the GitLab Release and its packages before anything else." >&2
+    exit 3
+  fi
+
   ok_aur=0; ok_play=0
   step "AUR"
   scripts/publish-aur.sh "$VERSION" && ok_aur=1
@@ -158,20 +175,11 @@ except Exception: print("unknown")')
   fi
   rm -rf "$SA"
 
-  # The supply-chain proof: CI (no secret) rebuilds the APK from the tag, copies the published
-  # signature onto it and compares bytes. It is a manual job that this plays, not an automatic one,
-  # because the tag pipeline must be green BEFORE publish (above) and a job waiting for the Release
-  # would hold that pipeline open for ever.
-  step "reproducible build (CI rebuilds $TAG and compares it with the published APK)"
-  ok_repro=0
-  scripts/run-ci-job.sh "$TAG" reproducible 90 && ok_repro=1
-
   step "every channel"
   scripts/check-channels.sh "$VERSION"; ok_all=$?
   [ "$ok_aur" = 1 ] || echo "AUR: NOT updated -- ssh-add ~/.ssh/aur, then scripts/publish-aur.sh $VERSION" >&2
   [ "$ok_play" = 1 ] || echo "Google Play: NOT updated" >&2
-  [ "$ok_repro" = 1 ] || echo "Reproducible build: NOT proven -- see the CI job above, or run scripts/verify-reproducible.sh $VERSION" >&2
-  [ "$ok_all" = 0 ] && [ "$ok_aur" = 1 ] && [ "$ok_play" = 1 ] && [ "$ok_repro" = 1 ] || exit 3
+  [ "$ok_all" = 0 ] && [ "$ok_aur" = 1 ] && [ "$ok_play" = 1 ] || exit 3
   echo "$TAG is out on every channel (Play after Google's review)"
   exit 0
 fi

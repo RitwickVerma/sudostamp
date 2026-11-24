@@ -253,6 +253,14 @@ def parse_addr(a):
     return host, int(port)
 
 
+def anonymous_pipe(fd):
+    """True only for a pipe with no name in the file system (`a | b`). Unknown is not anonymous."""
+    try:
+        return os.readlink("/proc/self/fd/%d" % fd).startswith("pipe:[")
+    except OSError:
+        return False
+
+
 def pinned_keys(path):
     """The ecdsa-sha2-nistp256 key blobs in an authorized-keys file (the phone's keys for this user)."""
     import base64
@@ -427,6 +435,11 @@ def run_input(name, why, to_tty=False, out=1, pam=None):
             return EX_USAGE
     elif not (stat.S_ISFIFO(st.st_mode) or stat.S_ISSOCK(st.st_mode)):
         say("stdout is not a pipe: the secret would stay in a file; pipe it to the program that needs it")
+        return EX_USAGE
+    elif stat.S_ISFIFO(st.st_mode) and not anonymous_pipe(out):
+        # mkfifo makes a pipe with a name: whoever can open it (0644 under the usual umask) may
+        # read the value first. Only a pipe the shell made between two programs has no name.
+        say("stdout is a named pipe (mkfifo) that others may open: pipe it to the program that needs it")
         return EX_USAGE
     else:
         try:

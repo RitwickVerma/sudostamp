@@ -460,6 +460,11 @@ rest, and whether section 12 must be solved before release.
   - The field allows only paste and select-all, enforced in `onTextContextMenuItem` (menus and
     hardware shortcuts alike); no long press while shown (drag); no extract UI; sensitive to
     accessibility on API 34+. UTF-8 is encoded into one worst-case buffer that is then zeroed.
+  - Code pairing ends with the person's confirmation on the phone (`PairingSession.State.CONFIRM`):
+    pair-done crosses the LAN, so a party in the middle could send it for a pairing whose reveal it
+    altered (its own H), leaving an entry the person's computer never pinned. `pair.py` waits until
+    the phone lists the new key (only after the Yes) before pinning. QR mode is unchanged: its
+    pair-done proves the scanned secret.
   - Request ids are random, not counted (the activity is exported). Refusals are trimmed from the
     history before decisions. A v3 reveal with no H at all ends the pairing like a bad H.
   - The CLI checks where stdout goes before asking: a terminal (without `--to-tty`), a file, a

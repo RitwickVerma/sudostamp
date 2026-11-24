@@ -1057,6 +1057,25 @@ class MainActivity : Activity() {
                         matchWrap(top = dp(20)))
                     addView(button(getString(R.string.cancel), Kind.GHOST) { cancelPairing() }, wrap(top = dp(16)))
                 }
+                PairingSession.State.CONFIRM -> {
+                    // The one question that closes a substituted pairing: only the person's computer
+                    // knows whether the code they typed matched (PairingSession, "THE PERSON CONFIRMS").
+                    addView(text(getString(R.string.pair_overline), Type.OVERLINE, Ui.ACCENT, center = true), matchWrap())
+                    addView(text(getString(R.string.pair_confirm_title, v.label ?: ""), Type.TITLE, center = true).apply {
+                        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+                    }, matchWrap(top = dp(16)))
+                    addView(text(getString(R.string.pair_confirm_body, v.client ?: ""), Type.BODY, Ui.MUTED, center = true),
+                        matchWrap(top = dp(10)))
+                    addView(button(getString(R.string.pair_confirm_yes), Kind.PRIMARY) {
+                        AgentService.confirmPairing(this@MainActivity)
+                        sync()
+                    }, matchWrap(top = dp(28)))
+                    addView(button(getString(R.string.pair_confirm_no), Kind.GHOST) {
+                        AgentService.pairing.reject()
+                        AgentService.discardAbandoned(this@MainActivity)
+                        sync()
+                    }, wrap(top = dp(8)))
+                }
                 PairingSession.State.DONE -> {
                     addView(ResultMark(context, Ui.ACCENT, true, getString(R.string.pair_done)).apply {
                         layoutParams = LinearLayout.LayoutParams(dp(120), dp(120)).apply { gravity = Gravity.CENTER_HORIZONTAL }

@@ -30,8 +30,9 @@ tools/verify.sh                                           # four gates; needs JA
   they replace `/etc/pam.d/sudo`. `stage` and `test` leave it alone.
 - Desktop app (Rust, `desktop/`, toolchain pinned in `desktop/rust-toolchain.toml`):
   `cargo build --release --locked`; `target/release/sudostamp-desktop` (tray) or `... window`.
-  `SUDOSTAMP_INSTALLER=<path>` runs a checkout's or a fake installer; `SUDOSTAMP_PKEXEC` replaces
-  pkexec in tests only. Never install or autostart it on a machine you were not asked to.
+  `SUDOSTAMP_INSTALLER=<path>`, `SUDOSTAMP_PAIR` and `SUDOSTAMP_PKEXEC` (a checkout's or a fake
+  installer, pair.py, pkexec) work only in a build with `--features test-hooks`; a normal build runs
+  `/usr/bin/sudostamp` and a root-owned pair.py with `/usr/bin/python3`, nothing else. Never install or autostart it on a machine you were not asked to.
 
 ## Test
 

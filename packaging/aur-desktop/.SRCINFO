@@ -10,7 +10,7 @@ pkgbase = sudostamp-desktop
 	license = OFL-1.1
 	license = LicenseRef-Ubuntu-Font-1.0
 	makedepends = cargo
-	depends = sudostamp
+	depends = sudostamp>=1.7.0
 	depends = polkit
 	depends = gcc-libs
 	depends = glibc

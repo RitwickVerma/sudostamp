@@ -5,7 +5,8 @@ Versions are the app's `versionName`. The host-side tooling is versioned with th
 ## Unreleased (2.0)
 
 Programs on a paired computer can ask your phone for a secret, which you type or fill and approve
-with your fingerprint. Pair again to use it.
+with your fingerprint. Pair again to use it. Pairing by code now ends with one confirming tap on
+the phone.
 
 ### Secrets
 - **`sudostamp input <name> --why <text>`** asks the phone and writes the secret to the program that
@@ -21,6 +22,20 @@ with your fingerprint. Pair again to use it.
   requests. The secret screen shows the address the request came from and when that computer was
   paired, so two machines with the same name can be told apart.
 - Pairing a computer again with the same host key replaces its old entry on the phone.
+- Pairing by code ends with one question on the phone: *did the computer say the codes match?*
+  The computer is recorded only after your Yes, so a pairing altered on the network can no longer
+  leave an entry behind; setup waits for that tap.
+- `sudostamp input` refuses a named pipe (`mkfifo`) as stdout: others could open it.
+- The reachability check no longer skips the phone when the key file has a comment line.
+
+### Desktop
+- A sudo notification is shown only for a real sudo (running as root on your behalf): a program
+  that just calls itself `sudo` can no longer put a harmless-looking command on screen, and a flood
+  of forged events can no longer push the real one out. Under `hidepid` no sudo events are shown.
+- The app runs only the installed `sudostamp` and a root-owned `pair.py` with `/usr/bin/python3`;
+  the `SUDOSTAMP_*` overrides need a build with `--features test-hooks`.
+- The AUR package `sudostamp-desktop` needs `sudostamp>=1.7.0`. The AUR package `sudostamp` no
+  longer pulls in the AUR's `pam_rssh`: setup builds its own pinned, patched module.
 - `sudostamp input` writes only to a pipe. It refuses a terminal (unless `--to-tty`), a file, a
   closed stdout, or stderr in the same pipe (`2>&1`), before it asks the phone.
 - A flood of refused requests can no longer push your own approvals out of the history.

@@ -263,7 +263,9 @@ one-in-a-million guess, and the phone allows **one** attempt per tap of *Pair a 
 attempt while the pairing screen is open cancels the pairing, even one that already finished.
 Something that answers in the phone's place and passes everything through unchanged is caught too:
 the phone states the address it was reached at, and it is not the relay's. You *type* the code, so
-it really gets compared. The protocol is documented in
+it really gets compared. Only the computer learns whether it matched, so the phone then asks you
+one thing: did the computer say the codes match? It keeps the computer only after your *Yes*.
+The protocol is documented in
 [`Pairing.kt`](app/src/main/java/com/ritwick/sudostamp/Pairing.kt) and tested in CI, with a
 simulated man in the middle and a relay, on every supported distribution.
 

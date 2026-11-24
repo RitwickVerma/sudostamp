@@ -46,22 +46,46 @@ pub fn user(env: Env) -> Option<String> {
         .find(|u| crate::keys::valid_user(u))
 }
 
-/// The installer to run. `SUDOSTAMP_INSTALLER` (tests, a checkout's `tools/install.sh`) wins over
-/// the packaged `/usr/bin/sudostamp`. A privileged run refuses a path that is not root-owned
-/// (`exec::privileged`), so an override cannot be used to escalate.
+/// Whether the `SUDOSTAMP_*` overrides (another installer, another pair.py, a pkexec stand-in)
+/// are honoured: in this crate's own tests and in a `--features test-hooks` build, never in a
+/// package. Each function that reads one takes it as an argument, so a test can show what a
+/// release build does.
+pub const TEST_HOOKS: bool = cfg!(any(test, feature = "test-hooks"));
+
+/// The installer to run: the packaged `/usr/bin/sudostamp`. Under `TEST_HOOKS` only,
+/// `SUDOSTAMP_INSTALLER` (tests, a checkout's `tools/install.sh`) wins over it. In a package an
+/// environment variable must not choose what pkexec runs as root: the root-owned check alone
+/// would accept any system binary (`/usr/bin/bash apply`), and `exec::privileged` refuses all
+/// but the packaged path too.
 pub fn installer(env: Env, system_exists: bool) -> Option<PathBuf> {
-    absolute(env("SUDOSTAMP_INSTALLER"))
+    installer_hooks(env, system_exists, TEST_HOOKS)
+}
+
+fn installer_hooks(env: Env, system_exists: bool, hooks: bool) -> Option<PathBuf> {
+    hooks
+        .then(|| absolute(env("SUDOSTAMP_INSTALLER")))
+        .flatten()
         .or_else(|| system_exists.then(|| PathBuf::from(SYSTEM_INSTALLER)))
 }
 
-/// `pair.py` (phone discovery): `SUDOSTAMP_PAIR`, else beside a checkout's installer, else the
-/// packaged copy.
+/// `pair.py` (phone discovery): `SUDOSTAMP_PAIR` (under `TEST_HOOKS` only), else beside the
+/// installer (a checkout's, which only `TEST_HOOKS` can name), else the packaged copy. It is handed
+/// the QR secret, and `exec::discover` runs it only if root owns it and every directory above.
 pub fn pair_script(
     env: Env,
     installer: Option<&Path>,
     exists: &dyn Fn(&Path) -> bool,
 ) -> Option<PathBuf> {
-    if let Some(p) = absolute(env("SUDOSTAMP_PAIR")) {
+    pair_script_hooks(env, installer, exists, TEST_HOOKS)
+}
+
+fn pair_script_hooks(
+    env: Env,
+    installer: Option<&Path>,
+    exists: &dyn Fn(&Path) -> bool,
+    hooks: bool,
+) -> Option<PathBuf> {
+    if hooks && let Some(p) = absolute(env("SUDOSTAMP_PAIR")) {
         return Some(p);
     }
     let beside = installer
@@ -136,6 +160,32 @@ mod tests {
         assert_eq!(
             installer(&env(&[("SUDOSTAMP_INSTALLER", "rel/x")]), false),
             None
+        );
+    }
+
+    #[test]
+    fn outside_tests_only_the_packaged_installer_is_run() {
+        // A release build: SUDOSTAMP_INSTALLER would let an environment variable pick what
+        // pkexec runs as root (any root-owned binary passes the ownership check).
+        let with = env(&[("SUDOSTAMP_INSTALLER", "/usr/bin/bash")]);
+        assert_eq!(
+            installer_hooks(&with, true, false),
+            Some(SYSTEM_INSTALLER.into())
+        );
+        assert_eq!(installer_hooks(&with, false, false), None);
+    }
+
+    #[test]
+    fn outside_tests_sudostamp_pair_is_ignored() {
+        // A release build: pair.py reads the QR secret, so it is never taken from the
+        // environment (~/.config/environment.d is the user's, and so anything of theirs).
+        let no = |_: &Path| false;
+        let e = env(&[("SUDOSTAMP_PAIR", "/home/u/.local/evil.py")]);
+        assert_eq!(pair_script_hooks(&e, None, &no, false), None);
+        let only_system = |p: &Path| p == Path::new(SYSTEM_PAIR);
+        assert_eq!(
+            pair_script_hooks(&e, None, &only_system, false),
+            Some(SYSTEM_PAIR.into())
         );
     }
 

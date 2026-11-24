@@ -9,7 +9,9 @@ pkgdesc="Approve sudo with your Android phone's fingerprint (computer side: pair
 arch=('any')
 url="https://gitlab.com/ritwick7/sudostamp"
 license=('MIT')
-depends=('bash' 'python' 'openssh' 'pam_rssh')
+# Not the AUR's pam_rssh: `sudostamp setup` builds its own from a pinned commit with the pinned
+# timeouts patch (tools/install.sh, install_pam_rssh), and installs what that build needs itself.
+depends=('bash' 'python' 'openssh')
 optdepends=("fprintd: try this computer's own fingerprint reader first when at the desk"
             "python-cryptography: sudostamp input (secrets typed on the phone)")
 source=("$pkgname-v$pkgver.tar.gz::$url/-/archive/v$pkgver/$pkgname-v$pkgver.tar.gz")

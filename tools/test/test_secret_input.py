@@ -233,6 +233,19 @@ class Input(unittest.TestCase):
             os.close(fd)
         self.assertEqual(0, os.path.getsize(path))
 
+    def test_a_named_fifo_as_stdout_is_refused_before_anything_is_asked(self):
+        # A FIFO in the file system is a pipe anyone who can open it reads (mkfifo makes it 0644
+        # under the usual umask): the secret would go to whoever opens it first.
+        path = os.path.join(self.tmp.name, "fifo")
+        os.mkfifo(path, 0o644)
+        r = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        w = os.open(path, os.O_WRONLY)
+        try:
+            self.assertEqual((S.EX_USAGE, False), self.ask(w))
+        finally:
+            os.close(w)
+            os.close(r)
+
     def test_a_closed_stdout_is_refused_before_anything_is_asked(self):
         # With fd 1 closed, the next socket the CLI opens becomes fd 1.
         fd = 900

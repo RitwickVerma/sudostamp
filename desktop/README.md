@@ -45,7 +45,10 @@ target/release/sudostamp-desktop            # tray + notifications (what autosta
 target/release/sudostamp-desktop window     # the window
 ```
 
-Against a checkout instead of the package: `SUDOSTAMP_INSTALLER=$PWD/../tools/install.sh`.
+Against a checkout instead of the package: build with `--features test-hooks` and set
+`SUDOSTAMP_INSTALLER=$PWD/../tools/install.sh` (and `SUDOSTAMP_PAIR`, `SUDOSTAMP_PKEXEC`). A build
+without that feature, which is every package, ignores all three: it runs only `/usr/bin/sudostamp`
+and a root-owned `/usr/lib/sudostamp/pair.py`, with `/usr/bin/python3`.
 Arch: the AUR package `sudostamp-desktop` installs the binary, the menu entry and an autostart
 entry for every user. GNOME shows tray icons only with the AppIndicator extension
 (`gnome-shell-extension-appindicator`); KDE, Xfce, Cinnamon and most others need nothing.

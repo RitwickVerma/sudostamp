@@ -81,7 +81,11 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
   displaying it.
 - `sudo_pid` is the probe's `$PPID`: `pam_exec` forks the probe from inside sudo's own process.
   `command` comes from `/proc/$PPID/cmdline`, which is world-readable, so the dropped sender reads
-  it without privilege (on a `hidepid` /proc it is empty, and the notification says "sudo").
+  it without privilege. The sender must be a real sudo: real uid the user's, **effective uid 0**
+  (`/proc/<pid>/status`), so a process that merely calls itself `sudo` is dropped. On a `hidepid`
+  /proc none of that can be read, and the event is dropped (no notification) rather than shown
+  unchecked. The rate limit (60 per 10 s) counts only events that passed these checks, so forged
+  ones cannot push a real one out.
 - The after-hook is the line right after `pam_rssh`. It runs whenever the phone path did not
   authenticate, which includes the probe having skipped `pam_rssh`. The app correlates by
   `sudo_pid`: after a `skipped` it ignores the `not-approved` for the same pid.
@@ -151,7 +155,7 @@ pause the phone path for a while. Setup and repair need a terminal and the exact
   `pam_exec` forks inside sudo during authentication. The app ignores children present when the
   event arrives and any whose command line names `sudostamp-probe` or `sudostamp-is-local`: rename
   either helper and `track.rs` must follow. The user can read sudo's `task/*/children` (checked
-  on Debian and Arch); under `hidepid` the app cannot, and says nothing rather than guess.
+  on Debian and Arch); under `hidepid` the app shows no sudo events at all (above).
 - **Needs attention** comes from doctor's `fail`s except `phone`, which fails whenever the phone is
   away: the app's own REQUEST_IDENTITIES tells Away from a wrong key, and a wrong key is Needs
   attention.

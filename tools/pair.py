@@ -157,8 +157,12 @@ def host_key_pub(text):
 
 
 def older_phone():
-    say("  The phone's app is older than 2.0: paired for sudo only. Update the app and pair again")
-    say("  to use `sudostamp input`.")
+    # A refusal is all a phone older than 2.0 sends, and all a middle party needs to send too, so
+    # this cannot tell them apart. Either way the phone holds no host key: secrets stay refused
+    # (fail closed), sudo works as before.
+    say("  The phone refused the 2.0 pairing: paired for sudo only. If its app is older than 2.0,")
+    say("  update it; if not, something on this network interfered. Pair again to use")
+    say("  `sudostamp input`.")
 
 
 def qr_phone_mac(secret, nh, nc, key, np_, dialled, stable):
@@ -453,7 +457,33 @@ def pair_code(a):
         ok = False
     if not ok:
         sys.exit("the phone did not confirm the pairing (it may have been cancelled on the phone) -- NOT pinned.")
+    # pair-done crossed the network, so the phone cannot take it as proof: it asks the person
+    # whether this computer said the codes matched, and lists the key only after their yes.
+    say("")
+    say("  Codes match. On the phone, tap 'Yes, it said paired' to finish.")
+    if not wait_listed(a.phone, key, CONFIRM_S):
+        sys.exit("the phone did not list this computer's key: it was not confirmed there -- NOT pinned.")
     return key, np_, dialled, stable, chain
+
+
+CONFIRM_S = 120      # the phone's own window for the yes (Pairing.CODE_TTL_MS)
+
+
+def wait_listed(phone, key, seconds):
+    """True once the phone lists [key] (REQUEST_IDENTITIES), polled about once a second."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        try:
+            ag = Agent(phone, timeout=3)
+            try:
+                if key in ag.identities():
+                    return True
+            finally:
+                ag.close()
+        except (OSError, ValueError, ConnectionError):
+            pass
+        time.sleep(1)
+    return False
 
 
 def pair_qr(a, secret):

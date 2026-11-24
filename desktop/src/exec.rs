@@ -143,16 +143,39 @@ pub fn doctor(installer: &Path) -> Result<Report, String> {
 /// the secret of this window's QR code (`qr`, sent on stdin), which of them scanned it. Exit 1
 /// only means none were found.
 pub fn discover(pair_py: &Path, qr: Option<&str>) -> Result<Vec<Phone>, String> {
-    let mut cmd = Command::new("python3");
+    discover_hooks(pair_py, qr, crate::paths::TEST_HOOKS)
+}
+
+/// By absolute path, never from PATH: a `python3` earlier in the user's PATH would be handed the
+/// QR secret, and its "qr" answer starts the pkexec setup with no click.
+const PYTHON3: &str = "/usr/bin/python3";
+
+fn discover_cmd(pair_py: &Path, qr: Option<&str>) -> Command {
+    let mut cmd = Command::new(PYTHON3);
     cmd.arg("-I")
         .arg(pair_py)
         .args(["discover", "--timeout", "3"]);
     if qr.is_some() {
         cmd.arg("--qr-stdin");
     }
+    cmd
+}
+
+/// pair.py must be root-owned all the way up, like the installer (`root_owned`): it reads the
+/// secret, and a copy the user can change is anything of the user's. Only `TEST_HOOKS` runs
+/// another (a checkout's, a test's stand-in).
+fn discover_hooks(pair_py: &Path, qr: Option<&str>, hooks: bool) -> Result<Vec<Phone>, String> {
+    let real = fs::canonicalize(pair_py).map_err(|e| format!("{}: {e}", pair_py.display()))?;
+    if !hooks && !root_owned(&real) {
+        return Err(format!(
+            "{} is not owned by root (or it or a directory above it can be written by others): refusing to hand it the pairing secret",
+            real.display()
+        ));
+    }
+    let cmd = discover_cmd(&real, qr);
     let input = qr.map(|s| format!("{s}\n").into_bytes());
     let (status, out, _) = capture_with(cmd, input.as_deref(), DISCOVER_TIMEOUT, MAX_OUTPUT)
-        .map_err(|e| format!("cannot run python3: {e}"))?;
+        .map_err(|e| format!("cannot run {PYTHON3}: {e}"))?;
     match status {
         Some(0 | 1) => Ok(setup::parse_discover(&String::from_utf8_lossy(&out))),
         Some(c) => Err(format!("discovery failed (exit {c})")),
@@ -175,18 +198,31 @@ const PKEXEC: &str = "/usr/bin/pkexec";
 
 /// The pkexec stand-in for tests (a stub that runs the installer unprivileged). Compiled out of a
 /// release build: an environment variable must never be able to switch off the root-owned check.
-fn pkexec_stub(env: Env) -> Option<String> {
-    if cfg!(any(test, feature = "test-hooks")) {
-        env("SUDOSTAMP_PKEXEC")
-    } else {
-        None
-    }
+fn pkexec_stub(env: Env, hooks: bool) -> Option<String> {
+    if hooks { env("SUDOSTAMP_PKEXEC") } else { None }
 }
 
 /// The command line for a privileged installer run: `/usr/bin/pkexec <resolved installer> <args>`.
-/// The installer must be root-owned all the way up (only the test stub skips that).
+/// The installer must be `/usr/bin/sudostamp` (another only under `TEST_HOOKS`) and root-owned
+/// all the way up (only the test stub skips that).
 pub fn privileged(installer: &Path, args: &[String], env: Env) -> Result<Command, String> {
-    let stub = pkexec_stub(env);
+    privileged_hooks(installer, args, env, crate::paths::TEST_HOOKS)
+}
+
+fn privileged_hooks(
+    installer: &Path,
+    args: &[String],
+    env: Env,
+    hooks: bool,
+) -> Result<Command, String> {
+    let stub = pkexec_stub(env, hooks);
+    if !hooks && installer != Path::new(crate::paths::SYSTEM_INSTALLER) {
+        return Err(format!(
+            "{} is not {}: refusing to run it with administrator rights",
+            installer.display(),
+            crate::paths::SYSTEM_INSTALLER
+        ));
+    }
     let real = fs::canonicalize(installer).map_err(|e| format!("{}: {e}", installer.display()))?;
     if stub.is_none() && !root_owned(&real) {
         return Err(format!(
@@ -551,7 +587,7 @@ echo "{\"v\":1,\"done\":true,\"attestation\":\"\",\"phone\":\"$*\",\"text\":\"$s
              print('192.168.1.20:7777\\tPixel\\t' + ('qr' if s == 'SECRET' else 'no'))\n",
         )
         .unwrap();
-        if Command::new("python3").arg("-V").output().is_err() {
+        if Command::new(PYTHON3).arg("-V").output().is_err() {
             return; // no python3 in this test environment: nothing to run it with
         }
         let p = discover(&py, Some("SECRET")).unwrap();
@@ -559,6 +595,45 @@ echo "{\"v\":1,\"done\":true,\"attestation\":\"\",\"phone\":\"$*\",\"text\":\"$s
         assert!(p[0].scanned);
         assert!(!discover(&py, Some("OTHER")).unwrap()[0].scanned);
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn discovery_runs_python_by_absolute_path() {
+        // A `python3` earlier in the user's PATH would read the QR secret.
+        let cmd = discover_cmd(Path::new("/usr/lib/sudostamp/pair.py"), Some("S"));
+        assert_eq!(cmd.get_program(), "/usr/bin/python3");
+    }
+
+    #[test]
+    fn outside_tests_discovery_refuses_a_pair_py_not_owned_by_root() {
+        // Under the temp directory (the user's, or a world-writable /tmp under CI's root): the
+        // file could be anybody's program, and it is handed the QR secret.
+        let d = std::env::temp_dir().join(format!("sudostamp-discown-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let py = d.join("pair.py");
+        fs::write(&py, "print('203.0.113.9:7777\\tPixel\\tqr')\n").unwrap();
+        let r = discover_hooks(&py, Some("SECRET"), false);
+        fs::remove_dir_all(&d).unwrap();
+        let e = r.expect_err("a user's pair.py is refused");
+        assert!(e.contains("not owned by root"), "{e}");
+        // A root-owned file passes that check (what python then makes of it is another matter).
+        if let Err(e) = discover_hooks(Path::new("/usr/bin/true"), None, false) {
+            assert!(!e.contains("not owned by root"), "{e}");
+        }
+    }
+
+    #[test]
+    fn outside_tests_pkexec_runs_only_the_packaged_installer() {
+        // A root-owned binary is not therefore the installer: `/usr/bin/env apply` as root is
+        // not what the polkit prompt was for. And the stub is ignored, so the checks stay on.
+        let stub = |k: &str| (k == "SUDOSTAMP_PKEXEC").then(|| "/usr/bin/env".to_string());
+        assert_eq!(pkexec_stub(&stub, false), None);
+        let e = privileged_hooks(Path::new("/usr/bin/env"), &["apply".into()], &stub, false)
+            .unwrap_err();
+        assert!(e.contains(crate::paths::SYSTEM_INSTALLER), "{e}");
+        let p = script("ownedrel", "true");
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(privileged_hooks(&p, &["apply".into()], &stub, false).is_err());
     }
 
     #[test]

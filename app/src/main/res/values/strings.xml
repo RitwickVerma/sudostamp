@@ -67,6 +67,10 @@
     <string name="pair_code_title">Type this code on %1$s</string>
     <string name="pair_code_from">Requested from %1$s</string>
     <string name="pair_code_hint">Only on the computer you are setting up. If you did not start this, tap Cancel.</string>
+    <string name="pair_confirm_title">Did %1$s say “Codes match”?</string>
+    <string name="pair_confirm_body">Look at the computer you are setting up (it reached this phone from %1$s). Tap Yes only if it said the codes match. If it said nothing was pinned, tap No: something on the network changed the pairing.</string>
+    <string name="pair_confirm_yes">Yes, it said paired</string>
+    <string name="pair_confirm_no">No</string>
     <string name="pair_done">Paired</string>
     <string name="pair_done_detail">%1$s now has its own key on this phone. Approve its test request next: until one of its requests is approved, it is marked as new.</string>
     <string name="pair_finish">Done</string>

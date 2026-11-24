@@ -66,6 +66,8 @@ class PairingV3Test {
         p.reveal("10.0.0.2", 1, nh, h)!!
         assertNull("not before done", p.doneHostKey())
         assertEquals("0000000000000001", p.done("10.0.0.2", nh))
+        assertNull("not before the person confirms", p.doneHostKey())
+        assertArrayEquals(h, p.confirm()!!.hostKey)
         assertArrayEquals(h, p.doneHostKey())
         p.disarm()
         assertNull("not after the screen closed", p.doneHostKey())
@@ -76,7 +78,7 @@ class PairingV3Test {
         val p = committed()
         p.reveal("10.0.0.2", 1, nh)!!
         p.done("10.0.0.2", nh)!!
-        assertNull(p.doneHostKey())
+        assertNull(p.confirm()!!.hostKey)
     }
 
     @Test

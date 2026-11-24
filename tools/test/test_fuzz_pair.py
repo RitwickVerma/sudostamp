@@ -488,6 +488,7 @@ class Fuzz(unittest.TestCase):
             self.stable = self.dialled
             self.nh = None
             self.stage = 0
+            self.done = False       # pair-done arrived; the person's yes lists the key
 
         def commitment(self):
             return P.commitment(P_KEY, self.np, self.dialled, self.stable)
@@ -538,8 +539,15 @@ class Fuzz(unittest.TestCase):
                     return (P.s(key) + P.s(np_) + P.s(d) + P.s(st))[:-3]
                 return P.s(key) + P.s(np_) + P.s(d) + P.s(st)
             if name == P.EXT_DONE:
-                return None if f == "refuse-done" else b""
+                if f == "refuse-done":
+                    return None
+                self.done = True
+                return b""
             raise AssertionError(name)
+
+        def identities(self):
+            # The phone lists a newly paired key only after the person taps Yes.
+            return [P_KEY] if self.done and self.fault != "no-yes" else []
 
         def typed_code(self):
             return P.code(P_KEY, self.np, self.nh, self.dialled, self.stable, self.host)
@@ -591,6 +599,19 @@ class Fuzz(unittest.TestCase):
                 continue                                                    # a spaced correct code is fine
             self.assertEqual(out, "", typed)
             self.assertEqual(code, 1, typed)
+
+    def test_nothing_is_pinned_until_the_phone_lists_the_key(self):
+        # pair-done is not proof (a party in the middle can send it): the phone asks the person and
+        # lists the key only after their yes. Without it, this computer pins nothing.
+        saved = P.CONFIRM_S
+        P.CONFIRM_S = 1
+        try:
+            code, out, err = self.pair_once(Fuzz.Phone("no-yes"))
+        finally:
+            P.CONFIRM_S = saved
+        self.assertEqual(out, "", err)
+        self.assertIsNotNone(code)
+        self.assertIn("NOT pinned", str(code) + err)
 
     def test_pairing_v3_carries_the_host_key_and_the_code_covers_it(self):
         code, out, err = self.pair_once(Fuzz.Phone(), host_key_pub=HOST_PUB.hex())
