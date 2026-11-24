@@ -2,7 +2,7 @@
 
 Versions are the app's `versionName`. The host-side tooling is versioned with the repo.
 
-## 2.0.0 — unreleased
+## 2.0.0 — 2026-11-24
 
 Programs on a paired computer can ask your phone for a secret, which you type or fill and approve
 with your fingerprint. Pair again to use it. Pairing by code now ends with one confirming tap on
