@@ -178,10 +178,9 @@ computer -> phone   secret-request-v1@sudostamp     (same connection, next frame
                       string  name        what is asked for: 1..64 printable ASCII
                       string  why         the context line: strict UTF-8, ≤ 2048 bytes, scrubbed as context-v1
                       string  pkR         HPKE recipient key, 65-byte uncompressed P-256, fresh per request
-                      string  D           the address and port the computer dialled (18 bytes, as in pairing)
-                      string  sigH        ECDSA(H, T), T = tag-req || K || Np || kind || name || why || pkR || D
+                      string  sigH        ECDSA(H, T), T = tag-req || K || Np || kind || name || why || pkR
 
-phone: verify sigH with the H stored for K; D equal to the address it was dialled on; Np unspent
+phone: verify sigH with the H stored for K; Np unspent
        (spend it now). Any failure: FAILURE, nothing shown, nothing stored, counted by the limiter.
        Then the screen; the connection waits up to APPROVAL_TIMEOUT_MS (60 s).
 
@@ -203,13 +202,18 @@ phone    -> computer SUCCESS
   `REQUEST_IDENTITIES` with K. Protocol version: these are new extension names; the existing
   ones do not change, so 1.x hosts and phones interoperate for sudo.
 
+No dialled-address field, unlike pairing. Pairing needs one because nothing else stops a relay
+from standing in for the phone there. Here sigH, pkR inside T and sigK already make a relay a
+blind pipe, and real setups put a TCP relay between a computer and the phone on purpose (a host
+on another subnet reaching the phone through a LAN box). A dialled-address check would refuse
+exactly those and add no protection.
+
 Why each field is there:
 
 | Field | Without it |
 |---|---|
 | sigH over Np | any LAN device, or a replay of a captured request, could put a prompt up in this computer's name and receive the answer |
 | pkR inside the signed T | a man in the middle swaps in its own key and reads the answer |
-| D | a relay that forwards the bytes from another address is visible; defence in depth only, the answer is useless to it anyway (encrypted to pkR) |
 | sigK | a LAN device answering in the phone's place could feed the computer a value it chose (matters for "set a new password" consumers); and it is what makes the fingerprint a TEE-enforced condition for the release rather than an app-level prompt |
 | name, why inside T | a relay could not change what the screen says without breaking sigH |
 
@@ -361,7 +365,6 @@ the documented errors, no allocation past the frame cap.
 | replay of a full request on a new connection | FAILURE (other Np) | nonce check |
 | second request on the same connection | FAILURE | nonce spend |
 | pkR changed after signing | FAILURE | pkR inside T |
-| D not the dialled address | FAILURE | D check |
 | answer with a bad sigK | CLI exit 65, empty stdout | the host's verify |
 | 32-byte message to the secret path / tagged message to the sudo path | refused both ways | `refusal()` and the tag check |
 | timeout, deny, locked phone, Away, limiter | FAILURE; history has no name/reason | each in turn |
