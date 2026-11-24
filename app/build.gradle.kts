@@ -19,28 +19,14 @@ android {
         versionName = "2.0.0"
     }
 
-    // Release signing comes from the environment, never from the repo: scripts/release.sh, on the
-    // maintainer's machine, decrypts the keystore into tmpfs and passes it here (CI never signs;
-    // docs/RELEASING.md). With none set, `assembleRelease` still builds, but UNSIGNED -- it
-    // cannot be installed, which is the safe failure.
-    val keystorePath = System.getenv("SUDOSTAMP_KEYSTORE")
-    signingConfigs {
-        if (keystorePath != null) {
-            create("release") {
-                storeFile = file(keystorePath)
-                storePassword = System.getenv("SUDOSTAMP_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("SUDOSTAMP_KEY_ALIAS")
-                keyPassword = System.getenv("SUDOSTAMP_KEY_PASSWORD")
-            }
-        }
-    }
-
+    // No signing config, on purpose: Gradle only ever builds the release UNSIGNED. The release key
+    // is applied afterwards by scripts/sign-apk.sh (apksigner/jarsigner), so no build plugin or
+    // dependency ever runs in a process that holds it (docs/RELEASING.md).
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            if (keystorePath != null) signingConfig = signingConfigs.getByName("release")
         }
     }
 

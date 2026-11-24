@@ -254,9 +254,11 @@ also runs `gitleaks` over the full history. Debug builds are signed with the dev
   `sudostamp-release`; the public half is `keys/allowed_signers`.
 
 Both keys exist only age-encrypted in the maintainer's private infrastructure repository, opened by
-a dedicated age key that unlocks nothing else. **CI never signs**: `scripts/release.sh` decrypts
-both into tmpfs on the maintainer's machine, wipes them when it exits, and keeps Gradle's execution
-history (which records hashes of the keystore passwords) inside the same tmpfs directory. The
+a dedicated age key that unlocks nothing else. **CI never signs**: `scripts/release.sh` first builds the
+release **unsigned** (Gradle has no signing config at all), then decrypts both keys into tmpfs on
+the maintainer's machine, signs with `scripts/sign-apk.sh` (apksigner and jarsigner from the SDK and
+JDK, nothing from the build's dependencies) and wipes them when it exits. No Gradle plugin or
+dependency ever runs while a key exists. The
 self-hosted runner is shared with other projects and runs unprotected branches, and GitLab hands
 protected variables to every job of a protected ref, so a signing key there would be one compromised
 container image away from leaking — and a stolen Android signing key can never be revoked.

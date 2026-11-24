@@ -5,6 +5,21 @@ hardware.** In daily use on one Arch Linux host with a Samsung Galaxy foldable (
 2026-09. This file is the verification log: what was checked, how, and what it showed. Release
 notes are in [CHANGELOG.md](../CHANGELOG.md).
 
+## 2026-11-24 — releases signed outside Gradle
+
+`release.sh package` now builds the release **unsigned** before any key is decrypted, then signs
+with `scripts/sign-apk.sh` (apksigner `--alignment-preserved`, scheme v2 only, as AGP wrote for
+minSdk 30; jarsigner for the bundle). Gradle no longer has a signing config. First step of moving
+releases to CI with the keys unlocked only by the owner (plan outside this repo).
+
+| What | How | Result |
+|---|---|---|
+| apksigner after the build keeps the reproducibility proof | v2.0.0 built unsigned; signed by apksigner; `apksigcopier copy` of that signature onto the unsigned APK | identical bytes with `--alignment-preserved`; **differs without it** (so the flag is required) |
+| same check on the old path | Gradle-signed APK, same transplant | identical (the proof was already sound) |
+| `sign-apk.sh` guards | `tools/test/sign_roundtrip.sh` with a throwaway key; each guard mutated once | ok; dropping `--alignment-preserved`, the APK certificate check, or the already-signed check each turns it red |
+| `package` end to end | scratch copy at v2.0.0 with a throwaway sops vault, certificate and installer key | release-check `--dist` ok, installer signatures verify, APK v2-signed, transplant reproduces, no `sudostamp-signing.*` left in tmpfs |
+| **Not yet run:** `package` with the real vault | needs the owner (Edith) | the real keystore must open with its stored key password under apksigner (PKCS12 keeps one password) |
+
 ## 2026-11-23 — 2.0 secrets (`sudostamp input`), emulator done, real phone to do
 
 Branch `feat/secret-input`. Checked on the JVM, against a fake phone, and on an emulator (API 34, PIN

@@ -1,7 +1,8 @@
 # SudoStamp CI (the owner's self-hosted runner; GitLab.com shared runners are not used)
 #
 # CI NEVER SIGNS. The release key and the installer key are decrypted only on the
-# maintainer's machine, into tmpfs, by scripts/release.sh (docs/RELEASING.md). The runner is
+# maintainer's machine, into tmpfs, by scripts/release.sh, AFTER the unsigned build, and applied by
+# scripts/sign-apk.sh (docs/RELEASING.md); `android` tests that script with a throwaway key. The runner is
 # shared with other projects and runs unprotected branches, and GitLab passes protected
 # variables to every job of a protected ref, not only to the one that needs them -- so a
 # signing key in CI variables would have been one compromised image away from leaking.
@@ -98,12 +99,19 @@ android:
   script:
     # Includes the *FuzzTest property tests of the JVM parsers (AgentProtocol, SshSig, Net, Pairing):
     # seeded, a few seconds. -Dsudostamp.fuzz.iterations=N scales them for a long run.
-    - ./gradlew --no-daemon --continue -Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8 testDebugUnitTest lintDebug assembleDebug
+    # The release build too (unsigned: Gradle has no signing config), for the signing round trip below.
+    - ./gradlew --no-daemon --continue -Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8 testDebugUnitTest lintDebug assembleDebug assembleRelease bundleRelease
     # DEBIAN_FRONTEND=noninteractive keeps debconf from spraying noise into the job log.
     - export DEBIAN_FRONTEND=noninteractive
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-client python3 python3-cryptography >/dev/null
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-client python3 python3-cryptography python3-venv unzip >/dev/null
     - python3 tools/verify_ssh_sig.py app/build/sshcheck
     - python3 tools/verify_secret_seal.py app/build/secretcheck
+    # scripts/sign-apk.sh, the only thing that ever signs a release, with a throwaway key made in the
+    # job: both outputs carry the expected certificate, apksigcopier moves the signature onto the
+    # unsigned build and gets the same bytes back (what `reproducible` relies on), and it refuses a
+    # wrong certificate and an already signed input. apksigcopier pinned by hash, as in `reproducible`.
+    - python3 -m venv /opt/verify-venv && /opt/verify-venv/bin/pip install -q --require-hashes -r scripts/requirements-reproducible.txt
+    - PATH="/opt/verify-venv/bin:$PATH" tools/test/sign_roundtrip.sh app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/bundle/release/app-release.aab
   artifacts:
     when: always
     reports:
