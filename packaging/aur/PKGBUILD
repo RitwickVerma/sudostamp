@@ -10,7 +10,8 @@ arch=('any')
 url="https://gitlab.com/ritwick7/sudostamp"
 license=('MIT')
 depends=('bash' 'python' 'openssh' 'pam_rssh')
-optdepends=("fprintd: try this computer's own fingerprint reader first when at the desk")
+optdepends=("fprintd: try this computer's own fingerprint reader first when at the desk"
+            "python-cryptography: sudostamp input (secrets typed on the phone)")
 source=("$pkgname-v$pkgver.tar.gz::$url/-/archive/v$pkgver/$pkgname-v$pkgver.tar.gz")
 sha256sums=('cc81c01389a29c0f7a5e1e9dabaa15e7484b74995657a8903e7dbabe4edda1d8')
 
@@ -18,7 +19,7 @@ package() {
   # GitLab names the archive's top directory <project>-<tag>-<commit>.
   cd "$srcdir"/"$pkgname"-v"$pkgver"*/
   local f
-  for f in install.sh pair.py attest.py pam_check.py sudostamp-is-local.sh sudostamp-probe.sh sudostamp-run.sh ask.py; do
+  for f in install.sh pair.py attest.py pam_check.py sudostamp-is-local.sh sudostamp-probe.sh sudostamp-run.sh ask.py secret.py; do
     install -Dm755 "tools/$f" "$pkgdir/usr/lib/$pkgname/$f"
   done
   # Where install.sh looks for it (patches/ beside itself): the pinned pam_rssh timeouts.

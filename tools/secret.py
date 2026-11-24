@@ -11,9 +11,12 @@ Only this command needs it; sudo and pairing do not.
 import hashlib
 import hmac
 import os
+import re
+import socket
 import stat
 import struct
 import sys
+import time
 
 REQUEST_TAG = b"sudostamp-secret-request-v1\0"
 ANSWER_TAG = b"sudostamp-secret-answer-v1\0"
@@ -191,12 +194,304 @@ def keygen(path=None):
     return point(load_host_key(path).public_key())
 
 
+# ---------------------------------------------------------------- `sudostamp input`
+# One connection to the phone's agent port: REQUEST_IDENTITIES (which of the pinned keys is K),
+# secret-hello (K -> Np), secret-request (signed by H over T), then the sealed answer. The value
+# goes to stdout only: never argv, the environment, a file or a log.
+
+EX_OK, EX_USAGE, EX_DATAERR, EX_UNAVAILABLE, EX_TEMPFAIL, EX_NOPERM = 0, 64, 65, 69, 75, 77
+NAME_RE = re.compile(r"[A-Za-z0-9._@+-]{1,64}\Z")
+MAX_WHY_BYTES = 2048
+MAX_FRAME = 64 * 1024
+AGENTC_REQUEST_IDENTITIES, AGENT_IDENTITIES_ANSWER = 11, 12
+AGENT_FAILURE, AGENT_SUCCESS, AGENTC_EXTENSION = 5, 6, 27
+CONNECT_S = 4
+BUDGET_S = 25          # the phone allows 30 s per connection, not counting the person's time
+WAIT_S = 60 + 10       # APPROVAL_TIMEOUT_MS on the phone, plus the network
+
+
+class Stop(Exception):
+    def __init__(self, code, reason):
+        super().__init__(reason)
+        self.code, self.reason = code, reason
+
+
+def _ask_module():
+    """tools/ask.py, beside this file: the PAM block and the pause flag are read one way only."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sudostamp_ask", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ask.py"))
+    assert spec is not None and spec.loader is not None
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def why_ok(why):
+    """One line of plain text the phone will show as sent: what ask.py's printable() accepts."""
+    import unicodedata
+    if not why or len(why.encode("utf-8", "surrogatepass")) > MAX_WHY_BYTES:
+        return False
+    try:
+        why.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return all(unicodedata.category(c) not in ("Cc", "Cf", "Zl", "Zp", "Cs", "Co") for c in why)
+
+
+def parse_addr(a):
+    """host:port or [v6]:port -> (host, port), or ValueError."""
+    if a.startswith("["):
+        host, _, rest = a[1:].partition("]")
+        if not rest.startswith(":"):
+            raise ValueError(a)
+        port = rest[1:]
+    else:
+        host, _, port = a.rpartition(":")
+    if not host or not port.isdigit() or not 0 < int(port) < 65536:
+        raise ValueError(a)
+    return host, int(port)
+
+
+def pinned_keys(path):
+    """The ecdsa-sha2-nistp256 key blobs in an authorized-keys file (the phone's keys for this user)."""
+    import base64
+    out = []
+    with open(path, "rb") as f:
+        for line in f.read(MAX_FRAME).splitlines():
+            w = line.split()
+            if len(w) >= 2 and w[0] == b"ecdsa-sha2-nistp256":
+                try:
+                    blob = base64.b64decode(w[1], validate=True)
+                    phone_point(blob)
+                except ValueError:
+                    continue
+                out.append(blob)
+    return out
+
+
+class Agent:
+    """Length-prefixed ssh-agent frames over one socket, every read inside a deadline."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.deadline = time.monotonic() + BUDGET_S
+
+    def send(self, body):
+        self.sock.sendall(struct.pack(">I", len(body)) + body)
+
+    def _read(self, n):
+        b = b""
+        while len(b) < n:
+            left = self.deadline - time.monotonic()
+            if left <= 0:
+                raise Stop(EX_TEMPFAIL, "the phone stopped answering")
+            self.sock.settimeout(left)
+            try:
+                c = self.sock.recv(n - len(b))
+            except socket.timeout:
+                raise Stop(EX_TEMPFAIL, "the phone stopped answering")
+            if not c:
+                raise Stop(EX_TEMPFAIL, "the phone closed the connection")
+            b += c
+        return b
+
+    def recv(self):
+        n = struct.unpack(">I", self._read(4))[0]
+        if not 0 < n <= MAX_FRAME:
+            raise Stop(EX_DATAERR, "the phone sent a frame of %d bytes" % n)
+        return self._read(n)
+
+
+def strings(body, count):
+    """Exactly [count] SSH strings filling [body], or ValueError."""
+    out, i = [], 0
+    for _ in range(count):
+        if i + 4 > len(body):
+            raise ValueError("truncated")
+        n = struct.unpack(">I", body[i:i + 4])[0]
+        if n > len(body) - i - 4:
+            raise ValueError("truncated")
+        out.append(body[i + 4:i + 4 + n])
+        i += 4 + n
+    if i != len(body):
+        raise ValueError("trailing bytes")
+    return out
+
+
+def choose_key(answer, keys):
+    """K: the first identity the phone offers that this computer pinned, or None."""
+    if not answer or answer[0] != AGENT_IDENTITIES_ANSWER or len(answer) < 5:
+        return None
+    n, i = struct.unpack(">I", answer[1:5])[0], 5
+    for _ in range(min(n, 64)):
+        try:
+            if i + 4 > len(answer):
+                return None
+            ln = struct.unpack(">I", answer[i:i + 4])[0]
+            blob = answer[i + 4:i + 4 + ln]
+            i += 4 + ln
+            cl = struct.unpack(">I", answer[i:i + 4])[0]
+            i += 4 + cl
+        except struct.error:
+            return None
+        if blob in keys:
+            return blob
+    return None
+
+
+def ask_phone(agent, keys, host_key, name, why, waiting=lambda: None):
+    """The secret's bytes, or Stop. [name], [why]: bytes, already checked."""
+    agent.send(bytes([AGENTC_REQUEST_IDENTITIES]))
+    k = choose_key(agent.recv(), keys)
+    if k is None:
+        raise Stop(EX_TEMPFAIL, "the phone did not offer this computer's key: it was paired again, "
+                   "or this address is another phone")
+    agent.send(bytes([AGENTC_EXTENSION]) + s(EXT_HELLO) + s(k))
+    r = agent.recv()
+    if r[:1] != bytes([AGENT_SUCCESS]):
+        raise Stop(EX_TEMPFAIL, "the phone will not be asked for a secret: SudoStamp there is older "
+                   "than 2.0, this computer was paired before 2.0 (run 'sudo sudostamp setup' again), "
+                   "or it is cooling down after a refusal. Nothing was shown.")
+    try:
+        (np,) = strings(r[1:], 1)
+    except ValueError:
+        raise Stop(EX_DATAERR, "the phone's hello answer is malformed")
+    if len(np) != NONCE_BYTES:
+        raise Stop(EX_DATAERR, "the phone's nonce is %d bytes" % len(np))
+
+    # Our HPKE key: made for this one request, never written anywhere, dropped on return.
+    sk_r = _ec().generate_private_key(_ec().SECP256R1())
+    pk_r = point(sk_r.public_key())
+    t = transcript(k, np, KIND_INPUT, name, why, pk_r)
+    agent.send(bytes([AGENTC_EXTENSION]) + s(EXT_REQUEST) + s(KIND_INPUT) + s(name) + s(why)
+               + s(pk_r) + s(sign(host_key, t)))
+    waiting()
+    agent.deadline = time.monotonic() + WAIT_S
+    r = agent.recv()
+    if r[:1] == bytes([AGENT_FAILURE]):
+        raise Stop(EX_NOPERM, "refused on the phone (denied, timed out, or the request failed its checks)")
+    try:
+        if r[:1] != bytes([AGENT_SUCCESS]):
+            raise ValueError("not SUCCESS")
+        enc, ct, sig = strings(r[1:], 3)
+    except ValueError:
+        raise Stop(EX_DATAERR, "the phone's answer is malformed: nothing written")
+    # K's signature first, then decrypt: an answer K did not sign is never opened.
+    if not verify(phone_point(k), answer_message(t, enc, ct), sig):
+        raise Stop(EX_DATAERR, "the answer is not signed by the phone's key for this computer: nothing written")
+    try:
+        value = hpke_open(sk_r, enc, ct, info(t))
+    except Exception:
+        raise Stop(EX_DATAERR, "the answer does not decrypt: nothing written")
+    if not 0 < len(value) <= MAX_SECRET_BYTES:
+        raise Stop(EX_DATAERR, "the answer is %d bytes: nothing written" % len(value))
+    return value
+
+
+def harden():
+    """No core dump and no ptrace by other processes of this user while the value is in memory."""
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    if sys.platform.startswith("linux"):
+        import ctypes
+        PR_SET_DUMPABLE = 4
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE)")
+
+
+def run_input(name, why, to_tty=False, out=1, pam=None):
+    """`sudostamp input`: returns an exit code; on 0 the value has been written to [out]."""
+    import pwd
+    say = lambda m: sys.stderr.write("sudostamp input: %s\n" % m)
+    if not NAME_RE.match(name):
+        say("the name must be 1 to 64 of A-Z a-z 0-9 . _ @ + -")
+        return EX_USAGE
+    if not why_ok(why):
+        say("--why must be one line of text, 1 to %d bytes" % MAX_WHY_BYTES)
+        return EX_USAGE
+    if os.isatty(out) and not to_tty:
+        say("stdout is a terminal: pipe it to the program that needs it (or --to-tty, which "
+            "leaves the secret in your scrollback)")
+        return EX_USAGE
+    try:
+        harden()
+        import cryptography  # noqa: F401
+    except ImportError:
+        say("python3-cryptography is not installed (it is needed for secrets, not for sudo)")
+        return EX_UNAVAILABLE
+    except OSError as e:
+        say("cannot protect this process's memory: %s" % e)
+        return EX_UNAVAILABLE
+    try:
+        host_key = load_host_key()
+    except FileNotFoundError:
+        say("this computer has no host key: run 'sudo sudostamp setup' to pair it for secrets")
+        return EX_UNAVAILABLE
+    except (OSError, ValueError) as e:
+        say(str(e))
+        return EX_UNAVAILABLE
+    A = _ask_module()
+    pam = pam or A.PAM
+    try:
+        with open(pam) as f:
+            settings = A.block_settings(f.read())
+    except OSError:
+        settings = None
+    uid = os.getuid()
+    user = pwd.getpwuid(uid).pw_name
+    if not settings or not settings[0]:
+        say("sudo here does not use the phone (no SudoStamp block in %s): run 'sudo sudostamp setup'" % pam)
+        return EX_UNAVAILABLE
+    phone, keydir = settings
+    try:
+        keys = pinned_keys(os.path.join(keydir, user))
+    except OSError:
+        keys = []
+    if not keys:
+        say("no phone key is pinned for %s in %s: run 'sudo sudostamp setup'" % (user, keydir))
+        return EX_UNAVAILABLE
+    if A.paused(uid):
+        say("SudoStamp is paused on this computer: resume it to ask the phone")
+        return EX_TEMPFAIL
+    try:
+        host, port = parse_addr(phone)
+        sock = socket.create_connection((host, port), timeout=CONNECT_S)
+    except (OSError, ValueError) as e:
+        say("cannot reach the phone at %s: %s" % (phone, e))
+        return EX_TEMPFAIL
+    try:
+        with sock:
+            value = ask_phone(Agent(sock), keys, host_key, name.encode("ascii"), why.encode("utf-8"),
+                              lambda: say("waiting for your phone (60 s)..."))
+    except Stop as e:
+        say(e.reason)
+        return e.code
+    except OSError as e:
+        say("the connection to the phone failed: %s" % e)
+        return EX_TEMPFAIL
+    view = memoryview(value)
+    while view:
+        view = view[os.write(out, view):]
+    say("sent")
+    return EX_OK
+
+
 def main(argv=None):
     import argparse
-    ap = argparse.ArgumentParser(prog="sudostamp-secret", description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(prog="sudostamp", description=(__doc__ or "").split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("keygen", help="make this user's host key if needed; print its public point (hex)")
-    a = ap.parse_args(argv)
+    i = sub.add_parser("input", help="ask the phone for a secret; it is written to stdout")
+    i.add_argument("name", help="what is asked for, shown on the phone (1-64 of A-Za-z0-9._@+-)")
+    i.add_argument("--why", required=True, help="one line shown on the phone under the name")
+    i.add_argument("--to-tty", action="store_true", help="allow a terminal as stdout")
+    try:
+        a = ap.parse_args(argv)
+    except SystemExit as e:
+        return EX_USAGE if e.code else EX_OK
+    if a.cmd == "input":
+        return run_input(a.name, a.why, a.to_tty)
     if a.cmd == "keygen":
         try:
             print(keygen().hex())

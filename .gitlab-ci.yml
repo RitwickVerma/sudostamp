@@ -133,6 +133,7 @@ hygiene:
     - python3 -m py_compile tools/*.py tools/test/*.py && rm -rf tools/__pycache__ tools/test/__pycache__
     - python3 -I tools/test/test_pair.py && rm -rf tools/test/__pycache__ tools/__pycache__
     - python3 -I tools/test/test_secret.py && rm -rf tools/test/__pycache__ tools/__pycache__
+    - python3 -I tools/test/test_secret_input.py && rm -rf tools/test/__pycache__ tools/__pycache__
     # The site (site/build.py): the app-link proof names the release certificate and the host the
     # app verifies, the privacy page carries every word of docs/PRIVACY_POLICY.md, nothing external.
     - python3 -I site/build.py --check && rm -rf site/out
