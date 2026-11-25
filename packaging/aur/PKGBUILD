@@ -3,7 +3,7 @@
 # The computer side of SudoStamp: `sudo sudostamp setup` pairs with the phone app and adds
 # pam_rssh to sudo's PAM stack. Updated per release by scripts/update-aur.sh.
 pkgname=sudostamp
-pkgver=1.4.0
+pkgver=2.0.0
 pkgrel=1
 pkgdesc="Approve sudo with your Android phone's fingerprint (computer side: pairing and PAM setup)"
 arch=('any')
@@ -15,7 +15,7 @@ depends=('bash' 'python' 'openssh')
 optdepends=("fprintd: try this computer's own fingerprint reader first when at the desk"
             "python-cryptography: sudostamp input (secrets typed on the phone)")
 source=("$pkgname-v$pkgver.tar.gz::$url/-/archive/v$pkgver/$pkgname-v$pkgver.tar.gz")
-sha256sums=('cc81c01389a29c0f7a5e1e9dabaa15e7484b74995657a8903e7dbabe4edda1d8')
+sha256sums=('7dcfec202f95d2b439dd371c9b96dfb467c48a04f22243896209e3135fd43518')
 
 package() {
   # GitLab names the archive's top directory <project>-<tag>-<commit>.
