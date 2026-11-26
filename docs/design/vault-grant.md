@@ -1,6 +1,7 @@
 # Design: grant one password-manager login to an agent (`sudostamp grant`), proposal
 
-Status: proposal, revision 2, with the owner's answers to the first round (section 10). No code.
+Status: proposal, revision 3. Revision 2 took the owner's answers (section 10). Revision 3 moves the
+vault into its own process and corrects the server facts against Vaultwarden's source. No code.
 Nothing here is built.
 
 ## 1. Problem
@@ -19,7 +20,9 @@ that could grant anything else.
 
 ```
 login service --(paired v3, signed: host only)--> relay (blind) --> phone
-phone: limiter, denylist(host) -> screen "<computer> asks for a login for <host>"
+phone (main process, the listener): toggle, Away, limiter, denylist(host) -> one Binder call
+       ask(computer, host, T) to the :vault process; nothing else crosses (section 6.1)
+phone (:vault): notification -> screen "<computer> asks for a login for <host>" -> owner taps Look up
        fingerprint 1 (CryptoObject = vault-session key) -> unwrap refresh token + user key
          (or, with no stored session or after 30 days: master password + 2FA code, section 6)
        phone refreshes its access token, syncs, decrypts, finds Login items whose URI matches <host>,
@@ -28,7 +31,7 @@ phone: limiter, denylist(host) -> screen "<computer> asks for a login for <host>
        phone: org item  -> PUT /api/ciphers/<id>/collections  (adds Agents, keeps the rest)
               personal  -> PUT /api/ciphers/<id>/share        (re-encrypted with the org key, moved)
        phone re-syncs and checks the item decrypts under the org key and is in Agents
-       phone wipes every key, token and plaintext; answers  sigK(cipher id)  or FAILURE
+       :vault wipes every key, token and plaintext; returns  (id, sigK(...))  or FAILURE to main
 ```
 
 The phone never uses anything the computer sends except `host`. The name, URI and username on the
@@ -70,7 +73,8 @@ It is then refused.
   for `co.uk` matches nothing saved under `amazon.co.uk`.
   - Only Login items match; cards, identities and notes never do.
   - Items with attachments or passkeys are refused (fail closed: re-encrypting them is out of scope).
-  - Items with a TOTP seed are refused unless the owner turns that on (open question 5).
+  - Items with a TOTP seed are refused unless the owner ticks "allow" on that grant. The check is
+    whether the field is present, so the seed is never decrypted to decide.
   - An item with any JSON field the client doesn't model is refused, and nothing is changed.
 - **Denylist** is checked twice: against `host` before the screen, and against every URI of the
   chosen item before the fingerprint.
@@ -85,8 +89,16 @@ It is then refused.
   timeout, and a cap of 6 grant asks per hour across all computers.
   - It is enforced by the existing `Limiter`, with grants counted alongside other requests. One
     request is pending at a time, across sudo, secrets and grants.
+  - Three denials or timeouts from one computer within 24 hours turn that computer's grant toggle
+    off. Only the owner turns it back on. A computer that keeps asking loses the right to ask,
+    instead of training the owner to tap through fingerprint 1.
+  - Away and pause refuse grants, as they refuse every other request.
   - The history row stores the time, the computer, the host and the outcome. It never stores the
     item name.
+- **Least plaintext.** Matching decrypts only the name, username and URIs of Login items. Passwords,
+  TOTP seeds, notes and custom fields are never decrypted for display. If the chosen item has an
+  item key, a move re-wraps that key under the org key, and its fields are never decrypted. Only an
+  item without an item key is decrypted in full, to be encrypted again under the org key.
 - **Screen**: `FLAG_SECURE`, never over the lock screen. The password field has Autofill hints
   (the owner's own Bitwarden app can fill it), no personalised IME learning, and no copy.
   - The notification says only "<computer> asks for a login".
@@ -112,6 +124,11 @@ keeping that key behind a fresh fingerprint and nowhere else.
 **The wrapping key** is an Android Keystore key, `vault-session-v1`:
 - RSA-2048, purpose decrypt only, OAEP with SHA-256. StrongBox when the device has it, TEE
   otherwise; the setup screen says which.
+  - Keystore RSA keys fix the MGF1 digest at SHA-1. The cipher is initialised with an explicit
+    `OAEPParameterSpec("SHA-256", "MGF1", SHA1, …)`, never the provider default, and a test decrypts
+    with the default to show it fails.
+  - Why RSA and not ECDH: Keystore key agreement (`PURPOSE_AGREE_KEY`) starts at API 31, and the
+    app supports API 30. StrongBox implements RSA-2048.
 - `setUserAuthenticationRequired(true)` with `setUserAuthenticationParameters(0,
   AUTH_BIOMETRIC_STRONG)`: a timeout of 0 means every single decrypt needs its own BiometricPrompt
   with the operation as its CryptoObject. No device-PIN fallback, so a shoulder-surfed PIN unlocks
@@ -123,14 +140,45 @@ keeping that key behind a fresh fingerprint and nowhere else.
 wrapped with RSA-OAEP under the Keystore public key, then `AES-GCM(k, nonce, payload, aad)`, where
 `aad = "sudostamp-vault-session-v1" || server URL || account id`. Why asymmetric: encrypting needs
 only the public key and no fingerprint. So when the server hands out a new refresh token, or at a
-re-login, the phone rewrites the blob without a third prompt. Decrypting always needs the
+re-login, the phone rewrites the blob without a third prompt. Vaultwarden issues a new refresh token
+on every refresh (section 6.3), so this happens on every grant. Decrypting always needs the
 fingerprint. `k` is zeroed right after use.
 
-**In a grant:**
-1. The limiter, the toggle and the host denylist pass, and the screen names the computer and the host.
-2. Fingerprint 1 unwraps the blob: refresh token, access token, sync, then private key and org key.
-3. The owner picks an item. The item denylist passes.
-4. Fingerprint 2 signs the answer with K, as `input` does.
+### 6.1 Process boundary
+
+The vault client, the session store and the grant screen run in their own process, `:vault`
+(`android:process`, nothing exported). The LAN listener, the relay client, HPKE and every frame
+parser stay in the main process, which never holds a vault key, a token or an item name. Today one
+process does both, and a stored full-vault key next to a network parser is the thing to avoid.
+
+- **One call crosses**, over a bound service private to the app:
+  `ask(computer id, host, T) -> FAILURE | (cipher id, sigK)`. The host is already validated in main,
+  and `:vault` validates it again with the same parser. Nothing secret comes back: no key, no
+  token, no item name, no username.
+- **`:vault` signs the answer itself**, with K behind fingerprint 2. Keystore keys belong to the
+  app, not the process, so `:vault` can use K, and main only forwards the bytes.
+- **Its own screen.** The grant activity lives in `:vault`. It doesn't reuse `MainActivity`, which
+  has `showWhenLocked` for sudo prompts. The grant screen never shows over the lock screen.
+- **What it buys:** a memory-disclosure or confused-deputy bug in the listener, HPKE or the relay
+  code can't read the vault key, because that key is never in that process. Android's SELinux
+  policy denies ptrace and `/proc/<pid>/mem` between an app's own processes for untrusted apps
+  (phase 5 checks this on a real device).
+- **What it doesn't buy:** both processes share one UID and one data directory. Code execution in
+  main can rewrite app files, and it can draw its own screens. Two things still hold:
+  - The blob's AAD binds the server URL and the account id, so swapping the URL makes the blob fail
+    to open, and no refresh token is sent anywhere.
+  - A re-login shows the server URL and asks the owner to confirm it, so a swapped config becomes a
+    visible question, not a silent phishing page.
+  Code execution in main is a full compromise of the app, and section 6.4 says so.
+
+### 6.2 In a grant
+
+1. In main: the toggle, Away, the limiter and the host denylist pass. Then `ask` crosses to `:vault`.
+2. In `:vault`: a notification, then a screen that names the computer and the host. Nothing is
+   decrypted until the owner taps Look up.
+3. Fingerprint 1 unwraps the blob: refresh token, access token, sync, then private key and org key.
+4. The owner picks an item. The item denylist passes.
+5. Fingerprint 2 signs the answer with K, as `input` does.
 
 Every key, token and plaintext lives in `ByteArray`/`CharArray` and is zeroed in `finally` on
 every path: success, deny, timeout or pause. Process death is the exception, and then the memory is
@@ -139,7 +187,8 @@ shows vault item names on the screen, and the second commits one change.
 
 **Re-login every 30 days.** After 30 days from the last full login, or on any of the cases below,
 the blob is deleted and the next grant asks for the master password and a 2FA code:
-- the MAC fails (a password change or a key rotation on the server);
+- the blob's GCM tag or the user key's MAC fails (a swapped config, a password change, or a key
+  rotation);
 - the server rejects the refresh token;
 - the Keystore key is gone.
 
@@ -147,19 +196,43 @@ the blob is deleted and the next grant asks for the master password and a 2FA co
 is a constant, not a setting.
 
 **Forget vault** (a button on the vault setup screen, and automatic when the feature is turned
-off):
-- It deletes the Keystore key, the blob and the configuration first. This works offline.
-- Then, best effort, it asks the server to log the device out.
-- The local wipe never waits on the network.
+off) deletes the Keystore key, the blob and the configuration. It is local only and works offline.
+Vaultwarden has no endpoint for one device to log itself out, so there is nothing to call. The
+server's copy of the device row stays, and its refresh token is useless without the blob.
 
-**Server-side revocation** is the owner's tool when the phone is lost. It is linked from the setup
-screen and written into SECURITY.md:
-1. "Deauthorize sessions" in the web vault invalidates every refresh token, so the blob is dead
-   even if it is unwrapped later.
-2. Then change the master password with "rotate account encryption key". The user key may have
-   been in the thief's hands, and only a rotation retires it.
-3. Then remove the device in the web vault's device list, where the server supports it.
-(Phase 2 verifies which of these the target server implements; section 9.)
+### 6.3 Server facts and revocation
+
+Read from Vaultwarden's source (`main` at `dbd7829`, 2026-11-24). Phase 2 re-checks them against
+the version the owner actually runs.
+- **Refresh tokens:**
+  - A refresh token is a JWT that wraps a per-device token. It expires 90 days after issue for
+    mobile device types and 30 for others.
+  - Every refresh issues a new JWT with a new expiry. The per-device token inside stays the same
+    until the account's security stamp is reset.
+  - The phone's own 30-day re-login is the stricter limit.
+- **"Deauthorize sessions"** (`POST /api/accounts/security-stamp`, which needs the master password
+  or a 2FA code):
+  - It resets the security stamp, rotates every device's refresh token, deletes every device row,
+    and pushes a logout.
+  - A stored blob is dead after this, even if it is unwrapped later.
+  - It logs out **all** of the owner's devices. Vaultwarden has no per-device revoke: `/api/devices`
+    is list-only.
+- **Key rotation** (a master password change with "rotate account encryption key") also resets the
+  stamp and rotates refresh tokens. It is the only thing that retires a user key that may have been
+  copied.
+- **Client version:**
+  - Every login must send `Bitwarden-Client-Version`.
+  - Accounts on the new V2 encryption (a COSE-wrapped private key and a signing key pair) need a
+    client of at least 2026.10.1. This client implements V1 only, so it sends a version below
+    that.
+  - The server then refuses a V2 account after the password check, and the client also refuses any
+    EncString type other than 2 and 4. That is two independent fail-closed checks.
+
+Lost phone, in SECURITY.md and linked from the setup screen:
+1. Deauthorize sessions. This kills the stored session; every other device has to log in again.
+2. Change the master password with key rotation.
+
+### 6.4 Threat model
 
 Stolen phone:
 - **Locked:** the blob needs a Class 3 biometric match on this device for every use. The PIN alone
@@ -175,16 +248,19 @@ A malicious or compromised login service:
 - It can choose a host, but not the item, the description, the collection or the org.
 - It learns one cipher id per approved grant. It can't ask for denylisted categories, and it can't
   tell "no account" from "denied".
-- Every ask still needs fingerprint 1 before anything is decrypted. A storm of asks is a fatigue
-  attack on the first fingerprint, and the limiter is the control.
+- Every ask still needs a tap and fingerprint 1 before anything is decrypted. A storm of asks is a
+  fatigue attack on that fingerprint. The limiter caps it, and three denials in 24 hours switch
+  the computer's toggle off (section 5).
 - What remains: the owner approving a lookalike. That is mitigated by showing the item's real URIs
   and the ASCII host.
 
 A compromised SudoStamp app (supply chain, or a bug):
 - New compared with revision 1: such an app can wait for the next grant and copy the user key,
   which is the whole vault, with no master password typed.
-- The LAN listener is the exposed surface. Its parsers are memory-safe Kotlin and refuse before
-  any vault code runs. The user key exists in memory only between fingerprint 1 and `finally`.
+- A bug in the LAN listener: contained by the process boundary (6.1). The listener's process never
+  holds vault material. The user key exists only in `:vault`, between fingerprint 1 and `finally`.
+- Code execution in either process, or a malicious build: the user key at the next grant. Only
+  reproducible builds, the signing-key rules and the owner's revocation steps (6.3) answer that.
 - SECURITY.md's "holds no secret it could leak" becomes: "with password-manager grants enabled,
   it holds a vault session key wrapped by a biometric-per-use Keystore key".
 - The feature is off by default and has no effect until it is set up.
@@ -193,6 +269,8 @@ A compromised SudoStamp app (supply chain, or a bug):
 
 Chosen: about 600 lines of Kotlin, built only from platform primitives. It implements the published
 Bitwarden client format; no new construction:
+- V1 account encryption only (section 6.3): EncString types 2 and 4. Any other type, a signed
+  public key or a security-state field is refused.
 - PBKDF2-HMAC-SHA256 (`SecretKeyFactory`).
 - HKDF-Expand (the HMAC composition already used for HPKE).
 - EncString type 2: AES-256-CBC with HMAC-SHA256, encrypt-then-MAC, the MAC checked in constant
@@ -233,12 +311,13 @@ usage. It writes nothing secret, because nothing secret ever reaches it.
 | 0 | This design: review, then the owner's answers | 0.5 d |
 | 1 | Crypto core (KDF, EncString, org-key unwrap, re-encrypt or re-wrap), `bw`-generated vectors, mutants | 3 d |
 | 1b | Session store: Keystore key (StrongBox, per-use biometric, enrollment invalidation), blob format, 30-day re-login, forget vault, wipe-on-MAC-failure; tests on the emulator and one StrongBox device | 1.5 d |
-| 2 | API client (prelogin, token with TOTP 2FA, refresh-token grant and rotation, strict sync parse, collections, share, verify after write, device logout), fixtures, then a live test against a throwaway server that also checks deauthorize-sessions and key rotation | 3 d |
+| 1c | Process split: `:vault` process, private bound service, grant activity, a test that main never loads a vault class or binds with any other call | 1 d |
+| 2 | API client (prelogin, token with TOTP 2FA, refresh-token grant and re-seal, client-version header, V2 refusal, strict sync parse, collections, share, verify after write), fixtures, then a live test against a throwaway server running the owner's Vaultwarden version that checks section 6.3 | 3 d |
 | 3 | Wire format (`grant-request-v1`, phone and `tools/grant.py`), shared vectors, parser fuzzing | 2 d |
-| 4 | Screens: setup (server, email, org, collection), grant (candidates, refusals), toggle per computer, Limiter, history, Material 3, TalkBack | 2.5 d |
-| 5 | SECURITY.md delta, automated security scan, independent red team, emulator end-to-end, one real device | 2 d |
+| 4 | Screens: setup (server, email, org, collection), grant (candidates, refusals), toggle per computer with auto-off, Limiter, history, Material 3, TalkBack | 2.5 d |
+| 5 | SECURITY.md delta, automated security scan, independent red team, emulator end-to-end, one real device (including the cross-process `/proc/<pid>/mem` check) | 2 d |
 | 6 | Login-service side (outside this repo): call `grant` after "no item", denylist parity test | 1 d |
-| | **Total** | **about 15.5 days** |
+| | **Total** | **about 16.5 days** |
 
 A release, Play upload and Play data-safety update (the app now talks to a user-chosen server) are
 separate and each needs the owner's yes.
@@ -255,14 +334,24 @@ The owner's answers to the first round:
 7. Timeout: 180 s per grant prompt.
 
 Still to settle:
+- Answer 3 asked for server-side revocation of this device. Vaultwarden can only revoke all of the
+  owner's devices at once (6.3). Proposed: accept that as the lost-phone step and say so in
+  SECURITY.md. The alternative is a second account just for grants, which adds an account and
+  doesn't fit "move a personal item".
 - The re-login period. Proposed: 30 days, fixed.
 - Two fingerprints per grant (unwrap, then commit), as proposed in section 6. One prompt would mean
   holding the user key across the choice under a time-based key, which this design rejects.
 
-To verify in phase 2, against a throwaway server:
-- item-level keys and the share endpoint;
-- whether refresh tokens rotate;
-- that deauthorize sessions kills a stored refresh token;
+Verified from source in revision 3 (6.3), to be re-checked live against the owner's version:
+- refresh-token lifetime and renewal;
+- what deauthorize sessions does;
 - key rotation;
-- device logout;
-- the post-write check that the item is in Agents.
+- no per-device revoke;
+- the client-version gate;
+- the share endpoint's checks: the item must be the user's own, and the request must carry the org
+  id and at least one collection.
+
+Still to verify in phase 2, live:
+- item-level keys through the share endpoint;
+- the post-write check that the item is in Agents;
+- whether the owner's account is V1, which this client requires.
