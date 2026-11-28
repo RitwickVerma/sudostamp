@@ -2,8 +2,9 @@
 
 Status: approved for build, revision 4. Revision 2 took the owner's answers (section 10). Revision 3
 moved the vault into its own process and corrected the server facts against Vaultwarden's source.
-Revision 4 adds the read side, direct send (section 11), because a grant alone gives an agent
-nothing it can read. The owner approved building both to the full design.
+Revision 4 sets the build plan (section 9). The reader of granted items is a login service signed
+in as the agent account (outside this repo). A secret that is not a website login goes through the
+shipped `sudostamp input`, so this design adds no read path of its own.
 
 ## 1. Problem
 
@@ -313,15 +314,15 @@ Each phase is its own merge request, stacked on this design.
 |---|---|---|
 | 0 | This design: review, then the owner's answers | done |
 | 1 | Crypto core (KDF, EncString, org-key unwrap, re-encrypt or re-wrap), `bw`-generated vectors, mutants | 3 d |
-| 1a | Pure phone rules: host parser, matching, denylist data file and vectors, request parsers for `grant-request-v1` and `vault-request-v1`, fuzzing | 1.5 d |
+| 1a | Pure phone rules: host parser, matching, denylist data file and vectors, `grant-request-v1` parser, fuzzing | 1.5 d |
 | 1b | Session store: Keystore key (StrongBox, per-use biometric, enrollment invalidation), blob format, 30-day re-login, forget vault, wipe-on-MAC-failure; tests on the emulator and one StrongBox device | 1.5 d |
-| 1c | Process split: `:vault` process, private bound service, grant and send activities, a test that main never loads a vault class or binds with any other call | 1 d |
+| 1c | Process split: `:vault` process, private bound service, grant activity, a test that main never loads a vault class or binds with any other call | 1 d |
 | 2 | API client (prelogin, token with TOTP 2FA, refresh-token grant and re-seal, client-version header, V2 refusal, strict sync parse, collections, share, verify after write), fixtures, then a live test against a throwaway server running the owner's Vaultwarden version that checks section 6.3 | 3 d |
-| 3 | Host side: `sudostamp grant` and `sudostamp secret` (section 11.5) in `tools/`, shared vectors with the phone | 2 d |
-| 4 | Screens: setup (server, email, org, collection), grant (candidates, refusals), send (section 11.4), toggles per computer with auto-off, Limiter, history, Material 3, TalkBack | 3 d |
+| 3 | Host side: `sudostamp grant` in `tools/`, shared vectors with the phone | 1.5 d |
+| 4 | Screens: setup (server, email, org, collection), grant (candidates, refusals), toggles per computer with auto-off, Limiter, history, Material 3, TalkBack | 3 d |
 | 5 | SECURITY.md delta, automated security scan, independent red team, emulator end-to-end, one real device (including the cross-process `/proc/<pid>/mem` check) | 2 d |
 | 6 | Login-service side (outside this repo): call `grant` after "no item", denylist parity test | 1 d |
-| | **Total** | **about 18 days** |
+| | **Total** | **about 17 days** |
 
 A release, Play upload and Play data-safety update (the app now talks to a user-chosen server) are
 separate and each needs the owner's yes.
@@ -360,117 +361,3 @@ Still to verify in phase 2, live:
 - the post-write check that the item is in Agents;
 - whether the owner's account is V1, which this client requires.
 
-## 11. Direct send: an agent reads one shared item (`sudostamp secret`)
-
-### 11.1 Problem
-
-A grant moves an item into the Agents collection. Until a separate reader exists (a login service
-signed in as the agent account), no agent can read it. The owner also wants to hand an agent one
-existing secret, such as a bot token, without typing it again. Direct send closes this. A paired
-computer names one item, the phone shows the real item, and after a fingerprint it sends that one
-value end-to-end to that computer only.
-
-### 11.2 Shape
-
-```
-computer --(paired v3, signed: query, why, pkR)--> relay (blind) --> phone main process
-phone main: toggle "may ask for shared items", Away, limiter, one pending request
-  -> one Binder call  send(computer id, query, why, T, pkR) to :vault
-phone :vault: notification -> screen "<computer> asks for <query>" -> owner taps Look up
-  fingerprint 1 (vault-session key) -> refresh, sync, decrypt names of items IN THE AGENTS COLLECTION
-  exact name match (case-insensitive) on `query`; zero matches: FAILURE; several: the owner picks
-  screen shows the real item name, every URI, the item type, and the computer's `why`, labelled as
-  the computer's words
-  item rules (11.3) pass -> fingerprint 2 (CryptoObject = K signer) -> decrypt the one field,
-  HPKE-seal it to pkR, sign (enc, ct) with K, wipe, return the answer bytes to main
-```
-
-### 11.3 Phone rules
-
-- **Scope: the Agents collection only.** The phone looks only at items in the collection set up
-  for agents. A personal item, or an org item outside that collection, is never matched and never
-  decrypted. Getting a new item to an agent therefore takes a grant first (owner-approved move into
-  the collection), then a send. The owner has already decided, per item, that agents may have it.
-- **One field.** A Login item sends its password. A Secure Note sends its notes text. Every other
-  type is refused. Usernames, URIs, custom fields, attachments and passkeys are never sent.
-- **TOTP**: an item with a TOTP seed is refused unless the owner ticks "allow" on that request. The
-  seed is never sent; the tick only lets the password of a 2FA-protected login leave.
-- **Denylist** (section 5) is checked against every URI of the chosen item before fingerprint 2.
-  The vault server's own host is on it. An item with no URI (a note) is checked by the collection
-  scope only.
-- **Size**: the value is at most 1024 bytes of UTF-8, as for `input`. Longer: refused.
-- **Single use and expiry**: as for `input`. One request per connection, Np spent on first use, a
-  fresh pkR per request whose private half never leaves the computer's memory, and the connection
-  waits at most `GRANT_TIMEOUT_MS` (180 s, two fingerprints). Nothing is cached on the phone between
-  requests; a second send of the same item is a second request with two new fingerprints.
-- **Fatigue**: the same Limiter and auto-off as grants (section 5). Three denials or timeouts from
-  one computer within 24 hours turn its send toggle off.
-- **History**: approved rows keep the time, the computer, the item's real name and `why`. Refused
-  rows keep the time, the computer and "refused", never the query (it is the computer's text).
-- **Screen**: as section 5. `FLAG_SECURE`, never over the lock screen. The value is never shown.
-  The notification says only "<computer> asks for a shared item".
-
-### 11.4 Wire format (port 7777, after `secret-hello-v1`)
-
-```
-computer -> phone  vault-request-v1@sudostamp
-                     string query  item name: strict UTF-8, 1..128 bytes, no control characters
-                     string why    context line, as secret-request-v1
-                     string pkR    HPKE recipient key, 65-byte uncompressed P-256, fresh per request
-                     string sigH   ECDSA(H, T), T = tag-vault || K || Np || query || why || pkR
-phone   -> computer SUCCESS string enc  string ct  string sigK
-                                       sigK = ECDSA(K, tag-vault-ans || T || enc || ct)
-                  | FAILURE  one answer for every refusal
-```
-
-HPKE suite, `info = "sudostamp-vault-v1\0" || SHA-256(T)` and the checks on the computer are the
-same as `secret-request-v1` (secrets.md 6.3). The tags are new, so an `input` answer can never be
-replayed as a vault answer or the other way round.
-
-### 11.5 Computer side
-
-```
-sudostamp secret <item> --why <text> [--to-tty]
-sudostamp secret <item> --why <text> --out <path>
-```
-
-- Default: prints the value to stdout, raw, no newline, under the same stdout rules as `input`
-  (pipe or socket only; a terminal only with `--to-tty`).
-- `--out <path>`: creates the file with `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, and refuses if it
-  exists. It is for handing the value to another program without it passing through an agent's
-  context, for example `sudostamp secret "<bot token>" --why ... | <host command that installs it>`
-  or a file a root step then moves. The file is on disk: the caller deletes it.
-- No pct or ssh mode in the CLI. Moving the value onward is the caller's pipe; one way to leave
-  a computer keeps one thing to review.
-- Exit codes as `grant`: 0, 77 for every refusal, 75 unreachable or phone too old, 69 not paired
-  v3, 64 usage, 74 reader gone.
-
-### 11.6 Threat model
-
-The main threat is a **prompt-injected agent** on a paired computer asking for items.
-- It can ask only for items already in the Agents collection, by exact name. It cannot reach a
-  personal item, any other collection, or a denylisted site. It cannot choose the field (password
-  or note only) or the destination (the answer is sealed to the key in its own signed request).
-- Every ask is shown: the computer's name, the real item name and URIs from the server, and the
-  computer's `why`, marked as untrusted text. The owner gives two fingerprints per send.
-- A storm of asks hits the Limiter (6 an hour, 10-minute cooldown per query) and turns the
-  computer's toggle off after three denials or timeouts in 24 hours.
-- **What it does not stop:** once the owner approves, the value is on that computer. An agent that
-  is already compromised there can read it from the pipe or the file. `--out` and piping keep the
-  value out of the model's context in normal use; they do not defend against code on that computer
-  acting as the agent. The walls are the collection scope, the denylist and the phone screen.
-
-A relay or LAN party sees only ciphertext. It cannot change the query or why (sigH), swap pkR
-(inside T), or forge an answer (sigK).
-
-A compromised SudoStamp app: as section 6.4. Direct send adds no new key; it uses the same session.
-
-### 11.7 Rejected
-
-- **Any vault item, not only the collection.** One injected ask plus one tired tap would send a
-  personal password. The two-step grant then send puts the owner's per-item decision in front.
-- **Sign the agent account in on the computer** (a `bw` session on the agent host). A standing
-  credential that reads every shared item silently, with no screen and no record on the phone.
-- **One fingerprint per send.** Showing the real item name needs the session key; holding it across
-  the owner's choice would need a time-based key, which section 6 rejects.
-- **Direct pct or ssh delivery from the CLI.** A second transport to review; a pipe does the same.
