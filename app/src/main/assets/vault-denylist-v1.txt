@@ -1,0 +1,241 @@
+# SudoStamp vault-grant denylist, version 1 (docs/design/vault-grant.md section 5).
+#
+# Hosts no grant may touch. Built in, and the owner cannot remove these rules; the owner can only
+# add hosts on the phone. The login service imports this same file and the vectors in
+# app/src/test/resources/vault/denylist-vectors.txt, and asserts the two sides agree.
+#
+# Syntax: one rule per line, exactly `kind:value`, LF line endings, no spaces, no inline comments.
+#   host:x      x and every subdomain of x (h == x, or h ends with "." + x)
+#   suffix:x    the same, but x may be a single label (a zone such as gov)
+#   label:x     any label of the host equal to x
+#   contains:x  any label of the host containing x
+# Values are lowercase LDH. A malformed line fails the whole file (Denylist.parseRules).
+#
+# Too broad is the safe direction: a denied host costs the owner a manual share in the Bitwarden
+# app, an allowed one can hand an agent a mailbox or a bank.
+
+# ---- Labels and words
+contains:bank
+contains:vault
+contains:immigration
+contains:uscis
+contains:tax
+# Exact, not contains: "irs" is inside first, shirts, airship.
+label:irs
+label:gov
+label:gouv
+label:gob
+label:govt
+
+# ---- Government and military zones
+suffix:gov
+suffix:mil
+suffix:gov.in
+suffix:nic.in
+suffix:gov.uk
+suffix:gov.scot
+suffix:gov.wales
+suffix:nhs.uk
+suffix:police.uk
+suffix:mod.uk
+suffix:gov.au
+suffix:gc.ca
+suffix:canada.ca
+suffix:govt.nz
+suffix:gov.sg
+suffix:gov.hk
+suffix:gov.cn
+suffix:gov.br
+suffix:gov.za
+suffix:gov.ie
+suffix:gov.il
+suffix:gov.my
+suffix:gov.ph
+suffix:gov.pk
+suffix:gov.bd
+suffix:gov.lk
+suffix:gov.np
+suffix:gov.ng
+suffix:gov.ke
+suffix:gov.tr
+suffix:gov.it
+suffix:gov.pl
+suffix:gov.ua
+suffix:gov.ar
+suffix:gov.co
+suffix:gov.ae
+suffix:gov.sa
+suffix:gov.eg
+suffix:gob.mx
+suffix:gob.es
+suffix:gouv.fr
+suffix:go.jp
+suffix:go.kr
+suffix:go.th
+suffix:go.id
+suffix:gv.at
+suffix:bund.de
+suffix:admin.ch
+suffix:europa.eu
+host:login.gov
+host:id.me
+
+# ---- Email and identity providers
+host:gmail.com
+host:googlemail.com
+host:google.com
+host:outlook.com
+host:hotmail.com
+host:live.com
+host:msn.com
+host:microsoft.com
+host:microsoftonline.com
+host:office.com
+host:icloud.com
+host:me.com
+host:mac.com
+host:apple.com
+host:yahoo.com
+host:aol.com
+host:proton.me
+host:protonmail.com
+host:protonmail.ch
+host:tutanota.com
+host:tuta.com
+host:fastmail.com
+host:zoho.com
+host:gmx.com
+host:gmx.net
+host:mail.com
+host:yandex.com
+host:yandex.ru
+host:hey.com
+host:facebook.com
+host:meta.com
+host:okta.com
+host:oktapreview.com
+host:auth0.com
+host:onelogin.com
+host:duosecurity.com
+host:duo.com
+host:pingidentity.com
+host:authy.com
+host:clearme.com
+
+# ---- Password managers
+host:bitwarden.com
+host:bitwarden.eu
+host:bitwarden.net
+host:1password.com
+host:1password.eu
+host:1password.ca
+host:lastpass.com
+host:dashlane.com
+host:keepersecurity.com
+host:keepersecurity.eu
+host:keeper.io
+host:nordpass.com
+host:roboform.com
+host:enpass.io
+
+# ---- Banks, United States
+host:chase.com
+host:wellsfargo.com
+host:citi.com
+host:capitalone.com
+host:pnc.com
+host:truist.com
+host:ally.com
+host:discover.com
+host:americanexpress.com
+host:amex.com
+host:usaa.com
+host:navyfederal.org
+host:marcus.com
+host:goldmansachs.com
+host:morganstanley.com
+host:synchrony.com
+host:barclaysus.com
+host:sofi.com
+host:chime.com
+
+# ---- Banks, India
+suffix:sbi
+host:sbi.co.in
+host:kotak.com
+host:indusind.com
+host:pnbindia.in
+host:npci.org.in
+
+# ---- Banks, United Kingdom
+host:barclays.co.uk
+host:barclays.com
+host:hsbc.com
+host:hsbc.co.uk
+host:natwest.com
+host:rbs.co.uk
+host:santander.co.uk
+host:santander.com
+host:nationwide.co.uk
+host:halifax.co.uk
+host:tsb.co.uk
+host:monzo.com
+host:firstdirect.com
+host:nsandi.com
+
+# ---- Brokerages and credit bureaus
+host:fidelity.com
+host:schwab.com
+host:vanguard.com
+host:vanguardinvestor.co.uk
+host:etrade.com
+host:merrilledge.com
+host:ml.com
+host:robinhood.com
+host:webull.com
+host:interactivebrokers.com
+host:wealthfront.com
+host:betterment.com
+host:zerodha.com
+host:groww.in
+host:upstox.com
+host:hl.co.uk
+host:ajbell.co.uk
+host:experian.com
+host:equifax.com
+host:transunion.com
+
+# ---- Payments and money transfer
+host:paypal.com
+host:paypal.me
+host:venmo.com
+host:stripe.com
+host:wise.com
+host:transferwise.com
+host:zellepay.com
+host:cash.app
+host:squareup.com
+host:revolut.com
+host:payoneer.com
+host:remitly.com
+host:westernunion.com
+host:klarna.com
+host:affirm.com
+host:afterpay.com
+host:visa.com
+host:mastercard.com
+host:paytm.com
+host:phonepe.com
+host:razorpay.com
+
+# ---- Crypto exchanges and wallets
+host:coinbase.com
+host:kraken.com
+host:binance.com
+host:binance.us
+host:gemini.com
+host:crypto.com
+host:blockchain.com
+host:metamask.io
+host:ledger.com
+host:trezor.io
