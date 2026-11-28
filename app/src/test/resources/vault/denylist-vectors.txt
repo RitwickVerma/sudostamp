@@ -1,0 +1,84 @@
+# Vectors for assets/vault-denylist-v1.txt (built-in rules only, no owner or server hosts).
+# One per line: `allow <host>` or `deny <host>`. Every host here is a valid request host
+# (GrantHost.parse); a host that is not one is always denied and is tested separately.
+# The login service imports this file and must give the same answer for every line.
+
+# Exact hosts and their subdomains
+deny gmail.com
+deny mail.gmail.com
+deny accounts.google.com
+deny login.microsoftonline.com
+deny outlook.com
+deny appleid.apple.com
+deny proton.me
+deny account.proton.me
+deny mycompany.okta.com
+deny tenant.auth0.com
+deny login.gov
+deny www.chase.com
+deny secure.chase.com
+deny paypal.com
+deny www.paypal.com
+deny stripe.com
+deny dashboard.stripe.com
+deny venmo.com
+deny wise.com
+deny robinhood.com
+deny digital.fidelity.com
+deny client.schwab.com
+deny investor.vanguard.com
+deny coinbase.com
+deny vault.bitwarden.com
+deny bitwarden.eu
+deny my.1password.com
+deny lastpass.com
+deny keepersecurity.com
+deny sbi.co.in
+deny onlinesbi.sbi
+deny barclays.co.uk
+deny hsbc.com
+
+# Government and military zones
+deny irs.gov
+deny va.gov
+deny army.mil
+deny incometax.gov.in
+deny uidai.gov.in
+deny example.nic.in
+deny hmrc.gov.uk
+deny service.gov.uk
+deny ato.gov.au
+deny gov.example.com
+
+# Label rules
+deny bankofamerica.com
+deny hdfcbank.com
+deny icicibank.com
+deny usbank.com
+deny xn--bank-example.com
+deny vaultwarden.example.com
+deny myvault.example.org
+deny immigration.example.org
+deny uscis.example.org
+deny irs.example.org
+deny turbotax.com
+deny taxi.example.com
+
+# Allowed: the dot boundary, label rules that are exact, look-alikes that are not the host
+allow example.com
+allow login.example.com
+allow evilexample.com
+allow mygmail.com
+allow gmail.com.example.net
+allow chase.com.example.net
+allow notgov.example.com
+allow governance.example.com
+allow first.example.com
+allow thirsty.example.org
+allow shop.example.co.uk
+allow amazon.co.uk
+allow co.uk
+allow github.com
+allow wikipedia.org
+allow xn--mnchen-3ya.example
+allow a1.b2.example
