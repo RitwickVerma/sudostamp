@@ -139,13 +139,15 @@ object Hpke {
     private fun extract(salt: ByteArray, ikm: ByteArray): ByteArray =
         hmac(if (salt.isEmpty()) ByteArray(NH) else salt, ikm)
 
-    /** HKDF-Expand for len ≤ HashLen: every length this suite asks for is one block. */
-    private fun expand(prk: ByteArray, info: ByteArray, len: Int): ByteArray {
+    /** HKDF-Expand for len ≤ HashLen: every length this suite asks for is one block. Internal, not
+     *  private: vault/VaultCrypto.kt stretches the Bitwarden master key with it rather than with a
+     *  second copy. */
+    internal fun expand(prk: ByteArray, info: ByteArray, len: Int): ByteArray {
         require(len in 1..NH)
         return hmac(prk, info + byteArrayOf(1)).copyOf(len)
     }
 
-    private fun hmac(key: ByteArray, data: ByteArray): ByteArray =
+    internal fun hmac(key: ByteArray, data: ByteArray): ByteArray =
         Mac.getInstance("HmacSHA256").run {
             init(SecretKeySpec(key, "HmacSHA256"))
             doFinal(data)

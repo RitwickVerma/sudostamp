@@ -356,6 +356,14 @@ Verified from source in revision 3 (6.3), to be re-checked live against the owne
   id and at least one collection.
 
 Still to verify in phase 2, live:
+- **the `bw`-CLI vectors of section 7 are still owed.** Phase 1 (`vault/VaultCrypto.kt`) is
+  checked against a second implementation instead: `tools/test/vault_vectors.py` (pyca) wrote the
+  fixture `app/src/test/resources/vault/vectors-v1.json` (fake account), the Kotlin tests decrypt
+  it, and `tools/verify_vault_crypto.py` opens what Kotlin encrypted. Both reproduce Bitwarden's
+  published master-password-hash vector. One manual check, not in CI: `bw` 2026.6.0 against a
+  loopback stub server (not Vaultwarden) computed the fixture's login hash, and decrypted the
+  fixture's item and an item whose key Kotlin re-wrapped for the org. The real vectors come from
+  a throwaway Vaultwarden in phase 2;
 - item-level keys through the share endpoint;
 - the post-write check that the item is in Agents;
 - whether the owner's account is V1, which this client requires.
